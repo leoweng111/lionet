@@ -7,7 +7,8 @@ from typing import Union, List
 from pymongo import UpdateOne
 
 from .mongoconfig import client
-from lwpackage.lwutils import log, PREP_PATH
+from utils.logging import log
+from utils.path import PREP_PATH
 
 
 def update_data(database: str,
@@ -101,7 +102,7 @@ def bulk_write_update_data(database: str,
                 filter_dc[col] = row[col]
             update_row = {"$set": row.to_dict()}
             operation = UpdateOne(filter_dc, update_row, upsert=True)
-        update_operations.append(operation)
+            update_operations.append(operation)
 
         result = client[database][collection].bulk_write(update_operations)
 
@@ -291,8 +292,8 @@ def check_data_exists(database: str,
     return len(client[database][collection].find(mongo_operator)) > 0
 
 
-def get_collection_storage_size(database: str = 'stock',
-                                collection: str = 'price_1min'):
+def get_collection_storage_size(database: str = 'futures',
+                                collection: str = 'continuous_contract_price_daily'):
     """
     Gets the storage size of a collection in a MongoDB database.
 

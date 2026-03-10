@@ -1,39 +1,39 @@
-# lwpackage is a Quantitative **factor-generating and backtesting frame**
+# lionet is a Quantitative **futures factor-generating and backtesting framework**
 
 ## Structure
 
-### 1. lwdaily
+### 1. daily
 
-Files for daily jobs.
+Files for scheduled futures update jobs.
 
-### 2. lwdata
+### 2. data
 
-API for adding, updating or modifying data of stock, futures, etc from database.
+API for querying and updating futures data.
 
-### 3. lwerror
+### 3. error
 
 Error classes.
 
-### 4. lwfactors
+### 4. factors
 
-Containing methods for factor processing, backtesting, factor generating, etc.
+Methods for factor processing, backtesting, and factor generation.
 
-### 5. lwmodels
+### 5. models
 
-Machine learing and deep learing Models for factor generating factors.
+Machine learning models for signal generation.
 
-### 6. lwmongo
+### 6. mongo
 
-Mongo database configuration and operation API.
+MongoDB configuration and operation API.
 
-### 7. lwstats
+### 7. stats
 
 Statistic methods.
 
-### 8. lwtest
+### 8. test
 
-Some basic tests.
+Basic tests.
 
 ### 9. notebook
 
-Some guidance notebooks.
+Guidance notebooks.

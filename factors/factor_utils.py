@@ -1,8 +1,9 @@
 from typing import Union
+import pandas as pd
 from joblib import Parallel, delayed
 from .factor import *
-from lwpackage.lwdata import get_risk_free_rate
-from lwpackage.lwstats import merge_dataframe, iterdict
+from data import get_risk_free_rate
+from stats import merge_dataframe, iterdict
 
 
 def get_factor_value(Data: pd.DataFrame,

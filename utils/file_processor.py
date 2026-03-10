@@ -5,7 +5,7 @@ import shutil
 from pathlib import Path
 from typing import Union, Literal
 
-from lwpackage.lwutils.logging import log
+from utils.logging import log
 
 
 def file_type(file_path: Union[str, Path]):

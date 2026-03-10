@@ -1,0 +1,4 @@
+from data import update_futures_continuous_contract_info
+
+update_futures_continuous_contract_info(method='bulk_write_update')
+

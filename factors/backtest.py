@@ -3,14 +3,15 @@ This script is for the backtesting of signals.
 """
 import matplotlib.pyplot as plt
 from typing import List, Union
+import pandas as pd
 
 from .factor import *
 from .factor_indicators import get_performance
 from .factor_utils import get_factor_value, get_future_ret, cross_sectional_norm, join_fc_name_and_parameter
-from lwpackage.lwdata import get_stock_price, get_futures_continuous_contract_price
-from lwpackage.lwstats import iterdict
-from lwpackage.lwutils.logging import log
-from lwpackage.lwerror.errors import NotBackTestingError
+from data import get_futures_continuous_contract_price
+from stats import iterdict
+from utils.logging import log
+from error.errors import NotBackTestingError
 
 
 class BackTester:
@@ -22,7 +23,7 @@ class BackTester:
                  fc_name_list: Union[str, List],
                  fc_freq: str = '1d',
                  data: Union[pd.DataFrame, None] = None,
-                 instrument_type: str = 'stock',
+                 instrument_type: str = 'futures_continuous_contract',
                  start_time: str = None,
                  end_time: str = None,
                  portfolio_adjust_method: str = '1D',
@@ -97,18 +98,13 @@ class BackTester:
         # if data is provided outside
         if isinstance(self.data, pd.DataFrame):
             # when data is provided, it should have been preprocessed, and we will not preprocess it here.
-            for col in ['time', 'instrument_id', 'ret'] + self.fc_name_list:
+            for col in ['time', 'instrument_id', 'future_ret'] + self.fc_name_list:
                 assert col in self.data.columns
             self.is_preprocessed = True
 
         # otherwise we load data from local database
         else:
-            if self.instrument_type == 'stock':
-                self.data = get_stock_price(frequency=self.fc_freq,
-                                            start_time=self.start_time,
-                                            end_time=self.end_time,
-                                            from_database=True)
-            elif self.instrument_type == 'futures_continuous_contract':
+            if self.instrument_type == 'futures_continuous_contract':
                 self.data = get_futures_continuous_contract_price(start_date=self.start_time,
                                                                   end_date=self.end_time,
                                                                   from_database=True)

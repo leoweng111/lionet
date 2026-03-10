@@ -7,7 +7,7 @@ from typing import Union
 from joblib import delayed, Parallel
 from .factor import *
 from .factor_utils import join_fc_name_and_parameter
-from lwpackage.lwstats import merge_dataframe, iterdict
+from stats import merge_dataframe, iterdict
 
 EPSILON = 1e-6
 
@@ -204,12 +204,11 @@ def get_annualized_ts_ic_and_t_corr(Data: pd.DataFrame,
     ic_ts = pd.concat([ic_ts, rank_ic_ts], axis=1)
     ic_ts.index.name = 'year'
     if portfolio_adjust_method == '1D':
-        ret_fre1 = 1
-
+        ret_freq = 1
     elif portfolio_adjust_method == '1M':
         ret_freq = 30
     else:
-        pass
+        ret_freq = 1
 
     t_corr_year = df.groupby('year')['future_ret'].apply(lambda x: np.sqrt(x.size / ret_freq))
     t_corr_all = pd.Series(len(df) / ret_freq, index=['all'])

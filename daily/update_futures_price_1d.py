@@ -1,0 +1,3 @@
+from data import update_futures_continuous_contract_price
+
+update_futures_continuous_contract_price(method='bulk_write_update')

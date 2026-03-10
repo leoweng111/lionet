@@ -6,10 +6,9 @@ from typing import List, Union
 import pandas as pd
 
 import akshare as ak
-from lwpackage.lwmongo.mongify import get_data, update_data
-
-from lwpackage.lwutils.lwpath import START_DATE_STR, END_DATE_STR
-from lwpackage.lwutils.logging import log
+from mongo.mongify import get_data, update_data
+from utils.path import START_DATE_STR, END_DATE_STR, START_DATE, END_DATE
+from utils.logging import log
 
 
 def get_futures_continuous_contract_info(instrument_id: Union[str, List, None] = None,
@@ -144,3 +143,45 @@ def update_futures_continuous_contract_price(instrument_id: Union[str, List, Non
                 method=method)
 
     log.info(f'Successfully update futures continuous contract daily price.')
+
+
+def get_risk_free_rate(start_year: int = START_DATE.year,
+                       end_year: int = END_DATE.year,
+                       from_database: bool = True):
+    """
+    Use 10-year China National Bond yield as risk-free rate.
+    """
+    if from_database:
+        start_date = pd.to_datetime(str(start_year) + '0101')
+        end_date = pd.to_datetime(str(end_year) + '1231')
+        mongo_operator = {
+            '$and': [
+                {'date': {'$gte': start_date}},
+                {'date': {'$lte': end_date}},
+            ]
+        }
+        df_rfr = get_data(database='futures',
+                          collection='risk_free_rate',
+                          mongo_operator=mongo_operator)
+    else:
+        df_list = []
+        for year in range(start_year, end_year + 1):
+            start_date = f'{year}0101'
+            end_date = f'{year}1231'
+            df = ak.bond_china_yield(start_date, end_date)
+            df = df.loc[df['曲线名称'] == '中债国债收益率曲线'][['曲线名称', '10年', '日期']].copy()
+            df = df.rename(columns={'曲线名称': 'instrument_id', '10年': 'rate', '日期': 'date'})
+            df['date'] = pd.to_datetime(df['date'])
+            df['rate'] /= 100
+            df_list.append(df)
+        df_rfr = pd.concat(df_list) if df_list else pd.DataFrame(columns=['instrument_id', 'rate', 'date'])
+
+    return df_rfr.sort_values(by='date').dropna()
+
+
+def update_risk_free_rate(method: str = 'insert_many'):
+    """
+    Update risk free rate data in futures database.
+    """
+    df_rfr = get_risk_free_rate(from_database=False)
+    update_data(database='futures', collection='risk_free_rate', df=df_rfr, method=method)

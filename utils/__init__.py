@@ -5,8 +5,6 @@ from .general import *
 from .configuration import *
 from .datetime_utils import *
 from .logging import *
-from .lwpath import *
-from .photo_processor import *
+from .path import *
 from .file_processor import *
-
 

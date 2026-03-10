@@ -32,9 +32,9 @@ from sklearn.model_selection import GridSearchCV, RandomizedSearchCV, Predefined
 from sklearn.metrics import make_scorer
 
 from .params import RegressorParamGrid, DefaultParamDict
-from lwpackage.lwfactors import get_factor_value, cross_sectional_norm, get_future_ret, BackTester
-from lwpackage.lwdata import get_stock_price
-from lwpackage.lwutils import generate_date_strings, OUTPUT_PATH, get_attribute_value
+from factors import get_factor_value, cross_sectional_norm, get_future_ret, BackTester
+from data import get_futures_continuous_contract_price
+from utils import generate_date_strings, OUTPUT_PATH, get_attribute_value
 
 warnings.filterwarnings("ignore")
 
@@ -122,7 +122,7 @@ class BaseModel:
         self.search_number = search_number
         self.early_stopping_rounds = early_stopping_rounds
         self.eval_metric = eval_metric
-        self.fc_name_list = None
+        self.fc_name_list = fc_name_list
         self.signal_name = signal_name
         self.fc_freq = fc_freq
         self.start_time = start_time
@@ -148,9 +148,9 @@ class BaseModel:
         if not self.signal_name:
             self.signal_name = self.model_type
         self.split_date_list = None
-        self.data = get_stock_price(frequency=self.fc_freq,
-                                    start_time=self.start_time,
-                                    end_time=self.end_time)
+        self.data = get_futures_continuous_contract_price(start_date=self.start_time,
+                                                          end_date=self.end_time,
+                                                          from_database=True)
         self.data_cols = ['open', 'high', 'low', 'close', 'volume']
 
         self.is_preprocessed = False
@@ -204,7 +204,7 @@ class BaseModel:
         # get factor value
         self.data = get_factor_value(self.data, self.fc_name_list, self.n_jobs)
         # get return as label
-        self.data = get_future_ret(self.data, self.fc_freq, self.transaction_period, self.ret_freq, self.rfr)
+        self.data = get_future_ret(self.data, portfolio_adjust_method='1D', rfr=self.rfr)
 
         self.data = self.data.sort_values(by='time', ascending=True)
         self.data['date'] = self.data['time'].dt.strftime('%Y%m%d')
@@ -236,11 +236,11 @@ class BaseModel:
         assert 'year_month_str' in df.columns
         for split_date in self.split_date_list:
             X_train = df.loc[df['year_month_str'].isin(split_date[0])][self.fc_name_list].reset_index(drop=True)
-            y_train = df.loc[df['year_month_str'].isin(split_date[0])]['ret'].reset_index(drop=True)
+            y_train = df.loc[df['year_month_str'].isin(split_date[0])]['future_ret'].reset_index(drop=True)
             X_validate = df.loc[df['year_month_str'].isin(split_date[1])][self.fc_name_list]
-            y_validate = df.loc[df['year_month_str'].isin(split_date[1])]['ret']
+            y_validate = df.loc[df['year_month_str'].isin(split_date[1])]['future_ret']
             X_test = df.loc[df['year_month_str'].isin(split_date[2])][self.fc_name_list].reset_index(drop=True)
-            y_test = df.loc[df['year_month_str'].isin(split_date[2])]['ret']
+            y_test = df.loc[df['year_month_str'].isin(split_date[2])]['future_ret']
             BaseModel.validate_index = X_validate.index
             BaseModel.test_index = X_test.index
             X_validate.reset_index(drop=True)
@@ -284,7 +284,7 @@ class BaseModel:
             self.model_list.append(model)
             # prediction on test dataset
             y_pred = model.predict(X_test)
-            df_pred_result_list.append(pd.DataFrame(data={self.signal_name: y_pred, 'ret': y_test}, index=y_test.index))
+            df_pred_result_list.append(pd.DataFrame(data={self.signal_name: y_pred, 'future_ret': y_test}, index=y_test.index))
 
         self.predict_result = pd.concat(df_pred_result_list)
         # standardize signal from model values to zscore
@@ -356,7 +356,7 @@ class BaseModel:
 
             self.model_list.append(model)
             y_pred = model.predict(X_test)
-            df_pred_result_list.append(pd.DataFrame(data={self.signal_name: y_pred, 'ret': y_test}, index=y_test.index))
+            df_pred_result_list.append(pd.DataFrame(data={self.signal_name: y_pred, 'future_ret': y_test}, index=y_test.index))
 
         self.predict_result = pd.concat(df_pred_result_list)
         # standardize signal from model values to zscore
@@ -556,7 +556,7 @@ class XGradientBoosting(BaseModel):
             self.model_list.append(model)
 
             y_pred = model.predict(dtest)
-            df_pred_result_list.append(pd.DataFrame(data={'signal': y_pred, 'ret': y_test}, index=y_test.index))
+            df_pred_result_list.append(pd.DataFrame(data={'signal': y_pred, 'future_ret': y_test}, index=y_test.index))
 
         self.predict_result = pd.concat(df_pred_result_list)
 
@@ -618,7 +618,7 @@ class XGradientBoosting(BaseModel):
 
             self.model_list.append(model)
             y_pred = model.predict(dtest)
-            df_pred_result_list.append(pd.DataFrame(data={'signal': y_pred, 'ret': y_test}, index=y_test.index))
+            df_pred_result_list.append(pd.DataFrame(data={'signal': y_pred, 'future_ret': y_test}, index=y_test.index))
 
         self.predict_result = pd.concat(df_pred_result_list)
 
