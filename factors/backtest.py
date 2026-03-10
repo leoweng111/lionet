@@ -5,7 +5,6 @@ import matplotlib.pyplot as plt
 from typing import List, Union
 import pandas as pd
 
-from .factor import *
 from .factor_indicators import get_performance
 from .factor_utils import get_factor_value, get_future_ret, cross_sectional_norm, join_fc_name_and_parameter
 from data import get_futures_continuous_contract_price

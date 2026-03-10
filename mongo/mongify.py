@@ -3,7 +3,7 @@ This script is for some basic operation on MongoDB.
 """
 import os
 import pandas as pd
-from typing import Union, List
+from typing import Union, List, Optional
 from pymongo import UpdateOne
 
 from .mongoconfig import client
@@ -196,7 +196,7 @@ def delete_data(database: str,
                 collection: str,
                 mongo_operator: Union[dict, None] = None):
     """
-    Delete data from datbase. Attention! This can be very dangerous.
+    Delete data from database. Attention! This can be very dangerous.
     """
     if not mongo_operator:
         client[database][collection].delete_many({})
@@ -347,3 +347,114 @@ def drop_duplicated_data(database: str,
 
     print(f'Successfully drop {num_drop} duplicated data of {database} {collection} with unique key {subset}')
     log.info(f'Successfully drop {num_drop} duplicated data of {database} {collection} with unique key {subset}')
+
+
+def list_database_details(databases: Union[None, str, List[str]] = None,
+                          include_system: bool = False,
+                          sort_by_size: bool = True):
+    """
+    List database and collection level details from MongoDB.
+
+    Returns a dict with two DataFrames:
+        - database_summary
+        - collection_summary
+    """
+    system_db_names = {'admin', 'local', 'config'}
+
+    all_db_names = client.list_database_names()
+    if databases is None:
+        target_db_names = all_db_names
+    elif isinstance(databases, str):
+        target_db_names = [databases]
+    else:
+        target_db_names = databases
+
+    if not include_system:
+        target_db_names = [db for db in target_db_names if db not in system_db_names]
+
+    missing_db = [db for db in target_db_names if db not in all_db_names]
+    if missing_db:
+        log.warning(f'These databases do not exist and will be skipped: {missing_db}')
+        target_db_names = [db for db in target_db_names if db in all_db_names]
+
+    db_rows = []
+    coll_rows = []
+    unit_divisor = 1024 * 1024
+
+    for db_name in target_db_names:
+        db = client[db_name]
+
+        try:
+            db_stats = db.command('dbstats')
+            db_rows.append({
+                'database': db_name,
+                'collections': db_stats.get('collections', 0),
+                'objects': db_stats.get('objects', 0),
+                'data_size_mb': db_stats.get('dataSize', 0) / unit_divisor,
+                'storage_size_mb': db_stats.get('storageSize', 0) / unit_divisor,
+                'index_size_mb': db_stats.get('indexSize', 0) / unit_divisor,
+                'avg_obj_size_bytes': db_stats.get('avgObjSize', 0),
+            })
+        except Exception as e:
+            log.warning(f'Failed to get dbstats for {db_name}: {e}')
+            db_rows.append({
+                'database': db_name,
+                'collections': None,
+                'objects': None,
+                'data_size_mb': None,
+                'storage_size_mb': None,
+                'index_size_mb': None,
+                'avg_obj_size_bytes': None,
+            })
+
+        for coll_name in db.list_collection_names():
+            if not include_system and coll_name.startswith('system.'):
+                continue
+
+            try:
+                coll_stats = db.command('collstats', coll_name)
+                coll_rows.append({
+                    'database': db_name,
+                    'collection': coll_name,
+                    'count': coll_stats.get('count', 0),
+                    'size_mb': coll_stats.get('size', 0) / unit_divisor,
+                    'storage_size_mb': coll_stats.get('storageSize', 0) / unit_divisor,
+                    'avg_obj_size_bytes': coll_stats.get('avgObjSize', 0),
+                    'nindexes': coll_stats.get('nindexes', 0),
+                    'total_index_size_mb': coll_stats.get('totalIndexSize', 0) / unit_divisor,
+                    'capped': coll_stats.get('capped', False),
+                })
+            except Exception as e:
+                log.warning(f'Failed to get collstats for {db_name}.{coll_name}: {e}')
+                coll_rows.append({
+                    'database': db_name,
+                    'collection': coll_name,
+                    'count': None,
+                    'size_mb': None,
+                    'storage_size_mb': None,
+                    'avg_obj_size_bytes': None,
+                    'nindexes': None,
+                    'total_index_size_mb': None,
+                    'capped': None,
+                })
+
+    df_db = pd.DataFrame(db_rows)
+    df_coll = pd.DataFrame(coll_rows)
+
+    if sort_by_size and not df_db.empty:
+        df_db = df_db.sort_values(by='storage_size_mb', ascending=False).reset_index(drop=True)
+    if sort_by_size and not df_coll.empty:
+        df_coll = df_coll.sort_values(by='storage_size_mb', ascending=False).reset_index(drop=True)
+
+    print('=' * 100)
+    print('MongoDB Database Summary')
+    print(df_db if not df_db.empty else 'No database found.')
+    print('=' * 100)
+    print('MongoDB Collection Summary')
+    print(df_coll if not df_coll.empty else 'No collection found.')
+    print('=' * 100)
+
+    return {
+        'database_summary': df_db,
+        'collection_summary': df_coll,
+    }
