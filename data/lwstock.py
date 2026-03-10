@@ -211,7 +211,7 @@ def update_stock_price(frequency: Union[str, List] = None,
     :param instrument_id: instrument id
     :param update_existing_instrument_id: if update, we update existing data; otherwise we only add non-existing data.
     :param wait_time: wait time between query from akshare
-    :param method: Method for updating data. View details on lwpackage.lwmongo.mongify.update_data.
+    :param method: Method for updating data. View details on lwpackage.mongo.mongify.update_data.
     :return: None
     """
     if frequency:
@@ -274,7 +274,7 @@ def _update_stock_price_for_one_instrument(frequency: str,
         then all three price databases will be updated.
     :param instrument_id: instrument_id
     :param wait_time: wait time between query from akshare
-    :param method: Method for updating data. View details on lwpackage.lwmongo.mongify.update_data.
+    :param method: Method for updating data. View details on lwpackage.mongo.mongify.update_data.
     :return:
     """
     update_start_time = time.perf_counter()

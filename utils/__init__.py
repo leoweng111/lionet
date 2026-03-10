@@ -1,4 +1,4 @@
-# import everything from lwutils so that we can use 'from lwutils import xxx' from outer to
+# import everything from utils so that we can use 'from utils import xxx' from outer to
 # directly import funcs.
 
 from .general import *
