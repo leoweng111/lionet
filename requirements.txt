@@ -1,0 +1,14 @@
+lwpackage~=1.0.0
+setuptools~=67.8.0
+pandas~=2.0.3
+akshare~=1.11.58
+backtrader~=1.9.78.123
+pymongo~=4.6.0
+numpy~=1.25.1
+matplotlib~=3.7.2
+joblib~=1.3.2
+lightgbm~=4.1.0
+torch~=2.1.1
+xgboost~=2.0.3
+sklearn~=0.0.post9
+scikit-learn~=1.3.1

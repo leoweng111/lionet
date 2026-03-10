@@ -1,0 +1,36 @@
+# This script contains some important universal paths.
+from pathlib import Path
+import datetime
+
+from .configuration import get_config
+
+PREPROCESS_PHOTO_PATH = Path('/Volumes/Leo Weng/photos/整理前的照片')
+POSTPROCESS_PHOTO_PATH = Path('/Volumes/Leo Weng/photos/整理完成的照片')
+
+# album_folder to album map
+FOLDER_TO_ALBUM_MAP = {'Camera': '相机',
+                       'Screenshots': '截屏',
+                       'bing': 'bing',
+                       'CoolMarket': '酷安',
+                       'bili': 'bilibili',
+                       'WeiXin': '微信',
+                       '知乎': '知乎',
+                       '小红书': '小红书',
+                       'news_article': '今日头条',
+                       'others': 'others'}
+
+OUTPUT_PATH = Path('/Users/wenglongao/output')
+PREP_PATH = Path('/Users/wenglongao/prep')
+
+# MongoDB
+USER_NAME = 'leo'
+MONGODB_PASSWORD = get_config('password', 'mongodb_password')
+
+# time
+START_TIME = datetime.datetime(2001, 1, 1, 9, 30)
+START_DATE = datetime.date(2001, 1, 1)
+START_DATE_STR = '20010101'
+
+END_DATE = datetime.date.today()
+END_TIME = datetime.datetime.now()
+END_DATE_STR = datetime.date.today().strftime('%Y%m%d')
