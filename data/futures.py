@@ -120,12 +120,16 @@ def get_futures_continuous_contract_price(instrument_id: Union[str, List, None] 
 
 
 def update_futures_continuous_contract_price(instrument_id: Union[str, List, None] = None,
+                                             start_date: str = None,
+                                             end_date: str = None,
                                              wait_time: float = 0.3,
                                              method: str = 'insert_many'):
     """
     Update futures continuous contract daily price in database.
 
     :param instrument_id: the instrument ids need to be updated
+    :param start_date: start_date
+    :param end_date: end_date
     :param wait_time: wait time between query from akshare
     :param method: updating method
     :return: None
@@ -135,6 +139,8 @@ def update_futures_continuous_contract_price(instrument_id: Union[str, List, Non
         instrument_id = get_futures_continuous_contract_info()['instrument_id'].tolist()
 
     df_futures_price = get_futures_continuous_contract_price(instrument_id=instrument_id,
+                                                             start_date=start_date,
+                                                             end_date=end_date,
                                                              from_database=False,
                                                              wait_time=wait_time)
     update_data(database='futures',
