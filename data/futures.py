@@ -58,7 +58,8 @@ def update_futures_continuous_contract_info(instrument_id: Union[str, List, None
     update_data(database='futures',
                 collection='continuous_contract_info',
                 df=df_futures_info,
-                method=method)
+                method=method,
+                filter_column=['instrument_id'])
 
     log.info(f'Successfully update futures continuous contract info.')
 

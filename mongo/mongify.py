@@ -17,7 +17,7 @@ def update_data(database: str,
                 method: str = 'insert_many',
                 filter_column: Union[str, list] = None):
     """
-    General method for updaating data.
+    General method for updating data.
     Attention: update_many method is not used because it can not update multiple records with different filters once.
 
     :param database: database
@@ -67,8 +67,8 @@ def bulk_write_update_data(database: str,
                            df: pd.DataFrame,
                            filter_column: Union[str, list]):
     """
-    Update stock price data from the given df using UpdateOne and bulk_wtite.
-        1. If data from df already exists in collecion, overwrite the old data with the data from df.
+    Update stock price data from the given df using UpdateOne and bulk_write.
+        1. If data from df already exists in collection, overwrite the old data with the data from df.
         2. If data from df does not exist in collection, insert new data from df into the collection.
 
     :param database: database
@@ -87,12 +87,12 @@ def bulk_write_update_data(database: str,
     upserted_ids：一个字典，将操作索引映射到插入的文档的 _id。用于更新操作中的 upsert 操作。
     """
     assert all(df.notna().all())
-    assert not any(df.duplicated())
-    for col in ['time', 'instrument_id', 'open', 'high', 'low', 'close', 'volume']:
-        assert col in df.columns
-    df = df[['time', 'instrument_id', 'open', 'high', 'low', 'close', 'volume']].copy()
     if isinstance(filter_column, str):
         filter_column = [filter_column]
+    for col in filter_column:
+        assert col in df.columns, f'df does not contain column {col}, df columns: {df.columns}.'
+    # Ensure each upsert key is unique within this batch to avoid repeated writes for same record.
+    assert not any(df.duplicated(subset=filter_column))
 
     try:
         update_operations = []
