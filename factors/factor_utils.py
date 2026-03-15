@@ -114,8 +114,9 @@ def get_future_ret(Data: pd.DataFrame,
     # 所以，我们要保证T0的因子值是利用了直到T-1的信息计算出来的，不能用到T的信息
     # 那么在每个bar
     if portfolio_adjust_method == '1D':
+        # open to open ret. For day T, using (T+2 open - T+1 open) / T+1 open
         df = df.sort_values(by='time')
-        df['future_ret'] = df.groupby('instrument_id')['close'].transform(lambda x: x.pct_change())
+        df['future_ret'] = df.groupby('instrument_id')['open'].transform(lambda x: x.pct_change().shift(-1))
 
     # df['transaction_price'] = df['close'].pct_change()
     # # transaction price of one bar is the average transaction price for a transaction that is completed at
