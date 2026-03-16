@@ -26,7 +26,9 @@ def get_annualized_ts_ic_and_t_corr(Data: pd.DataFrame,
         assert col in Data.columns, f'df does not contain columns {col}.'
 
     df = Data.copy()
-    df = df.sort_values(by='instrument_id')
+    if df['instrument_id'].nunique() != 1:
+        raise ValueError('Time-series IC must be calculated on one instrument at a time.')
+    df = df.sort_values(by='time')
     df['year'] = pd.to_datetime(df['time']).dt.year
 
     ic_ts_year = df.groupby('year')[fc_col].corr(df['future_ret'], method='pearson')
@@ -66,19 +68,16 @@ def get_ts_ret_and_turnover(Data: pd.DataFrame,
         assert col in Data.columns, f'Data does not contain column {col}.'
 
     df = Data.copy()
-    # if one of value in fc_col + ['future_ret'] is nan, we will not consider this line of data
-    df = df.dropna(subset=fc_col + ['future_ret'])
-    df = df.set_index(['time', 'instrument_id'])
-    df_gross_ret_ts = pd.DataFrame(df[fc_col].values * df[['future_ret']].values,
-                                   index=df.index,
-                                   columns=fc_col)
-    df_gross_ret_ts = df_gross_ret_ts.groupby('time').mean()
-    # Turnover is defined on signal changes over time for each instrument, then averaged by timestamp.
-    df_turnover_ts = df.unstack(level=1).diff().abs().fillna(0).mean(axis=1).to_frame()
-    df_turnover_ts.columns = fc_col
-    df_net_ret_ts = pd.DataFrame(df_gross_ret_ts.values - (df_turnover_ts * fee).values,
-                                 index=df_gross_ret_ts.index,
-                                 columns=fc_col)
+    if df['instrument_id'].nunique() != 1:
+        raise ValueError('Time-series return/turnover must be calculated on one instrument at a time.')
+
+    # If one of fc_col + ['future_ret'] is nan, this timestamp is excluded for that instrument.
+    df = df.dropna(subset=fc_col + ['future_ret']).sort_values(by='time').set_index('time')
+
+    # For a single instrument, TS gross return is signal_t * future_ret_t.
+    df_gross_ret_ts = df[fc_col].mul(df['future_ret'], axis=0)
+    df_turnover_ts = df[fc_col].diff().abs().fillna(0)
+    df_net_ret_ts = df_gross_ret_ts - df_turnover_ts * fee
     # These three dataframe should not contain any nan values.
     return df_gross_ret_ts, df_net_ret_ts, df_turnover_ts
 
@@ -297,9 +296,8 @@ def get_annualized_ts_instrument_count(Data: pd.DataFrame):
     df = Data.copy()
     df['year'] = pd.to_datetime(df['time']).dt.year
 
-    count_year = df.groupby('year').size().to_frame('count')
-    count_all = int(df.groupby('year').size().mean().round())
-    count_all = pd.Series(count_all, index=['all']).to_frame('count').T
+    count_year = df.groupby('year')['instrument_id'].nunique().to_frame('count')
+    count_all = pd.Series(df['instrument_id'].nunique(), index=['all']).to_frame('count').T
 
     instrument_count = pd.concat([count_year, count_all])
     instrument_count.index.name = 'year'
@@ -320,6 +318,8 @@ def get_performance(Data: pd.DataFrame,
     for col in ['time', 'instrument_id', 'future_ret'] + fc_name_list:
         assert col in Data.columns, f'Data does not contain column {col}.'
     df = Data.copy()
+    if df['instrument_id'].nunique() != 1:
+        raise ValueError('get_performance expects Data of one instrument only.')
     f = lambda x: get_performance_for_one_factor(df, x, fc_freq, portfolio_adjust_method, interest_method, fee)
 
     with Parallel(n_jobs=n_jobs) as parallel:

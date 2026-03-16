@@ -4,6 +4,7 @@ This script is for the backtesting of signals.
 import matplotlib.pyplot as plt
 from typing import List, Union
 import pandas as pd
+from joblib import Parallel, delayed
 
 from .factor_indicators import get_performance
 from .factor_utils import get_factor_value, get_future_ret, join_fc_name_and_parameter
@@ -20,6 +21,7 @@ class BackTester:
 
     def __init__(self,
                  fc_name_list: Union[str, List],
+                 instrument_id_list: Union[str, List] = 'C0',
                  fc_freq: str = '1d',
                  data: Union[pd.DataFrame, None] = None,
                  instrument_type: str = 'futures_continuous_contract',
@@ -61,6 +63,7 @@ class BackTester:
         self.data = data
         self.instrument_type = instrument_type
         self.fc_name_list = fc_name_list
+        self.instrument_id_list = instrument_id_list
         self.start_time = start_time
         self.end_time = end_time
         self.portfolio_adjust_method = portfolio_adjust_method
@@ -85,6 +88,8 @@ class BackTester:
                                                           'than factor frequency'
         if isinstance(self.fc_name_list, str):
             self.fc_name_list = [self.fc_name_list]
+        if isinstance(self.instrument_id_list, str):
+            self.instrument_id_list = [self.instrument_id_list]
 
         # if data is provided outside
         if isinstance(self.data, pd.DataFrame):
@@ -96,13 +101,26 @@ class BackTester:
         # otherwise we load data from local database
         else:
             if self.instrument_type == 'futures_continuous_contract':
-                self.data = get_futures_continuous_contract_price(start_date=self.start_time,
+                self.data = get_futures_continuous_contract_price(instrument_id=self.instrument_id_list,
+                                                                  start_date=self.start_time,
                                                                   end_date=self.end_time,
                                                                   from_database=True)
             else:
                 raise ValueError(f'Does not support instrument type {self.instrument_type}.')
 
             self.is_preprocessed = False
+
+        available_instruments = self.data['instrument_id'].dropna().unique().tolist()
+        invalid_instruments = [x for x in self.instrument_id_list if x not in available_instruments]
+        if invalid_instruments:
+            raise ValueError(
+                f'Invalid instrument_id_list: {invalid_instruments}. '
+                f'Available instruments include: {available_instruments}'
+            )
+
+        # For external input data, still apply selection to keep behavior consistent with DB path.
+        if self.is_preprocessed:
+            self.data = self.data[self.data['instrument_id'].isin(self.instrument_id_list)].copy()
 
         self.fc_name_with_param_list = []
         if isinstance(self.data, pd.DataFrame) and self.is_preprocessed:
@@ -129,7 +147,9 @@ class BackTester:
 
         # For single-instrument TS strategy we keep raw factor values.
 
-    def plot_nav(self, fc_name: Union[str, list, None] = None):
+    def plot_nav(self,
+                 fc_name: Union[str, list, None] = None,
+                 instrument_id_list: Union[str, list, None] = None):
         """
         Plot the cumulative return(i.e. nav) graph for factor.
         e.g. bt.plot_nav()
@@ -141,26 +161,31 @@ class BackTester:
             raise NotBackTestingError('Need to backtest first before plotting nav.')
         if fc_name is None:
             fc_name = self.fc_name_with_param_list
+        if instrument_id_list is None:
+            instrument_id_list = self.instrument_id_list
         if isinstance(fc_name, str):
             fc_name = [fc_name]
+        if isinstance(instrument_id_list, str):
+            instrument_id_list = [instrument_id_list]
 
-        for fac in fc_name:
-            fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 16))
-            # gross ret
-            gross_ret = self.performance_dc[fac]['daily_gross_ret'].copy()
-            gross_ret = gross_ret.set_index('time')
-            cum_gross_ret = (1 + gross_ret['ret']).cumprod()
-            ax1.plot(cum_gross_ret.index, cum_gross_ret)
-            ax1.set_title(f'Cumulative Gross Return of factor {fac}')
-            ax1.set_xlabel('time')
+        for instrument_id in instrument_id_list:
+            for fac in fc_name:
+                fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 16))
+                # gross ret
+                gross_ret = self.performance_dc[instrument_id][fac]['daily_gross_ret'].copy()
+                gross_ret = gross_ret.set_index('time')
+                cum_gross_ret = (1 + gross_ret['ret']).cumprod()
+                ax1.plot(cum_gross_ret.index, cum_gross_ret)
+                ax1.set_title(f'Cumulative Gross Return of factor {fac} ({instrument_id})')
+                ax1.set_xlabel('time')
 
-            # net ret
-            net_ret = self.performance_dc[fac]['daily_net_ret'].copy()
-            net_ret = net_ret.set_index('time')
-            cum_net_ret = (1 + net_ret['ret']).cumprod()
-            ax2.plot(cum_net_ret.index, cum_net_ret)
-            ax2.set_title(f'Cumulative Net Return of factor {fac}')
-            ax2.set_xlabel('time')
+                # net ret
+                net_ret = self.performance_dc[instrument_id][fac]['daily_net_ret'].copy()
+                net_ret = net_ret.set_index('time')
+                cum_net_ret = (1 + net_ret['ret']).cumprod()
+                ax2.plot(cum_net_ret.index, cum_net_ret)
+                ax2.set_title(f'Cumulative Net Return of factor {fac} ({instrument_id})')
+                ax2.set_xlabel('time')
 
     def backtest(self):
         """
@@ -175,16 +200,44 @@ class BackTester:
         if not self.is_preprocessed:
             self._preprocess_data()
 
-        self.performance_dc, self.performance_summary, \
-            self.ts_performance_dc, self.ts_performance_summary = get_performance(self.data,
-                                                                                  self.fc_name_with_param_list,
-                                                                                  self.fc_freq,
-                                                                                  self.portfolio_adjust_method,
-                                                                                  self.interest_method,
-                                                                                  self.fee,
-                                                                                  self.n_jobs)
+        def _run_one_instrument(instrument_id: str):
+            df_one = self.data[self.data['instrument_id'] == instrument_id].copy()
+            result = get_performance(df_one,
+                                     self.fc_name_with_param_list,
+                                     self.fc_freq,
+                                     self.portfolio_adjust_method,
+                                     self.interest_method,
+                                     self.fee,
+                                     n_jobs=1)
+            return instrument_id, result
+
+        parallel_jobs = min(self.n_jobs, len(self.instrument_id_list))
+        with Parallel(n_jobs=parallel_jobs) as parallel:
+            result_list = parallel(delayed(_run_one_instrument)(instrument_id)
+                                   for instrument_id in self.instrument_id_list)
+
+        self.performance_dc = {}
+        self.ts_performance_dc = {}
+        performance_summary_list = []
+        ts_performance_summary_list = []
+
+        for instrument_id, result in result_list:
+            performance_dc_i, performance_summary_i, ts_performance_dc_i, ts_performance_summary_i = result
+            self.performance_dc[instrument_id] = performance_dc_i
+            self.ts_performance_dc[instrument_id] = ts_performance_dc_i
+
+            performance_summary_i = performance_summary_i.copy()
+            performance_summary_i['Instrument ID'] = instrument_id
+            performance_summary_list.append(performance_summary_i)
+
+            ts_performance_summary_i = ts_performance_summary_i.copy()
+            ts_performance_summary_i['Instrument ID'] = instrument_id
+            ts_performance_summary_list.append(ts_performance_summary_i)
+
+        self.performance_summary = pd.concat(performance_summary_list)
+        self.ts_performance_summary = pd.concat(ts_performance_summary_list)
 
         self.is_backtested = True
         self.is_preprocessed = True
-        log.info(f'Successfully generate backtesting result for all factors '
-                 f'on data with frequency {self.fc_freq}')
+        log.info(f'Successfully generate per-instrument backtesting result for instruments '
+                 f'{self.instrument_id_list} on data with frequency {self.fc_freq}')

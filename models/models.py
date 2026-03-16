@@ -439,7 +439,9 @@ class BaseModel:
             self.best_model_name = self.search_type + '_search_' + datetime.date.today().strftime('%Y%m%d')
 
     def backtest_predict_result(self):
+        instrument_id_list = sorted(self.predict_result['instrument_id'].dropna().unique().tolist())
         bt = BackTester(fc_name_list=[self.signal_name],
+                        instrument_id_list=instrument_id_list,
                         data=self.predict_result,
                         fc_freq=self.fc_freq,
                         interest_method=self.interest_method,
