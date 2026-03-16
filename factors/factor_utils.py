@@ -1,9 +1,23 @@
 from typing import Union
+from collections import Counter
 import pandas as pd
 from joblib import Parallel, delayed
 from .factor import *
+from . import factor as factor_module
 from data import get_risk_free_rate
 from stats import merge_dataframe, iterdict
+
+
+def resolve_factor_class(fc_name: str):
+    """Resolve factor class by name from factors.factor module."""
+    fc_class = getattr(factor_module, fc_name, None)
+    if fc_class is None or not isinstance(fc_class, type):
+        available = sorted(
+            name for name, obj in vars(factor_module).items()
+            if isinstance(obj, type) and hasattr(obj, 'param_range') and hasattr(obj, 'operate')
+        )
+        raise NameError(f'Factor class `{fc_name}` is not defined. Available factors: {available}')
+    return fc_class
 
 
 def get_factor_value(Data: pd.DataFrame,
@@ -19,6 +33,10 @@ def get_factor_value(Data: pd.DataFrame,
     """
     if isinstance(fc_name_list, str):
         fc_name_list = [fc_name_list]
+    fc_name_counter = Counter(fc_name_list)
+    duplicated_fc_names = sorted([x for x, cnt in fc_name_counter.items() if cnt > 1])
+    if duplicated_fc_names:
+        raise ValueError(f'fc_name_list contains duplicated factor names: {duplicated_fc_names}')
     for col in ['time', 'instrument_id']:
         assert col in Data.columns, f'Data does not contain column {col}.'
     df = Data.copy()
@@ -26,12 +44,11 @@ def get_factor_value(Data: pd.DataFrame,
     df = df.sort_values(by='time', ascending=True)
     df = df.set_index(['time', 'instrument_id'])
 
-    fc_class_list = [eval(fc_name) for fc_name in fc_name_list]
+    fc_class_list = [resolve_factor_class(fc_name) for fc_name in fc_name_list]
     f = lambda x: get_factor_value_for_one_factor(df, x)
 
     with Parallel(n_jobs=n_jobs) as parallel:
         mapper_list = parallel(delayed(f)(fc_class) for fc_class in fc_class_list)
-
     df = merge_dataframe([df] + mapper_list, on=['time', 'instrument_id'])
     df = df.reset_index()
 

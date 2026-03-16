@@ -2,12 +2,13 @@
 This script is for the backtesting of signals.
 """
 import matplotlib.pyplot as plt
+from collections import Counter
 from typing import List, Union
 import pandas as pd
 from joblib import Parallel, delayed
 
 from .factor_indicators import get_performance
-from .factor_utils import get_factor_value, get_future_ret, join_fc_name_and_parameter
+from .factor_utils import get_factor_value, get_future_ret, join_fc_name_and_parameter, resolve_factor_class
 from data import get_futures_continuous_contract_price
 from stats import iterdict
 from utils.logging import log
@@ -21,10 +22,10 @@ class BackTester:
 
     def __init__(self,
                  fc_name_list: Union[str, List],
+                 instrument_type: str = 'futures_continuous_contract',
                  instrument_id_list: Union[str, List] = 'C0',
                  fc_freq: str = '1d',
                  data: Union[pd.DataFrame, None] = None,
-                 instrument_type: str = 'futures_continuous_contract',
                  start_time: str = None,
                  end_time: str = None,
                  portfolio_adjust_method: str = '1D',
@@ -75,6 +76,7 @@ class BackTester:
         self.performance_summary = None
         self.ts_performance_summary = None
         self.is_backtested = False
+        self.is_preprocessed = False
 
         assert self.fc_freq in ['1m', '5m', '1d'], f'Only support 1m, 5m or 1d fc_freq, but got {fc_freq} instead.'
         assert self.portfolio_adjust_method in ['min', '1D', '1M', '1Q'], \
@@ -84,6 +86,10 @@ class BackTester:
                                                           'than factor frequency'
         if isinstance(self.fc_name_list, str):
             self.fc_name_list = [self.fc_name_list]
+        fc_name_counter = Counter(self.fc_name_list)
+        duplicated_fc_names = sorted([x for x, cnt in fc_name_counter.items() if cnt > 1])
+        if duplicated_fc_names:
+            raise ValueError(f'fc_name_list contains duplicated factor names: {duplicated_fc_names}')
         if isinstance(self.instrument_id_list, str):
             self.instrument_id_list = [self.instrument_id_list]
 
@@ -103,8 +109,6 @@ class BackTester:
             else:
                 raise ValueError(f'Does not support instrument type {self.instrument_type}.')
 
-            self.is_preprocessed = False
-
         available_instruments = self.data['instrument_id'].dropna().unique().tolist()
         invalid_instruments = [x for x in self.instrument_id_list if x not in available_instruments]
         if invalid_instruments:
@@ -119,7 +123,7 @@ class BackTester:
 
         self.fc_name_with_param_list = []
         for fc_name in self.fc_name_list:
-            parameters = eval(fc_name).param_range
+            parameters = resolve_factor_class(fc_name).param_range
             self.fc_name_with_param_list += \
                 [join_fc_name_and_parameter(fc_name, parameter) for parameter in iterdict(parameters)]
 
@@ -161,11 +165,11 @@ class BackTester:
 
         for instrument_id in instrument_id_list:
             for fac in fc_name:
-                fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 16))
+                fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 4))
                 # gross ret
                 gross_ret = self.performance_dc[instrument_id][fac]['daily_gross_ret'].copy()
                 gross_ret = gross_ret.set_index('time')
-                cum_gross_ret = (1 + gross_ret['ret']).cumprod()
+                cum_gross_ret = (1 + gross_ret[fac]).cumprod()
                 ax1.plot(cum_gross_ret.index, cum_gross_ret)
                 ax1.set_title(f'Cumulative Gross Return of factor {fac} ({instrument_id})')
                 ax1.set_xlabel('time')
@@ -173,7 +177,7 @@ class BackTester:
                 # net ret
                 net_ret = self.performance_dc[instrument_id][fac]['daily_net_ret'].copy()
                 net_ret = net_ret.set_index('time')
-                cum_net_ret = (1 + net_ret['ret']).cumprod()
+                cum_net_ret = (1 + net_ret[fac]).cumprod()
                 ax2.plot(cum_net_ret.index, cum_net_ret)
                 ax2.set_title(f'Cumulative Net Return of factor {fac} ({instrument_id})')
                 ax2.set_xlabel('time')

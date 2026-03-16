@@ -41,7 +41,7 @@ class fac_upperline:
 
 
 class fac_winrate:
-    param_range = {'a': [10, 30]}
+    param_range = {'a': [10, 20, 30]}
 
     @staticmethod
     def operate(Data: pd.DataFrame, **kwargs):
