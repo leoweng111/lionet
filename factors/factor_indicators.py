@@ -71,7 +71,6 @@ def get_ts_ret_and_turnover(Data: pd.DataFrame,
                             fc_col: Union[str, list]):
     # time series gross ret and net ret
     # time series way of calculating ret and turnover is simpler
-    # todo: 最后的performance中加入这个时序指标
     if isinstance(fc_col, str):
         fc_col = [fc_col]
     for col in ['time', 'instrument_id', 'future_ret'] + fc_col:
@@ -82,7 +81,6 @@ def get_ts_ret_and_turnover(Data: pd.DataFrame,
         raise ValueError('Time-series return/turnover must be calculated on one instrument at a time.')
     fee = _get_fee_for_instrument(df)
 
-    # If one of fc_col + ['future_ret'] is nan, this timestamp is excluded for that instrument.
     # if the factor value or label is missing, keep the position of previous day
     df[fc_col] = df[fc_col].ffill().fillna(0)
     df['future_ret'] = df['future_ret'].fillna(0)
@@ -105,7 +103,7 @@ def get_ts_ret_and_turnover(Data: pd.DataFrame,
 
 def get_annualized_ret(Data: pd.DataFrame,
                        ret_col: Union[str, list],
-                       interest_method: str = 'simple'):
+                       interest_method: str = 'compound'):
     """
     Get annualized return for every year in data and total annualized return.
 
@@ -126,6 +124,7 @@ def get_annualized_ret(Data: pd.DataFrame,
     if interest_method == 'simple':
         ret_year = df.groupby('year')[ret_col].mean() * 252
         ret_all = (df[ret_col].mean() * 252).to_frame('all').T
+    # 复利的做法更加常见，代表着每日将收益或亏损计入总资金量，之后的调仓根据总资金量和因子值变动。
     elif interest_method == 'compound':
         df = df.set_index('time')
         df_cumret = (1 + df[ret_col]).cumprod().reset_index()

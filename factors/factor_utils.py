@@ -61,7 +61,7 @@ def join_fc_name_and_parameter(fc_name, parameter):
 
 def get_future_ret(Data: pd.DataFrame,
                    portfolio_adjust_method: Union[str, None] = None,
-                   rfr: bool = True):
+                   rfr: bool = False) -> pd.DataFrame:
     """
     Calculate return based on average transaction price. The future ret must match the position-adjust period.
 

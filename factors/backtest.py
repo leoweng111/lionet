@@ -28,8 +28,8 @@ class BackTester:
                  start_time: str = None,
                  end_time: str = None,
                  portfolio_adjust_method: str = '1D',
-                 interest_method: str = 'simple',
-                 risk_free_rate: bool = True,
+                 interest_method: str = 'compound',
+                 risk_free_rate: bool = False,
                  n_jobs: int = 5):
         # todo: 数据频率，调仓频率和收益率计算频率三者相关
         # 对数据频率1min，调仓频率为1day情况，计算IC需要先将一分钟的数据聚合成一天的，然后计算日频收益率，再计算日频因子值和日频收益率
