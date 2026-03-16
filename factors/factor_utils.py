@@ -59,27 +59,6 @@ def join_fc_name_and_parameter(fc_name, parameter):
     return fc_name + '_' + '_'.join([str(value) for _, value in parameter.items()])
 
 
-def cross_sectional_norm(Data: pd.DataFrame,
-                         fc_name_list: Union[str, list]):
-    """
-    Standardize the factor value on every time cross-section.
-
-    :param Data:
-    :param fc_name_list: the factor value column, every factor value column is named after its name
-    :return:
-    """
-    df = Data.copy()
-
-    # todo: robust standardize
-    # for the nan values, Series.mean() equals Series.mean(skipna=True), this will ignore the Nan values and calculate
-    # the mean of the rest, this is the same for Series.std()
-    for fc_name in fc_name_list:
-        df[fc_name] = \
-            df.groupby('time')[fc_name].transform(lambda x: (x - x.mean()) / x.std())
-
-    return df
-
-
 def get_future_ret(Data: pd.DataFrame,
                    portfolio_adjust_method: Union[str, None] = None,
                    rfr: bool = True):

@@ -32,7 +32,7 @@ from sklearn.model_selection import GridSearchCV, RandomizedSearchCV, Predefined
 from sklearn.metrics import make_scorer
 
 from .params import RegressorParamGrid, DefaultParamDict
-from factors import get_factor_value, cross_sectional_norm, get_future_ret, BackTester
+from factors import get_factor_value, get_future_ret, BackTester
 from data import get_futures_continuous_contract_price
 from utils import generate_date_strings, OUTPUT_PATH, get_attribute_value
 
@@ -83,8 +83,6 @@ class BaseModel:
                  rolling_range: int = 6,
                  save: bool = False,
                  backtest: bool = False,
-                 portfolio_number: int = 10,
-                 portfolio_method: str = 'longshort',
                  interest_method: str = 'simple',
                  fee: float = 0.00025,
                  n_jobs: int = 5):
@@ -137,8 +135,6 @@ class BaseModel:
         self.all_range = train_range + validate_range + test_range
         self.save = save
         self.backtest = backtest
-        self.portfolio_number = portfolio_number
-        self.portfolio_method = portfolio_method
         self.interest_method = interest_method
         self.fee = fee
         self.n_jobs = n_jobs
@@ -287,9 +283,8 @@ class BaseModel:
             df_pred_result_list.append(pd.DataFrame(data={self.signal_name: y_pred, 'future_ret': y_test}, index=y_test.index))
 
         self.predict_result = pd.concat(df_pred_result_list)
-        # standardize signal from model values to zscore
+        # Keep raw signal values for single-instrument TS strategy.
         self.predict_result = self.predict_result.reset_index()
-        self.predict_result = cross_sectional_norm(self.predict_result, self.signal_name)
 
         if self.save:
             self.save_predict_result()
@@ -359,9 +354,8 @@ class BaseModel:
             df_pred_result_list.append(pd.DataFrame(data={self.signal_name: y_pred, 'future_ret': y_test}, index=y_test.index))
 
         self.predict_result = pd.concat(df_pred_result_list)
-        # standardize signal from model values to zscore
+        # Keep raw signal values for single-instrument TS strategy.
         self.predict_result = self.predict_result.reset_index()
-        self.predict_result = cross_sectional_norm(self.predict_result, self.signal_name)
 
         self.is_trained = True
 
@@ -448,8 +442,6 @@ class BaseModel:
         bt = BackTester(fc_name_list=[self.signal_name],
                         data=self.predict_result,
                         fc_freq=self.fc_freq,
-                        portfolio_number=self.portfolio_number,
-                        portfolio_method=self.portfolio_method,
                         interest_method=self.interest_method,
                         fee=self.fee)
 
@@ -462,9 +454,6 @@ class BaseModel:
 
     def plot_nav(self, net: bool = True):
         self.bt.plot_nav(self.signal_name)
-
-    def plot_longshort(self):
-        self.bt.plot_longshort(self.signal_name)
 
 
 class LinearRegressor(BaseModel):

@@ -6,7 +6,7 @@ from typing import List, Union
 import pandas as pd
 
 from .factor_indicators import get_performance
-from .factor_utils import get_factor_value, get_future_ret, cross_sectional_norm, join_fc_name_and_parameter
+from .factor_utils import get_factor_value, get_future_ret, join_fc_name_and_parameter
 from data import get_futures_continuous_contract_price
 from stats import iterdict
 from utils.logging import log
@@ -15,7 +15,7 @@ from error.errors import NotBackTestingError
 
 class BackTester:
     """
-    A class supports multi-signal backtesting using Parallel.
+    A class for single-instrument, multi-signal time-series backtesting.
     """
 
     def __init__(self,
@@ -26,8 +26,6 @@ class BackTester:
                  start_time: str = None,
                  end_time: str = None,
                  portfolio_adjust_method: str = '1D',
-                 portfolio_number: int = 10,
-                 portfolio_method: str = 'longshort',
                  interest_method: str = 'simple',
                  fee: float = 0.00025,
                  risk_free_rate: bool = True,
@@ -42,10 +40,10 @@ class BackTester:
         with average transaction price (open + high + low + close) / 4 of this bar, and will complete the transaction
         at the close time of the next `transaction_period` bar
 
-        :param data: data should be a dataframe with factors of all instrument in every bar. The factor values
-            need to be preprocessed. If given data, there will only be one factor.
-        :param fc_name_list: When not given data, fc_name_list is the name of factors in factor.py;
-                             When given data, fc_name_list must be the columns of factor value in data.
+        :param data: data should be a dataframe with factor/signal columns for one instrument in each bar.
+            If given data, it should already include factor values and `future_ret`.
+        :param fc_name_list: When not given data, fc_name_list is factor class names in factor.py;
+                             When given data, fc_name_list must be factor/signal columns in data.
                              So fc_name_list must be provided.
         :param start_time: backtesting start time,
             default is the earliest price data that can be found on database
@@ -57,11 +55,7 @@ class BackTester:
                3. 月度调仓：在每个月最后一个交易日调仓，使用这个月（不包含最后一个交易日）的因子值的平均值调仓。
                4. 季度调仓：在每个季度最后一个交易日调仓，使用这个季度（不包含最后一个交易日）的因子值的平均值调仓。
         :param fc_freq: the frequency of factor, 1m, 5m or 1d.
-        :param portfolio_method: the method for calculating sharpe, can be 'longshort' or 'long_only',
-            default is 'longshort'
         :param fee: the cost of trade.
-        :param portfolio_number: number of grouped portfolio
-            value
         :param n_jobs: Parallel's n_job param. Default is to parallelize 5 jobs.
         """
         self.data = data
@@ -71,8 +65,6 @@ class BackTester:
         self.end_time = end_time
         self.portfolio_adjust_method = portfolio_adjust_method
         self.fc_freq = fc_freq
-        self.portfolio_number = portfolio_number
-        self.portfolio_method = portfolio_method
         self.interest_method = interest_method
         self.fee = fee
         self.rfr = risk_free_rate
@@ -113,14 +105,18 @@ class BackTester:
             self.is_preprocessed = False
 
         self.fc_name_with_param_list = []
-        for fc_name in fc_name_list:
-            parameters = eval(fc_name).param_range
-            self.fc_name_with_param_list += \
-                [join_fc_name_and_parameter(fc_name, parameter) for parameter in iterdict(parameters)]
+        if isinstance(self.data, pd.DataFrame) and self.is_preprocessed:
+            # External data already contains factor/signal columns.
+            self.fc_name_with_param_list = self.fc_name_list.copy()
+        else:
+            for fc_name in self.fc_name_list:
+                parameters = eval(fc_name).param_range
+                self.fc_name_with_param_list += \
+                    [join_fc_name_and_parameter(fc_name, parameter) for parameter in iterdict(parameters)]
 
     def _preprocess_data(self):
         """
-        Preprocess stock data for backtesting.
+        Preprocess futures data for time-series backtesting.
         """
         if self.is_preprocessed:
             return
@@ -131,8 +127,7 @@ class BackTester:
         # get return as label
         self.data = get_future_ret(self.data, self.portfolio_adjust_method, self.rfr)
 
-        # standardize factor values to zscore
-        self.data = cross_sectional_norm(self.data, self.fc_name_with_param_list)
+        # For single-instrument TS strategy we keep raw factor values.
 
     def plot_nav(self, fc_name: Union[str, list, None] = None):
         """
@@ -145,7 +140,7 @@ class BackTester:
         if not self.is_backtested:
             raise NotBackTestingError('Need to backtest first before plotting nav.')
         if fc_name is None:
-            fc_name = self.fc_name_list
+            fc_name = self.fc_name_with_param_list
         if isinstance(fc_name, str):
             fc_name = [fc_name]
 
@@ -167,42 +162,6 @@ class BackTester:
             ax2.set_title(f'Cumulative Net Return of factor {fac}')
             ax2.set_xlabel('time')
 
-    def plot_longshort(self, fc_name: Union[str, list, None] = None):
-        """
-        Plot the ret for n-largest and n-smallest signal values, with n equals to self.longshort_instrument_number.
-        e.g. the factor value from ret_short5, ret_short_4, ..., ret_short_1, ret_long_1, ret_long_2, ..., ret_long_5
-            is becoming larger.
-        e.g. bt.plot_longshort()
-        """
-        if not self.is_backtested:
-            raise NotBackTestingError('Need to backtest first before plotting nav.')
-        if fc_name is None:
-            fc_name = self.fc_name_list
-        if isinstance(fc_name, str):
-            fc_name = [fc_name]
-
-        for fac in fc_name:
-            fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 16))
-            ret_cols = [fac + ' ' + str(i) for i in range(1, self.portfolio_number + 1)]
-
-            # gross ret
-            gross_ret = self.performance_dc[fac]['daily_gross_ret'].set_index('time')[ret_cols]
-            cum_gross_ret = (1 + gross_ret).cumprod()
-            for col in cum_gross_ret.columns:
-                ax1.plot(cum_gross_ret.index, cum_gross_ret[col], label=col)
-            ax1.legend()
-            ax1.set_title(f'Gross Longshort ret of factor {fac}')
-            ax1.set_xlabel('time')
-
-            # net ret
-            net_ret = self.performance_dc[fac]['daily_net_ret'].set_index('time')[ret_cols]
-            cum_net_ret = (1 + net_ret).cumprod()
-            for col in cum_net_ret.columns:
-                ax2.plot(cum_net_ret.index, cum_net_ret[col], label=col)
-            ax2.legend()
-            ax2.set_title(f'Gross Longshort ret of factor {fac}')
-            ax2.set_xlabel('time')
-
     def backtest(self):
         """
         Use this method for backtesting.
@@ -221,8 +180,6 @@ class BackTester:
                                                                                   self.fc_name_with_param_list,
                                                                                   self.fc_freq,
                                                                                   self.portfolio_adjust_method,
-                                                                                  self.portfolio_number,
-                                                                                  self.portfolio_method,
                                                                                   self.interest_method,
                                                                                   self.fee,
                                                                                   self.n_jobs)
