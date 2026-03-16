@@ -347,15 +347,11 @@ def get_performance(Data: pd.DataFrame,
 
     performance_dc_list = [x[0] for x in performance_list]
     performance_summary_list = [x[1] for x in performance_list]
-    ts_performance_dc_list = [x[2] for x in performance_list]
-    ts_performance_summary_list = [x[3] for x in performance_list]
 
     performance_dc = {k: v for k, v in zip(fc_name_list, performance_dc_list)}
     performance_summary = pd.concat(performance_summary_list)
-    ts_performance_dc = {k: v for k, v in zip(fc_name_list, ts_performance_dc_list)}
-    ts_performance_summary = pd.concat(ts_performance_summary_list)
 
-    return performance_dc, performance_summary, ts_performance_dc, ts_performance_summary
+    return performance_dc, performance_summary
 
 
 def get_performance_for_one_factor(Data: pd.DataFrame,
@@ -462,5 +458,4 @@ def get_performance_for_one_factor(Data: pd.DataFrame,
     ts_performance_summary['Factor Freq'] = fc_freq
     ts_performance_summary['Fee'] = fee
 
-    # Keep legacy return signature for callers, but both sections now map to TS-only outputs.
-    return ts_performance_dc, ts_performance_summary, ts_performance_dc, ts_performance_summary
+    return ts_performance_dc, ts_performance_summary

@@ -41,8 +41,8 @@ class BackTester:
         with average transaction price (open + high + low + close) / 4 of this bar, and will complete the transaction
         at the close time of the next `transaction_period` bar
 
-        :param data: data should be a dataframe with factor/signal columns for one instrument in each bar.
-            If given data, it should already include factor values and `future_ret`.
+        :param data: data should be a dataframe with high, open, low, close, volume, position columns 
+            for one instrument in each bar.
         :param fc_name_list: When not given data, fc_name_list is factor class names in factor.py;
                              When given data, fc_name_list must be factor/signal columns in data.
                              So fc_name_list must be provided.
@@ -73,7 +73,6 @@ class BackTester:
         self.fc_name_with_param_list = None
         self.performance_dc = None
         self.performance_summary = None
-        self.ts_performance_dc = None
         self.ts_performance_summary = None
         self.is_backtested = False
 
@@ -93,7 +92,6 @@ class BackTester:
             # when data is provided, it should have been preprocessed, and we will not preprocess it here.
             for col in ['time', 'instrument_id', 'future_ret'] + self.fc_name_list:
                 assert col in self.data.columns
-            self.is_preprocessed = True
 
         # otherwise we load data from local database
         else:
@@ -120,14 +118,10 @@ class BackTester:
             self.data = self.data[self.data['instrument_id'].isin(self.instrument_id_list)].copy()
 
         self.fc_name_with_param_list = []
-        if isinstance(self.data, pd.DataFrame) and self.is_preprocessed:
-            # External data already contains factor/signal columns.
-            self.fc_name_with_param_list = self.fc_name_list.copy()
-        else:
-            for fc_name in self.fc_name_list:
-                parameters = eval(fc_name).param_range
-                self.fc_name_with_param_list += \
-                    [join_fc_name_and_parameter(fc_name, parameter) for parameter in iterdict(parameters)]
+        for fc_name in self.fc_name_list:
+            parameters = eval(fc_name).param_range
+            self.fc_name_with_param_list += \
+                [join_fc_name_and_parameter(fc_name, parameter) for parameter in iterdict(parameters)]
 
     def _preprocess_data(self):
         """
@@ -197,36 +191,40 @@ class BackTester:
         if not self.is_preprocessed:
             self._preprocess_data()
 
-        def _run_one_instrument(instrument_id: str):
+        def _run_one_instrument(instrument_id: str, factor_n_jobs: int):
             df_one = self.data[self.data['instrument_id'] == instrument_id].copy()
-            result = get_performance(df_one,
-                                     self.fc_name_with_param_list,
-                                     self.fc_freq,
-                                     self.portfolio_adjust_method,
-                                     self.interest_method,
-                                     n_jobs=1)
-            return instrument_id, result
+            _result = get_performance(df_one,
+                                      self.fc_name_with_param_list,
+                                      self.fc_freq,
+                                      self.portfolio_adjust_method,
+                                      self.interest_method,
+                                     n_jobs=factor_n_jobs)
+            return instrument_id, _result
 
-        parallel_jobs = min(self.n_jobs, len(self.instrument_id_list))
-        with Parallel(n_jobs=parallel_jobs) as parallel:
-            result_list = parallel(delayed(_run_one_instrument)(instrument_id)
-                                   for instrument_id in self.instrument_id_list)
+        # Parallel strategy:
+        # - single instrument: parallelize inside get_performance (across factors)
+        # - multi instrument: parallelize across instruments and keep inner factor jobs to 1
+        if len(self.instrument_id_list) == 1:
+            result_list = [_run_one_instrument(self.instrument_id_list[0], max(1, self.n_jobs))]
+        else:
+            parallel_jobs = min(self.n_jobs, len(self.instrument_id_list))
+            with Parallel(n_jobs=parallel_jobs) as parallel:
+                result_list = parallel(delayed(_run_one_instrument)(instrument_id, 1)
+                                       for instrument_id in self.instrument_id_list)
 
         self.performance_dc = {}
-        self.ts_performance_dc = {}
         performance_summary_list = []
         ts_performance_summary_list = []
 
         for instrument_id, result in result_list:
-            performance_dc_i, performance_summary_i, ts_performance_dc_i, ts_performance_summary_i = result
+            performance_dc_i, performance_summary_i = result
             self.performance_dc[instrument_id] = performance_dc_i
-            self.ts_performance_dc[instrument_id] = ts_performance_dc_i
 
             performance_summary_i = performance_summary_i.copy()
             performance_summary_i['Instrument ID'] = instrument_id
             performance_summary_list.append(performance_summary_i)
 
-            ts_performance_summary_i = ts_performance_summary_i.copy()
+            ts_performance_summary_i = performance_summary_i.copy()
             ts_performance_summary_i['Instrument ID'] = instrument_id
             ts_performance_summary_list.append(ts_performance_summary_i)
 
