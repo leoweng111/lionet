@@ -7,7 +7,7 @@ import pandas as pd
 
 import akshare as ak
 from mongo.mongify import get_data, update_data
-from utils.path import START_DATE_STR, END_DATE_STR, START_DATE, END_DATE
+from utils.params import START_DATE_STR, END_DATE_STR, START_DATE, END_DATE
 from utils.logging import log
 
 

@@ -5,6 +5,5 @@ from .general import *
 from .configuration import *
 from .datetime_utils import *
 from .logging import *
-from .path import *
+from .params import *
 from .file_processor import *
-

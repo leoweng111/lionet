@@ -6,8 +6,19 @@ import numpy as np
 from typing import Union
 from joblib import delayed, Parallel
 from stats import merge_dataframe
+from utils.params import FEE
 
 EPSILON = 1e-6
+
+
+def _get_fee_for_instrument(Data: pd.DataFrame) -> float:
+    instrument_ids = Data['instrument_id'].dropna().unique().tolist()
+    if len(instrument_ids) != 1:
+        raise ValueError('Fee lookup expects data of one instrument only.')
+    instrument_id = instrument_ids[0]
+    if instrument_id not in FEE:
+        raise ValueError(f'Missing fee config for instrument_id={instrument_id}. Please update utils/params.py FEE.')
+    return float(FEE[instrument_id])
 
 
 def get_annualized_ts_ic_and_t_corr(Data: pd.DataFrame,
@@ -57,8 +68,7 @@ def get_annualized_ts_ic_and_t_corr(Data: pd.DataFrame,
 
 
 def get_ts_ret_and_turnover(Data: pd.DataFrame,
-                            fc_col: Union[str, list],
-                            fee: float = 0.00025):
+                            fc_col: Union[str, list]):
     # time series gross ret and net ret
     # time series way of calculating ret and turnover is simpler
     # todo: 最后的performance中加入这个时序指标
@@ -70,13 +80,24 @@ def get_ts_ret_and_turnover(Data: pd.DataFrame,
     df = Data.copy()
     if df['instrument_id'].nunique() != 1:
         raise ValueError('Time-series return/turnover must be calculated on one instrument at a time.')
+    fee = _get_fee_for_instrument(df)
 
     # If one of fc_col + ['future_ret'] is nan, this timestamp is excluded for that instrument.
-    df = df.dropna(subset=fc_col + ['future_ret']).sort_values(by='time').set_index('time')
+    # if the factor value or label is missing, keep the position of previous day
+    df[fc_col] = df[fc_col].ffill().fillna(0)
+    df['future_ret'] = df['future_ret'].fillna(0)
+    df = df.set_index('time')
+    # df = df.dropna(subset=fc_col + ['future_ret']).sort_values(by='time').set_index('time')
 
     # For a single instrument, TS gross return is signal_t * future_ret_t.
     df_gross_ret_ts = df[fc_col].mul(df['future_ret'], axis=0)
-    df_turnover_ts = df[fc_col].diff().abs().fillna(0)
+    # the position of and before first day is 0.
+    # So the turnover of first day is just the position of first day.
+    df_turnover_ts = df[fc_col].diff().abs()
+    first_row_idx = df_turnover_ts.index[0]
+    df_turnover_ts.loc[first_row_idx] = df[fc_col].loc[first_row_idx].abs()
+
+    # df['prev_fc_col'] = df[fc_col].shift(1).fillna(0)
     df_net_ret_ts = df_gross_ret_ts - df_turnover_ts * fee
     # These three dataframe should not contain any nan values.
     return df_gross_ret_ts, df_net_ret_ts, df_turnover_ts
@@ -310,7 +331,6 @@ def get_performance(Data: pd.DataFrame,
                     fc_freq: str = '1d',
                     portfolio_adjust_method: str = '1D',
                     interest_method: str = 'simple',
-                    fee: float = 0.00025,
                     n_jobs=5):
 
     if isinstance(fc_name_list, str):
@@ -320,7 +340,7 @@ def get_performance(Data: pd.DataFrame,
     df = Data.copy()
     if df['instrument_id'].nunique() != 1:
         raise ValueError('get_performance expects Data of one instrument only.')
-    f = lambda x: get_performance_for_one_factor(df, x, fc_freq, portfolio_adjust_method, interest_method, fee)
+    f = lambda x: get_performance_for_one_factor(df, x, fc_freq, portfolio_adjust_method, interest_method)
 
     with Parallel(n_jobs=n_jobs) as parallel:
         performance_list = parallel(delayed(f)(fc_name) for fc_name in fc_name_list)
@@ -342,15 +362,15 @@ def get_performance_for_one_factor(Data: pd.DataFrame,
                                    fc_name: str,
                                    fc_freq: str = '1d',
                                    portfolio_adjust_method: str = '1D',
-                                   interest_method: str = 'simple',
-                                   fee: float = 0.00025):
+                                   interest_method: str = 'simple'):
     """
     Get time-series performance for one factor in single-instrument strategy research.
     """
     df = Data.copy()
+    fee = _get_fee_for_instrument(df)
 
     # time-series ret and turnover
-    df_gross_ret_ts, df_net_ret_ts, df_turnover_ts = get_ts_ret_and_turnover(df, fc_name, fee)
+    df_gross_ret_ts, df_net_ret_ts, df_turnover_ts = get_ts_ret_and_turnover(df, fc_name)
     df_gross_ret_ts = df_gross_ret_ts.reset_index()
     df_net_ret_ts = df_net_ret_ts.reset_index()
     df_turnover_ts = df_turnover_ts.reset_index()

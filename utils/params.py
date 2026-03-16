@@ -34,3 +34,6 @@ START_DATE_STR = '20010101'
 END_DATE = datetime.date.today()
 END_TIME = datetime.datetime.now()
 END_DATE_STR = datetime.date.today().strftime('%Y%m%d')
+
+# Instrument-level trading fee config.
+FEE = {"C0": "0.0002"}

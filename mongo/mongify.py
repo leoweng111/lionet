@@ -8,7 +8,7 @@ from pymongo import UpdateOne
 
 from .mongoconfig import client
 from utils.logging import log
-from utils.path import PREP_PATH
+from utils.params import PREP_PATH
 
 
 def update_data(database: str,

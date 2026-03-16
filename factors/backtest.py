@@ -29,7 +29,6 @@ class BackTester:
                  end_time: str = None,
                  portfolio_adjust_method: str = '1D',
                  interest_method: str = 'simple',
-                 fee: float = 0.00025,
                  risk_free_rate: bool = True,
                  n_jobs: int = 5):
         # todo: 数据频率，调仓频率和收益率计算频率三者相关
@@ -57,7 +56,6 @@ class BackTester:
                3. 月度调仓：在每个月最后一个交易日调仓，使用这个月（不包含最后一个交易日）的因子值的平均值调仓。
                4. 季度调仓：在每个季度最后一个交易日调仓，使用这个季度（不包含最后一个交易日）的因子值的平均值调仓。
         :param fc_freq: the frequency of factor, 1m, 5m or 1d.
-        :param fee: the cost of trade.
         :param n_jobs: Parallel's n_job param. Default is to parallelize 5 jobs.
         """
         self.data = data
@@ -69,7 +67,6 @@ class BackTester:
         self.portfolio_adjust_method = portfolio_adjust_method
         self.fc_freq = fc_freq
         self.interest_method = interest_method
-        self.fee = fee
         self.rfr = risk_free_rate
         self.n_jobs = n_jobs
 
@@ -207,7 +204,6 @@ class BackTester:
                                      self.fc_freq,
                                      self.portfolio_adjust_method,
                                      self.interest_method,
-                                     self.fee,
                                      n_jobs=1)
             return instrument_id, result
 

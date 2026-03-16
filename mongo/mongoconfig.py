@@ -1,7 +1,7 @@
 """
 This script is for the basic configuration of MongoDB.
 """
-from utils.path import MONGODB_PASSWORD, USER_NAME
+from utils.params import MONGODB_PASSWORD, USER_NAME
 from pymongo import MongoClient
 from utils.logging import log
 
