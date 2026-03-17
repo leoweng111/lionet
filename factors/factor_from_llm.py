@@ -2206,3 +2206,39 @@ class fac_close_bias:
         df = Data.copy()
         ma = df['close'].rolling(window).mean()
         return (df['close'] - ma) / ma
+
+
+class fac_ohlc_ratio:
+    param_range = {'window': [5, 10, 20]}
+
+    @staticmethod
+    def operate(Data: pd.DataFrame, **kwargs):
+        hash_tb = {chr(i): 0 for i in range(97, 123)}
+        for key, value in kwargs.items():
+            hash_tb[key] = value
+        window = int(hash_tb['window'])
+
+        df = Data.copy()
+        df['range'] = df['high'] - df['low']
+        df['body'] = (df['close'] - df['open']).abs()
+        df['ohlc_ratio'] = df['body'] / df['range'].replace(0, 0.0001)
+        df['ohlc_ratio_ma'] = df['ohlc_ratio'].rolling(window).mean()
+        return df['ohlc_ratio_ma']
+
+
+class fac_volume_ma_ratio:
+    param_range = {'short': [5, 10, 20], 'long': [20, 30, 60]}
+
+    @staticmethod
+    def operate(Data: pd.DataFrame, **kwargs):
+        hash_tb = {chr(i): 0 for i in range(97, 123)}
+        for key, value in kwargs.items():
+            hash_tb[key] = value
+        short = int(hash_tb['short'])
+        long = int(hash_tb['long'])
+
+        df = Data.copy()
+        vol_short = df['volume'].rolling(short).mean()
+        vol_long = df['volume'].rolling(long).mean()
+        factor = vol_short / vol_long
+        return factor
