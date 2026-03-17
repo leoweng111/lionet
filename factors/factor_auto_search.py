@@ -656,12 +656,12 @@ class FactorGenerator:
                 fc_package_name: Optional[str] = None,
                 save_dir: Optional[Union[str, Path]] = None) -> Path:
         """
-        Save selected tsfresh feature definitions for future reuse.
+        Save selected feature definitions for future reuse.
 
         Notes:
-        - tsfresh does not export raw Python source code for each feature.
-        - Reuse is achieved by storing feature names and converting them back to
-          tsfresh settings via `from_columns`.
+        - This method only writes one JSON config file.
+        - tsfresh reuse is achieved by storing feature names and converting them
+          back to tsfresh settings via `from_columns`.
         """
         if isinstance(fc_name_list, str):
             fc_name_list = [fc_name_list]
@@ -674,14 +674,16 @@ class FactorGenerator:
                 raise ValueError(f'fc_name_list contains unknown features: {missing}')
 
         if save_dir is None:
-            save_dir = Path(__file__).resolve().parent / 'fc_from_tsfresh'
+            default_dir_name = 'fc_from_llm' if self.method == 'llm_prompt' else 'fc_from_tsfresh'
+            save_dir = Path(__file__).resolve().parent / default_dir_name
         save_dir = Path(save_dir)
         save_dir.mkdir(parents=True, exist_ok=True)
 
         if not fc_package_name:
             instrument_text = '-'.join(self.instrument_id_list)
             now = datetime.now().strftime('%Y%m%d_%H%M%S')
-            fc_package_name = f'tsfresh_fc_{instrument_text}_{now}'
+            package_prefix = 'llm_fc' if self.method == 'llm_prompt' else 'tsfresh_fc'
+            fc_package_name = f'{package_prefix}_{instrument_text}_{now}'
 
         fc_name_list = list(fc_name_list)
         payload = {
@@ -714,18 +716,7 @@ class FactorGenerator:
         with open(config_path, 'w', encoding='utf-8') as f:
             json.dump(payload, f, ensure_ascii=True, indent=2)
 
-        helper_path = save_dir / f'{fc_package_name}.py'
-        helper_content = (
-            '"""Auto-generated tsfresh feature package.\n\n'
-            'Use `FC_NAME_LIST` with FactorGenerator.generate_with_fc(...) or\n'
-            'FactorGenerator.backtest(data=..., fc_name_list=FC_NAME_LIST).\n'
-            '"""\n\n'
-            f'FC_NAME_LIST = {repr(fc_name_list)}\n'
-        )
-        with open(helper_path, 'w', encoding='utf-8') as f:
-            f.write(helper_content)
-
-        log.info(f'Saved tsfresh feature package to {config_path} and {helper_path}.')
+        log.info(f'Saved {self.method} feature config to {config_path}.')
         return config_path
 
     @staticmethod

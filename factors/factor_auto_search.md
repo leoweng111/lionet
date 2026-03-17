@@ -28,8 +28,8 @@ fc_subset = fg.generated_fc_name_list[:20]
 fg.save_fc_value(fc_subset, file_name='tsfresh_fc_subset', file_format='parquet')
 bt = fg.backtest(fc_name_list=fc_subset)
 
-# save reusable tsfresh feature package
-config_path = fg.save_fc(fc_subset)  # default dir: factors/fc_from_tsfresh/
+# save reusable feature package
+config_path = fg.save_fc(fc_subset)  # default dir: factors/fc_from_tsfresh/ (tsfresh)
 
 # later: reload and compute only this subset
 selected_fc = FactorGenerator.load_fc(config_path)
@@ -80,7 +80,9 @@ Generated data is compatible with `BackTester(data=..., fc_name_list=...)`:
 
 Saved factor files are written to `data/factor_value/`.
 
-Selected tsfresh feature definitions are saved under `factors/fc_from_tsfresh/`.
+Selected feature definitions are saved under:
+- `factors/fc_from_tsfresh/` for `method='tsfresh'`
+- `factors/fc_from_llm/` for `method='llm_prompt'`
 
 LLM-generated valid factor classes are persisted to `factors/factor_from_llm.py`.
 
