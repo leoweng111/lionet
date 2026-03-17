@@ -165,3 +165,1933 @@ class fac_position_change:
         df['position_sma'] = df['position_pct'].rolling(window).mean()
 
         return df['position_sma']
+
+
+class fac_price_volume_trend:
+    param_range = {'window': [5, 10, 20]}
+
+    @staticmethod
+    def operate(Data: pd.DataFrame, **kwargs):
+        hash_tb = {chr(i): 0 for i in range(97, 123)}
+        for key, value in kwargs.items():
+            hash_tb[key] = value
+        window = int(hash_tb['window'])
+
+        df = Data.copy()
+        pct_change = df['close'].pct_change()
+        pvt = (pct_change * df['volume']).cumsum()
+        factor = pvt.rolling(window).mean()
+        return factor
+
+
+class fac_position_momentum:
+    param_range = {'window': [5, 10, 20]}
+
+    @staticmethod
+    def operate(Data: pd.DataFrame, **kwargs):
+        hash_tb = {chr(i): 0 for i in range(97, 123)}
+        for key, value in kwargs.items():
+            hash_tb[key] = value
+        window = int(hash_tb['window'])
+
+        df = Data.copy()
+        position_change = df['position'].pct_change()
+        factor = position_change.rolling(window).mean()
+        return factor
+
+
+class fac_volume_momentum:
+    param_range = {'n': [5, 10, 20]}
+
+    @staticmethod
+    def operate(Data: pd.DataFrame, **kwargs):
+        hash_tb = {chr(i): 0 for i in range(97, 123)}
+        for key, value in kwargs.items():
+            hash_tb[key] = value
+        n = int(hash_tb['n'])
+
+        df = Data.copy()
+        df['volume_ma'] = df['volume'].rolling(n).mean()
+        df['volume_momentum'] = df['volume'] / df['volume_ma'] - 1
+
+        return df['volume_momentum']
+
+
+class fac_close_position_corr:
+    param_range = {'window': [10, 20, 30]}
+
+    @staticmethod
+    def operate(Data: pd.DataFrame, **kwargs):
+        hash_tb = {chr(i): 0 for i in range(97, 123)}
+        for key, value in kwargs.items():
+            hash_tb[key] = value
+        window = int(hash_tb['window'])
+
+        df = Data.copy()
+        df['close_ret'] = df['close'].pct_change()
+        df['position_ret'] = df['position'].pct_change()
+        df['corr'] = df['close_ret'].rolling(window).corr(df['position_ret'])
+
+        return df['corr']
+
+
+class fac_high_low_range:
+    param_range = {'n': [5, 10, 20]}
+
+    @staticmethod
+    def operate(Data: pd.DataFrame, **kwargs):
+        hash_tb = {chr(i): 0 for i in range(97, 123)}
+        for key, value in kwargs.items():
+            hash_tb[key] = value
+        n = int(hash_tb['n'])
+
+        df = Data.copy()
+        df['daily_range'] = (df['high'] - df['low']) / df['close']
+        df['range_ma'] = df['daily_range'].rolling(n).mean()
+
+        return df['range_ma']
+
+
+class fac_volume_weighted_close:
+    param_range = {'n': [5, 10, 20]}
+
+    @staticmethod
+    def operate(Data: pd.DataFrame, **kwargs):
+        hash_tb = {chr(i): 0 for i in range(97, 123)}
+        for key, value in kwargs.items():
+            hash_tb[key] = value
+        n = int(hash_tb['n'])
+
+        df = Data.copy()
+        df['vwap'] = (df['volume'] * df['close']).rolling(n).sum() / df['volume'].rolling(n).sum()
+        df['vwap_ratio'] = df['close'] / df['vwap'] - 1
+
+        return df['vwap_ratio']
+
+
+class fac_open_close_strength:
+    param_range = {'n': [5, 10, 20]}
+
+    @staticmethod
+    def operate(Data: pd.DataFrame, **kwargs):
+        hash_tb = {chr(i): 0 for i in range(97, 123)}
+        for key, value in kwargs.items():
+            hash_tb[key] = value
+        n = int(hash_tb['n'])
+
+        df = Data.copy()
+        df['oc_strength'] = (df['close'] - df['open']) / df['open']
+        df['oc_strength_ma'] = df['oc_strength'].rolling(n).mean()
+
+        return df['oc_strength_ma']
+
+
+class fac_volume_acceleration:
+    param_range = {'window': [5, 10, 20]}
+
+    @staticmethod
+    def operate(Data: pd.DataFrame, **kwargs):
+        hash_tb = {chr(i): 0 for i in range(97, 123)}
+        for key, value in kwargs.items():
+            hash_tb[key] = value
+        window = int(hash_tb['window'])
+
+        df = Data.copy()
+        df['volume_ma'] = df['volume'].rolling(window).mean()
+        df['volume_ma_prev'] = df['volume_ma'].shift(1)
+        df['volume_acc'] = (df['volume_ma'] - df['volume_ma_prev']) / df['volume_ma_prev'].abs().clip(lower=1e-6)
+        return df['volume_acc']
+
+
+class fac_close_vwap_deviation:
+    param_range = {'window': [5, 10, 20]}
+
+    @staticmethod
+    def operate(Data: pd.DataFrame, **kwargs):
+        hash_tb = {chr(i): 0 for i in range(97, 123)}
+        for key, value in kwargs.items():
+            hash_tb[key] = value
+        window = int(hash_tb['window'])
+
+        df = Data.copy()
+        df['typical_price'] = (df['high'] + df['low'] + df['close']) / 3
+        df['vwap'] = (df['typical_price'] * df['volume']).rolling(window).sum() / df['volume'].rolling(window).sum()
+        df['deviation'] = (df['close'] - df['vwap']) / df['vwap'].abs().clip(lower=1e-6)
+        return df['deviation']
+
+
+class fac_volume_price_correlation:
+    param_range = {'window': [5, 10, 20]}
+
+    @staticmethod
+    def operate(Data: pd.DataFrame, **kwargs):
+        hash_tb = {chr(i): 0 for i in range(97, 123)}
+        for key, value in kwargs.items():
+            hash_tb[key] = value
+        window = int(hash_tb['window'])
+
+        df = Data.copy()
+        df['ret'] = df['close'].pct_change()
+        df['corr'] = df['ret'].rolling(window).corr(df['volume'])
+        return df['corr']
+
+
+class fac_high_low_volatility:
+    param_range = {'window': [5, 10, 20]}
+
+    @staticmethod
+    def operate(Data: pd.DataFrame, **kwargs):
+        hash_tb = {chr(i): 0 for i in range(97, 123)}
+        for key, value in kwargs.items():
+            hash_tb[key] = value
+        window = int(hash_tb['window'])
+
+        df = Data.copy()
+        df['hl_range'] = (df['high'] - df['low']) / df['close'].shift(1).abs().clip(lower=1e-6)
+        df['volatility'] = df['hl_range'].rolling(window).std()
+        return df['volatility']
+
+
+class fac_position_change_ratio:
+    param_range = {'window': [5, 10, 20]}
+
+    @staticmethod
+    def operate(Data: pd.DataFrame, **kwargs):
+        hash_tb = {chr(i): 0 for i in range(97, 123)}
+        for key, value in kwargs.items():
+            hash_tb[key] = value
+        window = int(hash_tb['window'])
+
+        df = Data.copy()
+        df['position_change'] = df['position'].diff()
+        df['position_ma'] = df['position'].rolling(window).mean()
+        df['change_ratio'] = df['position_change'] / df['position_ma'].abs().clip(lower=1e-6)
+        return df['change_ratio']
+
+
+class fac_volume_price_divergence:
+    param_range = {'window': [5, 10, 20]}
+
+    @staticmethod
+    def operate(Data: pd.DataFrame, **kwargs):
+        hash_tb = {chr(i): 0 for i in range(97, 123)}
+        for key, value in kwargs.items():
+            hash_tb[key] = value
+        window = int(hash_tb['window'])
+
+        df = Data.copy()
+        price_change = df['close'].pct_change()
+        volume_change = df['volume'].pct_change()
+        divergence = price_change - volume_change.rolling(window).mean()
+        return divergence
+
+
+class fac_intraday_efficiency:
+    param_range = {'window': [5, 10, 20]}
+
+    @staticmethod
+    def operate(Data: pd.DataFrame, **kwargs):
+        hash_tb = {chr(i): 0 for i in range(97, 123)}
+        for key, value in kwargs.items():
+            hash_tb[key] = value
+        window = int(hash_tb['window'])
+
+        df = Data.copy()
+        price_range = df['high'] - df['low']
+        net_change = abs(df['close'] - df['open'])
+        efficiency = net_change / (price_range + 1e-8)
+        efficiency_smoothed = efficiency.rolling(window).mean()
+        return efficiency_smoothed
+
+
+class fac_volume_concentration:
+    param_range = {'window': [5, 10, 20]}
+
+    @staticmethod
+    def operate(Data: pd.DataFrame, **kwargs):
+        hash_tb = {chr(i): 0 for i in range(97, 123)}
+        for key, value in kwargs.items():
+            hash_tb[key] = value
+        window = int(hash_tb['window'])
+
+        df = Data.copy()
+        volume_ma = df['volume'].rolling(window).mean()
+        concentration = df['volume'] / (volume_ma + 1e-8)
+        return concentration
+
+
+class fac_position_trend:
+    param_range = {'window': [5, 10, 20]}
+
+    @staticmethod
+    def operate(Data: pd.DataFrame, **kwargs):
+        hash_tb = {chr(i): 0 for i in range(97, 123)}
+        for key, value in kwargs.items():
+            hash_tb[key] = value
+        window = int(hash_tb['window'])
+
+        df = Data.copy()
+        position_change = df['position'].diff()
+        position_trend = position_change.rolling(window).sum()
+        return position_trend
+
+
+class fac_close_vs_avg:
+    param_range = {'window': [5, 10, 20]}
+
+    @staticmethod
+    def operate(Data: pd.DataFrame, **kwargs):
+        hash_tb = {chr(i): 0 for i in range(97, 123)}
+        for key, value in kwargs.items():
+            hash_tb[key] = value
+        window = int(hash_tb['window'])
+
+        df = Data.copy()
+        avg_price = (df['high'] + df['low'] + df['close']) / 3
+        close_vs_avg = df['close'] / (avg_price.rolling(window).mean() + 1e-8) - 1
+        return close_vs_avg
+
+
+class fac_volume_price_sync:
+    param_range = {'window': [5, 10, 20]}
+
+    @staticmethod
+    def operate(Data: pd.DataFrame, **kwargs):
+        hash_tb = {chr(i): 0 for i in range(97, 123)}
+        for key, value in kwargs.items():
+            hash_tb[key] = value
+        window = int(hash_tb['window'])
+
+        df = Data.copy()
+        price_change = df['close'].pct_change()
+        volume_change = df['volume'].pct_change()
+        df['sync'] = (price_change * volume_change).rolling(window).mean()
+        return df['sync']
+
+
+class fac_intraday_pressure:
+    param_range = {'window': [5, 10, 20]}
+
+    @staticmethod
+    def operate(Data: pd.DataFrame, **kwargs):
+        hash_tb = {chr(i): 0 for i in range(97, 123)}
+        for key, value in kwargs.items():
+            hash_tb[key] = value
+        window = int(hash_tb['window'])
+
+        df = Data.copy()
+        df['pressure'] = (df['close'] - df['low']) / (df['high'] - df['low'] + 1e-8)
+        df['pressure_smooth'] = df['pressure'].rolling(window).mean()
+        return df['pressure_smooth']
+
+
+class fac_volume_position_ratio:
+    param_range = {'window': [5, 10, 20]}
+
+    @staticmethod
+    def operate(Data: pd.DataFrame, **kwargs):
+        hash_tb = {chr(i): 0 for i in range(97, 123)}
+        for key, value in kwargs.items():
+            hash_tb[key] = value
+        window = int(hash_tb['window'])
+
+        df = Data.copy()
+        df['vol_pos_ratio'] = df['volume'] / (df['position'] + 1e-8)
+        df['vol_pos_ratio_smooth'] = df['vol_pos_ratio'].rolling(window).mean()
+        return df['vol_pos_ratio_smooth']
+
+
+class fac_close_vs_mid:
+    param_range = {'window': [5, 10, 20]}
+
+    @staticmethod
+    def operate(Data: pd.DataFrame, **kwargs):
+        hash_tb = {chr(i): 0 for i in range(97, 123)}
+        for key, value in kwargs.items():
+            hash_tb[key] = value
+        window = int(hash_tb['window'])
+
+        df = Data.copy()
+        df['mid'] = (df['high'] + df['low']) / 2
+        df['close_mid_ratio'] = df['close'] / (df['mid'] + 1e-8) - 1
+        df['close_mid_ratio_smooth'] = df['close_mid_ratio'].rolling(window).mean()
+        return df['close_mid_ratio_smooth']
+
+
+class fac_volume_accel_position:
+    param_range = {'window': [5, 10, 20]}
+
+    @staticmethod
+    def operate(Data: pd.DataFrame, **kwargs):
+        hash_tb = {chr(i): 0 for i in range(97, 123)}
+        for key, value in kwargs.items():
+            hash_tb[key] = value
+        window = int(hash_tb['window'])
+
+        df = Data.copy()
+        volume_change = df['volume'].pct_change()
+        position_change = df['position'].pct_change()
+        df['accel'] = volume_change - position_change
+        df['accel_smooth'] = df['accel'].rolling(window).mean()
+        return df['accel_smooth']
+
+
+class fac_intraday_momentum:
+    param_range = {'window': [5, 10, 20]}
+
+    @staticmethod
+    def operate(Data: pd.DataFrame, **kwargs):
+        hash_tb = {chr(i): 0 for i in range(97, 123)}
+        for key, value in kwargs.items():
+            hash_tb[key] = value
+        window = int(hash_tb['window'])
+
+        df = Data.copy()
+        df['intraday_return'] = (df['close'] - df['open']) / df['open']
+        df['intraday_momentum'] = df['intraday_return'].rolling(window).mean()
+
+        return df['intraday_momentum']
+
+
+class fac_volume_volatility:
+    param_range = {'window': [5, 10, 20]}
+
+    @staticmethod
+    def operate(Data: pd.DataFrame, **kwargs):
+        hash_tb = {chr(i): 0 for i in range(97, 123)}
+        for key, value in kwargs.items():
+            hash_tb[key] = value
+        window = int(hash_tb['window'])
+
+        df = Data.copy()
+        df['volume_volatility'] = df['volume'].rolling(window).std() / df['volume'].rolling(window).mean()
+
+        return df['volume_volatility']
+
+
+class fac_close_position_ratio:
+    param_range = {'window': [5, 10, 20]}
+
+    @staticmethod
+    def operate(Data: pd.DataFrame, **kwargs):
+        hash_tb = {chr(i): 0 for i in range(97, 123)}
+        for key, value in kwargs.items():
+            hash_tb[key] = value
+        window = int(hash_tb['window'])
+
+        df = Data.copy()
+        df['close_position_ratio'] = df['close'] / df['position']
+        df['close_position_ratio'] = df['close_position_ratio'].rolling(window).mean()
+
+        return df['close_position_ratio']
+
+
+class fac_high_low_efficiency:
+    param_range = {'window': [5, 10, 20]}
+
+    @staticmethod
+    def operate(Data: pd.DataFrame, **kwargs):
+        hash_tb = {chr(i): 0 for i in range(97, 123)}
+        for key, value in kwargs.items():
+            hash_tb[key] = value
+        window = int(hash_tb['window'])
+
+        df = Data.copy()
+        df['price_range'] = (df['high'] - df['low']) / df['close'].shift(1)
+        df['abs_return'] = abs(df['close'].pct_change())
+        df['high_low_efficiency'] = df['abs_return'] / df['price_range']
+        df['high_low_efficiency'] = df['high_low_efficiency'].rolling(window).mean()
+
+        return df['high_low_efficiency']
+
+
+class fac_range_ratio:
+    param_range = {'n': [5, 10, 20]}
+
+    @staticmethod
+    def operate(Data: pd.DataFrame, **kwargs):
+        hash_tb = {chr(i): 0 for i in range(97, 123)}
+        for key, value in kwargs.items():
+            hash_tb[key] = value
+        n = int(hash_tb['n'])
+
+        df = Data.copy()
+        df['daily_range'] = (df['high'] - df['low']) / df['close'].shift(1)
+        df['range_ma'] = df['daily_range'].rolling(n).mean()
+        df['range_ratio'] = df['daily_range'] / df['range_ma']
+
+        return df['range_ratio']
+
+
+class fac_trend_strength:
+    param_range = {'n': [5, 10, 20]}
+
+    @staticmethod
+    def operate(Data: pd.DataFrame, **kwargs):
+        hash_tb = {chr(i): 0 for i in range(97, 123)}
+        for key, value in kwargs.items():
+            hash_tb[key] = value
+        n = int(hash_tb['n'])
+
+        df = Data.copy()
+        df['up_move'] = df['high'] - df['high'].shift(1)
+        df['down_move'] = df['low'].shift(1) - df['low']
+        df['up_move'] = df['up_move'].where(df['up_move'] > 0, 0)
+        df['down_move'] = df['down_move'].where(df['down_move'] > 0, 0)
+        df['up_avg'] = df['up_move'].rolling(n).mean()
+        df['down_avg'] = df['down_move'].rolling(n).mean()
+        df['trend_strength'] = df['up_avg'] / (df['up_avg'] + df['down_avg'] + 1e-8)
+
+        return df['trend_strength']
+
+
+class fac_volatility_ratio:
+    param_range = {'window': [5, 10, 20]}
+
+    @staticmethod
+    def operate(Data: pd.DataFrame, **kwargs):
+        hash_tb = {chr(i): 0 for i in range(97, 123)}
+        for key, value in kwargs.items():
+            hash_tb[key] = value
+        window = int(hash_tb['window'])
+
+        df = Data.copy()
+        df['ret'] = df['close'].pct_change()
+        df['volatility'] = df['ret'].rolling(window).std()
+        df['volatility_ratio'] = df['volatility'] / df['volatility'].rolling(window).mean()
+
+        return df['volatility_ratio']
+
+
+class fac_hl_range:
+    param_range = {'window': [5, 10, 20]}
+
+    @staticmethod
+    def operate(Data: pd.DataFrame, **kwargs):
+        hash_tb = {chr(i): 0 for i in range(97, 123)}
+        for key, value in kwargs.items():
+            hash_tb[key] = value
+        window = int(hash_tb['window'])
+
+        df = Data.copy()
+        df['daily_range'] = (df['high'] - df['low']) / df['close']
+        df['hl_range'] = df['daily_range'].rolling(window).mean()
+
+        return df['hl_range']
+
+
+class fac_price_momentum:
+    param_range = {'window': [5, 10, 20]}
+
+    @staticmethod
+    def operate(Data: pd.DataFrame, **kwargs):
+        hash_tb = {chr(i): 0 for i in range(97, 123)}
+        for key, value in kwargs.items():
+            hash_tb[key] = value
+        window = int(hash_tb['window'])
+
+        df = Data.copy()
+        df['price_momentum'] = df['close'] / df['close'].shift(window) - 1
+
+        return df['price_momentum']
+
+
+class fac_volume_weighted_price:
+    param_range = {'window': [5, 10, 20]}
+
+    @staticmethod
+    def operate(Data: pd.DataFrame, **kwargs):
+        hash_tb = {chr(i): 0 for i in range(97, 123)}
+        for key, value in kwargs.items():
+            hash_tb[key] = value
+        window = int(hash_tb['window'])
+
+        df = Data.copy()
+        df['vwap'] = (df['close'] * df['volume']).rolling(window).sum() / df['volume'].rolling(window).sum()
+        df['factor'] = (df['close'] - df['vwap']) / df['vwap']
+        return df['factor']
+
+
+class fac_hl_volatility:
+    param_range = {'window': [5, 10, 20]}
+
+    @staticmethod
+    def operate(Data: pd.DataFrame, **kwargs):
+        hash_tb = {chr(i): 0 for i in range(97, 123)}
+        for key, value in kwargs.items():
+            hash_tb[key] = value
+        window = int(hash_tb['window'])
+
+        df = Data.copy()
+        df['hl_range'] = (df['high'] - df['low']) / df['close'].shift(1)
+        df['factor'] = df['hl_range'].rolling(window).std()
+        return df['factor']
+
+
+class fac_price_volume_divergence:
+    param_range = {'window': [5, 10, 20]}
+
+    @staticmethod
+    def operate(Data: pd.DataFrame, **kwargs):
+        hash_tb = {chr(i): 0 for i in range(97, 123)}
+        for key, value in kwargs.items():
+            hash_tb[key] = value
+        window = int(hash_tb['window'])
+
+        df = Data.copy()
+        df['price_ret'] = df['close'].pct_change()
+        df['volume_ret'] = df['volume'].pct_change()
+        df['factor'] = (df['price_ret'] * df['volume_ret']).rolling(window).mean()
+        return df['factor']
+
+
+class fac_open_close_range:
+    param_range = {'window': [5, 10, 20]}
+
+    @staticmethod
+    def operate(Data: pd.DataFrame, **kwargs):
+        hash_tb = {chr(i): 0 for i in range(97, 123)}
+        for key, value in kwargs.items():
+            hash_tb[key] = value
+        window = int(hash_tb['window'])
+
+        df = Data.copy()
+        df['oc_range'] = (df['close'] - df['open']) / df['open']
+        df['oc_range_sma'] = df['oc_range'].rolling(window).mean()
+        return df['oc_range_sma']
+
+
+class fac_hl_close_ratio:
+    param_range = {'window': [5, 10, 20]}
+
+    @staticmethod
+    def operate(Data: pd.DataFrame, **kwargs):
+        hash_tb = {chr(i): 0 for i in range(97, 123)}
+        for key, value in kwargs.items():
+            hash_tb[key] = value
+        window = int(hash_tb['window'])
+
+        df = Data.copy()
+        df['hl_range'] = (df['high'] - df['low']) / df['close']
+        df['hl_range_sma'] = df['hl_range'].rolling(window).mean()
+        return df['hl_range_sma']
+
+
+class fac_volume_weighted_hl:
+    param_range = {'window': [5, 10, 20]}
+
+    @staticmethod
+    def operate(Data: pd.DataFrame, **kwargs):
+        hash_tb = {chr(i): 0 for i in range(97, 123)}
+        for key, value in kwargs.items():
+            hash_tb[key] = value
+        window = int(hash_tb['window'])
+
+        df = Data.copy()
+        df['vw_hl'] = (df['high'] - df['low']) * df['volume']
+        df['vw_hl_sma'] = df['vw_hl'].rolling(window).mean()
+        return df['vw_hl_sma']
+
+
+class fac_close_position_change:
+    param_range = {'window': [5, 10, 20]}
+
+    @staticmethod
+    def operate(Data: pd.DataFrame, **kwargs):
+        hash_tb = {chr(i): 0 for i in range(97, 123)}
+        for key, value in kwargs.items():
+            hash_tb[key] = value
+        window = int(hash_tb['window'])
+
+        df = Data.copy()
+        df['close_change'] = df['close'].pct_change()
+        df['position_change'] = df['position'].pct_change()
+        df['cp_change'] = df['close_change'] * df['position_change']
+        df['cp_change_sma'] = df['cp_change'].rolling(window).mean()
+        return df['cp_change_sma']
+
+
+class fac_volume_breakout:
+    param_range = {'window': [20, 30, 50]}
+
+    @staticmethod
+    def operate(Data: pd.DataFrame, **kwargs):
+        hash_tb = {chr(i): 0 for i in range(97, 123)}
+        for key, value in kwargs.items():
+            hash_tb[key] = value
+        window = int(hash_tb['window'])
+
+        df = Data.copy()
+        df['volume_ma'] = df['volume'].rolling(window).mean()
+        df['volume_breakout'] = (df['volume'] > df['volume_ma']) * 1
+        return df['volume_breakout']
+
+
+class fac_hl_position_ratio:
+    param_range = {'window': [10, 20, 30]}
+
+    @staticmethod
+    def operate(Data: pd.DataFrame, **kwargs):
+        hash_tb = {chr(i): 0 for i in range(97, 123)}
+        for key, value in kwargs.items():
+            hash_tb[key] = value
+        window = int(hash_tb['window'])
+
+        df = Data.copy()
+        df['hl_range'] = (df['high'] - df['low']) / df['close']
+        df['position_ma'] = df['position'].rolling(window).mean()
+        df['hl_position_ratio'] = df['hl_range'] * (df['position'] / df['position_ma'])
+        return df['hl_position_ratio']
+
+
+class fac_close_volume_corr:
+    param_range = {'window': [20, 30, 60]}
+
+    @staticmethod
+    def operate(Data: pd.DataFrame, **kwargs):
+        hash_tb = {chr(i): 0 for i in range(97, 123)}
+        for key, value in kwargs.items():
+            hash_tb[key] = value
+        window = int(hash_tb['window'])
+
+        df = Data.copy()
+        df['close_ret'] = df['close'].pct_change()
+        df['volume_ret'] = df['volume'].pct_change()
+        df['close_volume_corr'] = df['close_ret'].rolling(window).corr(df['volume_ret'])
+        return df['close_volume_corr']
+
+
+class fac_volatility_adjusted_volume:
+    param_range = {'vol_window': [10, 20, 30], 'vol_ma_window': [5, 10, 20]}
+
+    @staticmethod
+    def operate(Data: pd.DataFrame, **kwargs):
+        hash_tb = {chr(i): 0 for i in range(97, 123)}
+        for key, value in kwargs.items():
+            hash_tb[key] = value
+        vol_window = int(hash_tb['vol_window'])
+        vol_ma_window = int(hash_tb['vol_ma_window'])
+
+        df = Data.copy()
+        df['returns'] = df['close'].pct_change()
+        df['volatility'] = df['returns'].rolling(vol_window).std()
+        df['vol_ma'] = df['volatility'].rolling(vol_ma_window).mean()
+        df['vol_adj_volume'] = df['volume'] * (df['volatility'] / df['vol_ma'])
+        return df['vol_adj_volume']
+
+
+class fac_volume_volatility_ratio:
+    param_range = {'window': [5, 10, 20]}
+
+    @staticmethod
+    def operate(Data: pd.DataFrame, **kwargs):
+        hash_tb = {chr(i): 0 for i in range(97, 123)}
+        for key, value in kwargs.items():
+            hash_tb[key] = value
+        window = int(hash_tb['window'])
+
+        df = Data.copy()
+        vol_std = df['volume'].rolling(window).std()
+        vol_mean = df['volume'].rolling(window).mean()
+        factor = vol_std / (vol_mean + 1e-8)
+        return factor
+
+
+class fac_volume_position_sync:
+    param_range = {'window': [5, 10, 20]}
+
+    @staticmethod
+    def operate(Data: pd.DataFrame, **kwargs):
+        hash_tb = {chr(i): 0 for i in range(97, 123)}
+        for key, value in kwargs.items():
+            hash_tb[key] = value
+        window = int(hash_tb['window'])
+
+        df = Data.copy()
+        vol_change = df['volume'].pct_change()
+        pos_change = df['position'].pct_change()
+        sync = (vol_change * pos_change).rolling(window).mean()
+        return sync
+
+
+class fac_hl_volume_ratio:
+    param_range = {'window': [5, 10, 20]}
+
+    @staticmethod
+    def operate(Data: pd.DataFrame, **kwargs):
+        hash_tb = {chr(i): 0 for i in range(97, 123)}
+        for key, value in kwargs.items():
+            hash_tb[key] = value
+        window = int(hash_tb['window'])
+
+        df = Data.copy()
+        hl_range = df['high'] - df['low']
+        norm_range = hl_range / (df['close'].rolling(window).mean() + 1e-8)
+        norm_volume = df['volume'] / (df['volume'].rolling(window).mean() + 1e-8)
+        factor = norm_range * norm_volume
+        return factor
+
+
+class fac_volume_acceleration_ratio:
+    param_range = {'short': [5, 10, 15], 'long': [20, 30, 40]}
+
+    @staticmethod
+    def operate(Data: pd.DataFrame, **kwargs):
+        hash_tb = {chr(i): 0 for i in range(97, 123)}
+        for key, value in kwargs.items():
+            hash_tb[key] = value
+        short = int(hash_tb['short'])
+        long = int(hash_tb['long'])
+
+        df = Data.copy()
+        df['vol_ma_short'] = df['volume'].rolling(short).mean()
+        df['vol_ma_long'] = df['volume'].rolling(long).mean()
+        df['vol_acc'] = df['vol_ma_short'] / df['vol_ma_long'] - 1
+        return df['vol_acc']
+
+
+class fac_intraday_skewness:
+    param_range = {'window': [10, 20, 30]}
+
+    @staticmethod
+    def operate(Data: pd.DataFrame, **kwargs):
+        hash_tb = {chr(i): 0 for i in range(97, 123)}
+        for key, value in kwargs.items():
+            hash_tb[key] = value
+        window = int(hash_tb['window'])
+
+        df = Data.copy()
+        df['intra_ret'] = (df['close'] - df['open']) / df['open']
+        df['skew'] = df['intra_ret'].rolling(window).skew()
+        return df['skew']
+
+
+class fac_hl_position_corr:
+    param_range = {'window': [10, 20, 30]}
+
+    @staticmethod
+    def operate(Data: pd.DataFrame, **kwargs):
+        hash_tb = {chr(i): 0 for i in range(97, 123)}
+        for key, value in kwargs.items():
+            hash_tb[key] = value
+        window = int(hash_tb['window'])
+
+        df = Data.copy()
+        df['hl_range'] = (df['high'] - df['low']) / df['close']
+        df['corr'] = df['hl_range'].rolling(window).corr(df['position'])
+        return df['corr']
+
+
+class fac_volume_position_divergence:
+    param_range = {'window': [5, 10, 20]}
+
+    @staticmethod
+    def operate(Data: pd.DataFrame, **kwargs):
+        hash_tb = {chr(i): 0 for i in range(97, 123)}
+        for key, value in kwargs.items():
+            hash_tb[key] = value
+        window = int(hash_tb['window'])
+
+        df = Data.copy()
+        df['vol_roc'] = df['volume'].pct_change(window)
+        df['pos_roc'] = df['position'].pct_change(window)
+        df['divergence'] = df['vol_roc'] - df['pos_roc']
+        return df['divergence']
+
+
+class fac_volume_weighted_open:
+    param_range = {'window': [5, 10, 20]}
+
+    @staticmethod
+    def operate(Data: pd.DataFrame, **kwargs):
+        hash_tb = {chr(i): 0 for i in range(97, 123)}
+        for key, value in kwargs.items():
+            hash_tb[key] = value
+        window = int(hash_tb['window'])
+
+        df = Data.copy()
+        df['vw_open'] = (df['open'] * df['volume']).rolling(window).sum() / df['volume'].rolling(window).sum()
+        return df['vw_open']
+
+
+class fac_intraday_range_ratio:
+    param_range = {'window': [5, 10, 20]}
+
+    @staticmethod
+    def operate(Data: pd.DataFrame, **kwargs):
+        hash_tb = {chr(i): 0 for i in range(97, 123)}
+        for key, value in kwargs.items():
+            hash_tb[key] = value
+        window = int(hash_tb['window'])
+
+        df = Data.copy()
+        df['daily_range'] = df['high'] - df['low']
+        df['range_ratio'] = df['daily_range'] / df['close'].rolling(window).mean()
+        return df['range_ratio']
+
+
+class fac_volume_position_corr:
+    param_range = {'window': [5, 10, 20]}
+
+    @staticmethod
+    def operate(Data: pd.DataFrame, **kwargs):
+        hash_tb = {chr(i): 0 for i in range(97, 123)}
+        for key, value in kwargs.items():
+            hash_tb[key] = value
+        window = int(hash_tb['window'])
+
+        df = Data.copy()
+        df['vol_pos_corr'] = df['volume'].rolling(window).corr(df['position'])
+        return df['vol_pos_corr']
+
+
+class fac_close_to_vwap:
+    param_range = {'window': [5, 10, 20]}
+
+    @staticmethod
+    def operate(Data: pd.DataFrame, **kwargs):
+        hash_tb = {chr(i): 0 for i in range(97, 123)}
+        for key, value in kwargs.items():
+            hash_tb[key] = value
+        window = int(hash_tb['window'])
+
+        df = Data.copy()
+        df['typical_price'] = (df['high'] + df['low'] + df['close']) / 3
+        df['vwap'] = (df['typical_price'] * df['volume']).rolling(window).sum() / df['volume'].rolling(window).sum()
+        df['close_vwap_ratio'] = df['close'] / df['vwap']
+        return df['close_vwap_ratio']
+
+
+class fac_volume_weighted_hl_ratio:
+    param_range = {'lookback': [5, 10, 20]}
+
+    @staticmethod
+    def operate(Data: pd.DataFrame, **kwargs):
+        hash_tb = {chr(i): 0 for i in range(97, 123)}
+        for key, value in kwargs.items():
+            hash_tb[key] = value
+        lookback = int(hash_tb['lookback'])
+
+        df = Data.copy()
+        df['hl_range'] = df['high'] - df['low']
+        df['volume_weighted_hl'] = df['hl_range'] * df['volume']
+        df['factor'] = df['volume_weighted_hl'].rolling(lookback).mean() / (df['volume'].rolling(lookback).mean() + 1e-8)
+        return df['factor']
+
+
+class fac_intraday_volume_pressure:
+    param_range = {'window': [5, 10, 20]}
+
+    @staticmethod
+    def operate(Data: pd.DataFrame, **kwargs):
+        hash_tb = {chr(i): 0 for i in range(97, 123)}
+        for key, value in kwargs.items():
+            hash_tb[key] = value
+        window = int(hash_tb['window'])
+
+        df = Data.copy()
+        df['close_open_diff'] = df['close'] - df['open']
+        df['volume_pressure'] = df['close_open_diff'] * df['volume']
+        df['factor'] = df['volume_pressure'].rolling(window).sum() / (df['volume'].rolling(window).sum() + 1e-8)
+        return df['factor']
+
+
+class fac_hl_position_weighted:
+    param_range = {'period': [10, 20, 30]}
+
+    @staticmethod
+    def operate(Data: pd.DataFrame, **kwargs):
+        hash_tb = {chr(i): 0 for i in range(97, 123)}
+        for key, value in kwargs.items():
+            hash_tb[key] = value
+        period = int(hash_tb['period'])
+
+        df = Data.copy()
+        df['hl_mid'] = (df['high'] + df['low']) / 2
+        df['position_weighted_price'] = df['hl_mid'] * df['position']
+        df['factor'] = df['position_weighted_price'].rolling(period).mean() / (df['position'].rolling(period).mean() + 1e-8)
+        return df['factor']
+
+
+class fac_volume_accel_close:
+    param_range = {'short': [5, 10], 'long': [20, 30]}
+
+    @staticmethod
+    def operate(Data: pd.DataFrame, **kwargs):
+        hash_tb = {chr(i): 0 for i in range(97, 123)}
+        for key, value in kwargs.items():
+            hash_tb[key] = value
+        short = int(hash_tb['short'])
+        long = int(hash_tb['long'])
+
+        df = Data.copy()
+        df['volume_ma_short'] = df['volume'].rolling(short).mean()
+        df['volume_ma_long'] = df['volume'].rolling(long).mean()
+        df['volume_accel'] = df['volume_ma_short'] - df['volume_ma_long']
+        df['factor'] = df['volume_accel'] * df['close']
+        return df['factor']
+
+
+class fac_intraday_efficiency_volume:
+    param_range = {'n': [5, 10, 20]}
+
+    @staticmethod
+    def operate(Data: pd.DataFrame, **kwargs):
+        hash_tb = {chr(i): 0 for i in range(97, 123)}
+        for key, value in kwargs.items():
+            hash_tb[key] = value
+        n = int(hash_tb['n'])
+
+        df = Data.copy()
+        df['price_change'] = abs(df['close'] - df['close'].shift(1))
+        df['hl_range'] = df['high'] - df['low']
+        df['efficiency'] = df['price_change'] / (df['hl_range'] + 1e-8)
+        df['factor'] = df['efficiency'].rolling(n).mean() * df['volume']
+        return df['factor']
+
+
+class fac_volume_weighted_intraday:
+    param_range = {'window': [5, 10, 20]}
+
+    @staticmethod
+    def operate(Data: pd.DataFrame, **kwargs):
+        hash_tb = {chr(i): 0 for i in range(97, 123)}
+        for key, value in kwargs.items():
+            hash_tb[key] = value
+        window = int(hash_tb['window'])
+
+        df = Data.copy()
+        df['intraday_range'] = (df['high'] - df['low']) / df['close'].shift(1)
+        df['volume_weighted'] = df['volume'] * df['intraday_range']
+        df['factor'] = df['volume_weighted'].rolling(window).mean()
+
+        return df['factor']
+
+
+class fac_position_adjusted_volume:
+    param_range = {'window': [5, 10, 20]}
+
+    @staticmethod
+    def operate(Data: pd.DataFrame, **kwargs):
+        hash_tb = {chr(i): 0 for i in range(97, 123)}
+        for key, value in kwargs.items():
+            hash_tb[key] = value
+        window = int(hash_tb['window'])
+
+        df = Data.copy()
+        df['position_change'] = df['position'].pct_change()
+        df['volume_change'] = df['volume'].pct_change()
+        df['adjusted_volume'] = df['volume_change'] * (1 + df['position_change'])
+        df['factor'] = df['adjusted_volume'].rolling(window).mean()
+
+        return df['factor']
+
+
+class fac_close_volume_sync:
+    param_range = {'window': [5, 10, 20]}
+
+    @staticmethod
+    def operate(Data: pd.DataFrame, **kwargs):
+        hash_tb = {chr(i): 0 for i in range(97, 123)}
+        for key, value in kwargs.items():
+            hash_tb[key] = value
+        window = int(hash_tb['window'])
+
+        df = Data.copy()
+        df['close_ret'] = df['close'].pct_change()
+        df['volume_ret'] = df['volume'].pct_change()
+        df['sync'] = (df['close_ret'] * df['volume_ret']).abs()
+        df['factor'] = df['sync'].rolling(window).mean()
+
+        return df['factor']
+
+
+class fac_hl_volume_skew:
+    param_range = {'window': [5, 10, 20]}
+
+    @staticmethod
+    def operate(Data: pd.DataFrame, **kwargs):
+        hash_tb = {chr(i): 0 for i in range(97, 123)}
+        for key, value in kwargs.items():
+            hash_tb[key] = value
+        window = int(hash_tb['window'])
+
+        df = Data.copy()
+        df['hl_ratio'] = (df['high'] - df['close']) / (df['close'] - df['low'] + 1e-8)
+        df['volume_skew'] = df['volume'] * df['hl_ratio']
+        df['factor'] = df['volume_skew'].rolling(window).mean()
+
+        return df['factor']
+
+
+class fac_volume_trend_strength:
+    param_range = {'short_window': [5, 10, 20], 'long_window': [20, 40, 60]}
+
+    @staticmethod
+    def operate(Data: pd.DataFrame, **kwargs):
+        hash_tb = {chr(i): 0 for i in range(97, 123)}
+        for key, value in kwargs.items():
+            hash_tb[key] = value
+        short_window = int(hash_tb['short_window'])
+        long_window = int(hash_tb['long_window'])
+
+        df = Data.copy()
+        short_ma = df['volume'].rolling(short_window).mean()
+        long_ma = df['volume'].rolling(long_window).mean()
+        trend_strength = (short_ma - long_ma) / long_ma
+        return trend_strength
+
+
+class fac_intraday_volatility_adj:
+    param_range = {'window': [10, 20, 30]}
+
+    @staticmethod
+    def operate(Data: pd.DataFrame, **kwargs):
+        hash_tb = {chr(i): 0 for i in range(97, 123)}
+        for key, value in kwargs.items():
+            hash_tb[key] = value
+        window = int(hash_tb['window'])
+
+        df = Data.copy()
+        hl_range = (df['high'] - df['low']) / df['close'].shift(1)
+        atr = hl_range.rolling(window).mean()
+        adj_volume = df['volume'] / (atr + 1e-8)
+        return adj_volume
+
+
+class fac_price_volume_convergence:
+    param_range = {'window': [5, 10, 20]}
+
+    @staticmethod
+    def operate(Data: pd.DataFrame, **kwargs):
+        hash_tb = {chr(i): 0 for i in range(97, 123)}
+        for key, value in kwargs.items():
+            hash_tb[key] = value
+        window = int(hash_tb['window'])
+
+        df = Data.copy()
+        price_change = df['close'].pct_change()
+        volume_change = df['volume'].pct_change()
+        convergence = price_change.rolling(window).corr(volume_change)
+        return convergence
+
+
+class fac_position_weighted_price:
+    param_range = {'window': [5, 10, 20]}
+
+    @staticmethod
+    def operate(Data: pd.DataFrame, **kwargs):
+        hash_tb = {chr(i): 0 for i in range(97, 123)}
+        for key, value in kwargs.items():
+            hash_tb[key] = value
+        window = int(hash_tb['window'])
+
+        df = Data.copy()
+        weighted_price = (df['close'] * df['position']) / df['position'].rolling(window).mean()
+        norm_factor = df['close'].rolling(window).mean()
+        pwp = (weighted_price - norm_factor) / norm_factor
+        return pwp
+
+
+class fac_volume_position_trend:
+    param_range = {'window': [10, 20, 30]}
+
+    @staticmethod
+    def operate(Data: pd.DataFrame, **kwargs):
+        hash_tb = {chr(i): 0 for i in range(97, 123)}
+        for key, value in kwargs.items():
+            hash_tb[key] = value
+        window = int(hash_tb['window'])
+
+        df = Data.copy()
+        volume_trend = df['volume'].pct_change().rolling(window).mean()
+        position_trend = df['position'].pct_change().rolling(window).mean()
+        vp_trend = volume_trend - position_trend
+        return vp_trend
+
+
+class fac_volume_weighted_return:
+    param_range = {'window': [5, 10, 20]}
+
+    @staticmethod
+    def operate(Data: pd.DataFrame, **kwargs):
+        hash_tb = {chr(i): 0 for i in range(97, 123)}
+        for key, value in kwargs.items():
+            hash_tb[key] = value
+        window = int(hash_tb['window'])
+
+        df = Data.copy()
+        df['ret'] = df['close'].pct_change()
+        df['vw_ret'] = df['ret'] * df['volume']
+        df['factor'] = df['vw_ret'].rolling(window).mean() / df['volume'].rolling(window).mean()
+        return df['factor']
+
+
+class fac_intraday_volume_ratio:
+    param_range = {'window': [5, 10, 20]}
+
+    @staticmethod
+    def operate(Data: pd.DataFrame, **kwargs):
+        hash_tb = {chr(i): 0 for i in range(97, 123)}
+        for key, value in kwargs.items():
+            hash_tb[key] = value
+        window = int(hash_tb['window'])
+
+        df = Data.copy()
+        df['hl_range'] = (df['high'] - df['low']) / df['close'].shift(1)
+        df['volume_norm'] = df['volume'] / df['volume'].rolling(window).mean()
+        df['factor'] = df['hl_range'] * df['volume_norm']
+        return df['factor']
+
+
+class fac_position_weighted_volatility:
+    param_range = {'window': [5, 10, 20]}
+
+    @staticmethod
+    def operate(Data: pd.DataFrame, **kwargs):
+        hash_tb = {chr(i): 0 for i in range(97, 123)}
+        for key, value in kwargs.items():
+            hash_tb[key] = value
+        window = int(hash_tb['window'])
+
+        df = Data.copy()
+        df['ret'] = df['close'].pct_change()
+        df['volatility'] = df['ret'].rolling(window).std()
+        df['position_norm'] = df['position'] / df['position'].rolling(window).mean()
+        df['factor'] = df['volatility'] * df['position_norm']
+        return df['factor']
+
+
+class fac_volume_position_slope:
+    param_range = {'window': [5, 10, 20]}
+
+    @staticmethod
+    def operate(Data: pd.DataFrame, **kwargs):
+        hash_tb = {chr(i): 0 for i in range(97, 123)}
+        for key, value in kwargs.items():
+            hash_tb[key] = value
+        window = int(hash_tb['window'])
+
+        df = Data.copy()
+        df['volume_change'] = df['volume'].pct_change()
+        df['position_change'] = df['position'].pct_change()
+        df['factor'] = df['volume_change'].rolling(window).mean() - df['position_change'].rolling(window).mean()
+        return df['factor']
+
+
+class fac_close_vwap_diff:
+    param_range = {'window': [5, 10, 20]}
+
+    @staticmethod
+    def operate(Data: pd.DataFrame, **kwargs):
+        hash_tb = {chr(i): 0 for i in range(97, 123)}
+        for key, value in kwargs.items():
+            hash_tb[key] = value
+        window = int(hash_tb['window'])
+
+        df = Data.copy()
+        df['typical_price'] = (df['high'] + df['low'] + df['close']) / 3
+        df['vwap'] = (df['typical_price'] * df['volume']).rolling(window).sum() / df['volume'].rolling(window).sum()
+        df['factor'] = (df['close'] - df['vwap']) / df['close']
+        return df['factor']
+
+
+class fac_volume_breakout_ratio:
+    param_range = {'window': [5, 10, 20]}
+
+    @staticmethod
+    def operate(Data: pd.DataFrame, **kwargs):
+        hash_tb = {chr(i): 0 for i in range(97, 123)}
+        for key, value in kwargs.items():
+            hash_tb[key] = value
+        window = int(hash_tb['window'])
+
+        df = Data.copy()
+        avg_volume = df['volume'].rolling(window).mean()
+        factor = df['volume'] / avg_volume
+        return factor
+
+
+class fac_intraday_trend_strength:
+    param_range = {'window': [5, 10, 20]}
+
+    @staticmethod
+    def operate(Data: pd.DataFrame, **kwargs):
+        hash_tb = {chr(i): 0 for i in range(97, 123)}
+        for key, value in kwargs.items():
+            hash_tb[key] = value
+        window = int(hash_tb['window'])
+
+        df = Data.copy()
+        df['intraday_range'] = (df['high'] - df['low']) / df['close']
+        df['abs_return'] = abs(df['close'] - df['open']) / df['open']
+        trend_strength = df['abs_return'] / (df['intraday_range'] + 1e-8)
+        factor = trend_strength.rolling(window).mean()
+        return factor
+
+
+class fac_volume_weighted_intraday_range:
+    param_range = {'window': [5, 10, 20]}
+
+    @staticmethod
+    def operate(Data: pd.DataFrame, **kwargs):
+        hash_tb = {chr(i): 0 for i in range(97, 123)}
+        for key, value in kwargs.items():
+            hash_tb[key] = value
+        window = int(hash_tb['window'])
+
+        df = Data.copy()
+        df['intraday_range'] = (df['high'] - df['low']) / df['close']
+        vwir = (df['intraday_range'] * df['volume']).rolling(window).sum() / df['volume'].rolling(window).sum()
+        return vwir
+
+
+class fac_position_adjusted_price:
+    param_range = {'window': [5, 10, 20]}
+
+    @staticmethod
+    def operate(Data: pd.DataFrame, **kwargs):
+        hash_tb = {chr(i): 0 for i in range(97, 123)}
+        for key, value in kwargs.items():
+            hash_tb[key] = value
+        window = int(hash_tb['window'])
+
+        df = Data.copy()
+        avg_position = df['position'].rolling(window).mean()
+        position_ratio = df['position'] / (avg_position + 1e-8)
+        factor = df['close'] * position_ratio
+        return factor
+
+
+class fac_volume_position_coeff:
+    param_range = {'window': [5, 10, 20]}
+
+    @staticmethod
+    def operate(Data: pd.DataFrame, **kwargs):
+        hash_tb = {chr(i): 0 for i in range(97, 123)}
+        for key, value in kwargs.items():
+            hash_tb[key] = value
+        window = int(hash_tb['window'])
+
+        df = Data.copy()
+        volume_std = df['volume'].rolling(window).std()
+        position_std = df['position'].rolling(window).std()
+        factor = volume_std / (position_std + 1e-8)
+        return factor
+
+
+class fac_volume_weighted_hlc:
+    param_range = {'window': [5, 10, 20]}
+
+    @staticmethod
+    def operate(Data: pd.DataFrame, **kwargs):
+        hash_tb = {chr(i): 0 for i in range(97, 123)}
+        for key, value in kwargs.items():
+            hash_tb[key] = value
+        window = int(hash_tb['window'])
+
+        df = Data.copy()
+        df['hlc3'] = (df['high'] + df['low'] + df['close']) / 3
+        df['vw_hlc'] = df['hlc3'] * df['volume']
+        df['vw_hlc_ma'] = df['vw_hlc'].rolling(window).mean()
+        df['volume_ma'] = df['volume'].rolling(window).mean()
+        factor = df['vw_hlc_ma'] / df['volume_ma']
+
+        return factor
+
+
+class fac_intraday_amplitude:
+    param_range = {'window': [5, 10, 20]}
+
+    @staticmethod
+    def operate(Data: pd.DataFrame, **kwargs):
+        hash_tb = {chr(i): 0 for i in range(97, 123)}
+        for key, value in kwargs.items():
+            hash_tb[key] = value
+        window = int(hash_tb['window'])
+
+        df = Data.copy()
+        df['hl_range'] = (df['high'] - df['low']) / df['close'].shift(1)
+        factor = df['hl_range'].rolling(window).mean()
+
+        return factor
+
+
+class fac_close_position_velocity:
+    param_range = {'window': [5, 10, 20]}
+
+    @staticmethod
+    def operate(Data: pd.DataFrame, **kwargs):
+        hash_tb = {chr(i): 0 for i in range(97, 123)}
+        for key, value in kwargs.items():
+            hash_tb[key] = value
+        window = int(hash_tb['window'])
+
+        df = Data.copy()
+        df['close_ret'] = df['close'].pct_change()
+        df['position_ret'] = df['position'].pct_change()
+        df['close_ma'] = df['close_ret'].rolling(window).mean()
+        df['position_ma'] = df['position_ret'].rolling(window).mean()
+        factor = df['close_ma'] - df['position_ma']
+
+        return factor
+
+
+class fac_volume_hl_ratio:
+    param_range = {'window': [5, 10, 20]}
+
+    @staticmethod
+    def operate(Data: pd.DataFrame, **kwargs):
+        hash_tb = {chr(i): 0 for i in range(97, 123)}
+        for key, value in kwargs.items():
+            hash_tb[key] = value
+        window = int(hash_tb['window'])
+
+        df = Data.copy()
+        df['hl_ratio'] = (df['high'] - df['low']) / df['close'].shift(1)
+        df['volume_ma'] = df['volume'].rolling(window).mean()
+        df['hl_ratio_ma'] = df['hl_ratio'].rolling(window).mean()
+        factor = df['volume_ma'] * df['hl_ratio_ma']
+
+        return factor
+
+
+class fac_position_adjusted_close:
+    param_range = {'window': [5, 10, 20]}
+
+    @staticmethod
+    def operate(Data: pd.DataFrame, **kwargs):
+        hash_tb = {chr(i): 0 for i in range(97, 123)}
+        for key, value in kwargs.items():
+            hash_tb[key] = value
+        window = int(hash_tb['window'])
+
+        df = Data.copy()
+        df['position_norm'] = df['position'] / df['position'].rolling(window).mean()
+        df['close_ma'] = df['close'].rolling(window).mean()
+        factor = df['close_ma'] * df['position_norm']
+
+        return factor
+
+
+class fac_volume_weighted_open_close:
+    param_range = {'window': [5, 10, 20]}
+
+    @staticmethod
+    def operate(Data: pd.DataFrame, **kwargs):
+        hash_tb = {chr(i): 0 for i in range(97, 123)}
+        for key, value in kwargs.items():
+            hash_tb[key] = value
+        window = int(hash_tb['window'])
+
+        df = Data.copy()
+        df['vwoc'] = (df['volume'] * (df['open'] + df['close']) / 2).rolling(window).sum() / df['volume'].rolling(window).sum()
+        return df['vwoc']
+
+
+class fac_intraday_volume_pressure_ratio:
+    param_range = {'window': [5, 10, 20]}
+
+    @staticmethod
+    def operate(Data: pd.DataFrame, **kwargs):
+        hash_tb = {chr(i): 0 for i in range(97, 123)}
+        for key, value in kwargs.items():
+            hash_tb[key] = value
+        window = int(hash_tb['window'])
+
+        df = Data.copy()
+        df['ret'] = df['close'].pct_change()
+        df['up_volume'] = df['volume'] * (df['ret'] > 0)
+        df['down_volume'] = df['volume'] * (df['ret'] < 0)
+        df['up_vol_ma'] = df['up_volume'].rolling(window).mean()
+        df['down_vol_ma'] = df['down_volume'].rolling(window).mean()
+        df['volume_pressure'] = df['up_vol_ma'] / (df['down_vol_ma'] + 1e-8)
+        return df['volume_pressure']
+
+
+class fac_hl_position_weighted_price:
+    param_range = {'window': [5, 10, 20]}
+
+    @staticmethod
+    def operate(Data: pd.DataFrame, **kwargs):
+        hash_tb = {chr(i): 0 for i in range(97, 123)}
+        for key, value in kwargs.items():
+            hash_tb[key] = value
+        window = int(hash_tb['window'])
+
+        df = Data.copy()
+        df['hl_avg'] = (df['high'] + df['low']) / 2
+        df['position_weighted_price'] = (df['hl_avg'] * df['position']).rolling(window).sum() / df['position'].rolling(window).sum()
+        return df['position_weighted_price']
+
+
+class fac_volume_accel_close_momentum:
+    param_range = {'window': [5, 10, 20]}
+
+    @staticmethod
+    def operate(Data: pd.DataFrame, **kwargs):
+        hash_tb = {chr(i): 0 for i in range(97, 123)}
+        for key, value in kwargs.items():
+            hash_tb[key] = value
+        window = int(hash_tb['window'])
+
+        df = Data.copy()
+        df['volume_ma'] = df['volume'].rolling(window).mean()
+        df['volume_accel'] = df['volume_ma'].diff()
+        df['close_momentum'] = df['close'].pct_change(window)
+        df['factor'] = df['volume_accel'] * df['close_momentum']
+        return df['factor']
+
+
+class fac_intraday_efficiency_volume_ratio:
+    param_range = {'window': [5, 10, 20]}
+
+    @staticmethod
+    def operate(Data: pd.DataFrame, **kwargs):
+        hash_tb = {chr(i): 0 for i in range(97, 123)}
+        for key, value in kwargs.items():
+            hash_tb[key] = value
+        window = int(hash_tb['window'])
+
+        df = Data.copy()
+        df['intraday_range'] = df['high'] - df['low']
+        df['abs_close_change'] = abs(df['close'] - df['close'].shift(1))
+        df['efficiency'] = df['abs_close_change'] / (df['intraday_range'] + 1e-8)
+        df['volume_ma'] = df['volume'].rolling(window).mean()
+        df['factor'] = df['efficiency'] * df['volume_ma']
+        return df['factor']
+
+
+class fac_volume_weighted_hlc_ratio:
+    param_range = {'window': [5, 10, 20]}
+
+    @staticmethod
+    def operate(Data: pd.DataFrame, **kwargs):
+        hash_tb = {chr(i): 0 for i in range(97, 123)}
+        for key, value in kwargs.items():
+            hash_tb[key] = value
+        window = int(hash_tb['window'])
+
+        df = Data.copy()
+        df['hlc_avg'] = (df['high'] + df['low'] + df['close']) / 3
+        df['vw_hlc'] = df['hlc_avg'] * df['volume']
+        df['vw_hlc_ma'] = df['vw_hlc'].rolling(window).mean()
+        df['volume_ma'] = df['volume'].rolling(window).mean()
+        df['factor'] = df['vw_hlc_ma'] / (df['volume_ma'] + 1e-8)
+        return df['factor']
+
+
+class fac_intraday_volume_pressure_diff:
+    param_range = {'window': [5, 10, 20]}
+
+    @staticmethod
+    def operate(Data: pd.DataFrame, **kwargs):
+        hash_tb = {chr(i): 0 for i in range(97, 123)}
+        for key, value in kwargs.items():
+            hash_tb[key] = value
+        window = int(hash_tb['window'])
+
+        df = Data.copy()
+        df['intraday_range'] = df['high'] - df['low']
+        df['volume_pressure'] = df['volume'] / (df['intraday_range'] + 1e-8)
+        df['factor'] = df['volume_pressure'] - df['volume_pressure'].rolling(window).mean()
+        return df['factor']
+
+
+class fac_position_adjusted_hlc:
+    param_range = {'window': [5, 10, 20]}
+
+    @staticmethod
+    def operate(Data: pd.DataFrame, **kwargs):
+        hash_tb = {chr(i): 0 for i in range(97, 123)}
+        for key, value in kwargs.items():
+            hash_tb[key] = value
+        window = int(hash_tb['window'])
+
+        df = Data.copy()
+        df['hlc_avg'] = (df['high'] + df['low'] + df['close']) / 3
+        df['position_adj_hlc'] = df['hlc_avg'] * df['position']
+        df['factor'] = df['position_adj_hlc'].rolling(window).mean()
+        return df['factor']
+
+
+class fac_volume_accel_open_close:
+    param_range = {'window': [5, 10, 20]}
+
+    @staticmethod
+    def operate(Data: pd.DataFrame, **kwargs):
+        hash_tb = {chr(i): 0 for i in range(97, 123)}
+        for key, value in kwargs.items():
+            hash_tb[key] = value
+        window = int(hash_tb['window'])
+
+        df = Data.copy()
+        df['oc_range'] = df['close'] - df['open']
+        df['volume_ma'] = df['volume'].rolling(window).mean()
+        df['volume_accel'] = df['volume'] - df['volume_ma']
+        df['factor'] = df['oc_range'] * df['volume_accel']
+        return df['factor']
+
+
+class fac_hl_position_weighted_volume:
+    param_range = {'window': [5, 10, 20]}
+
+    @staticmethod
+    def operate(Data: pd.DataFrame, **kwargs):
+        hash_tb = {chr(i): 0 for i in range(97, 123)}
+        for key, value in kwargs.items():
+            hash_tb[key] = value
+        window = int(hash_tb['window'])
+
+        df = Data.copy()
+        df['hl_range'] = df['high'] - df['low']
+        df['position_weighted_volume'] = df['volume'] * df['position']
+        df['factor'] = df['hl_range'] * df['position_weighted_volume'].rolling(window).mean()
+        return df['factor']
+
+
+class fac_volume_weighted_intensity:
+    param_range = {'window': [5, 10, 20]}
+
+    @staticmethod
+    def operate(Data: pd.DataFrame, **kwargs):
+        hash_tb = {chr(i): 0 for i in range(97, 123)}
+        for key, value in kwargs.items():
+            hash_tb[key] = value
+        window = int(hash_tb['window'])
+
+        df = Data.copy()
+        df['price_range'] = (df['high'] - df['low']) / df['close'].shift(1)
+        df['volume_weighted'] = df['volume'] * df['price_range']
+        df['intensity'] = df['volume_weighted'].rolling(window).mean() / df['volume'].rolling(window).mean()
+        return df['intensity']
+
+
+class fac_intraday_volume_skew:
+    param_range = {'window': [5, 10, 20]}
+
+    @staticmethod
+    def operate(Data: pd.DataFrame, **kwargs):
+        hash_tb = {chr(i): 0 for i in range(97, 123)}
+        for key, value in kwargs.items():
+            hash_tb[key] = value
+        window = int(hash_tb['window'])
+
+        df = Data.copy()
+        df['intraday_return'] = (df['close'] - df['open']) / df['open']
+        df['volume_skew'] = df['volume'] * df['intraday_return']
+        df['skew_factor'] = df['volume_skew'].rolling(window).sum() / df['volume'].rolling(window).sum()
+        return df['skew_factor']
+
+
+class fac_position_adjusted_range:
+    param_range = {'window': [5, 10, 20]}
+
+    @staticmethod
+    def operate(Data: pd.DataFrame, **kwargs):
+        hash_tb = {chr(i): 0 for i in range(97, 123)}
+        for key, value in kwargs.items():
+            hash_tb[key] = value
+        window = int(hash_tb['window'])
+
+        df = Data.copy()
+        df['daily_range'] = (df['high'] - df['low']) / df['close'].shift(1)
+        df['position_norm'] = df['position'] / df['position'].rolling(window).mean()
+        df['adjusted_range'] = df['daily_range'] * df['position_norm']
+        df['factor'] = df['adjusted_range'].rolling(window).mean()
+        return df['factor']
+
+
+class fac_volume_acceleration_position:
+    param_range = {'window': [5, 10, 20]}
+
+    @staticmethod
+    def operate(Data: pd.DataFrame, **kwargs):
+        hash_tb = {chr(i): 0 for i in range(97, 123)}
+        for key, value in kwargs.items():
+            hash_tb[key] = value
+        window = int(hash_tb['window'])
+
+        df = Data.copy()
+        df['volume_change'] = df['volume'].pct_change()
+        df['position_change'] = df['position'].pct_change()
+        df['volume_acc'] = df['volume_change'].rolling(window).mean()
+        df['position_acc'] = df['position_change'].rolling(window).mean()
+        df['factor'] = df['volume_acc'] * df['position_acc']
+        return df['factor']
+
+
+class fac_hl_volume_efficiency:
+    param_range = {'window': [5, 10, 20]}
+
+    @staticmethod
+    def operate(Data: pd.DataFrame, **kwargs):
+        hash_tb = {chr(i): 0 for i in range(97, 123)}
+        for key, value in kwargs.items():
+            hash_tb[key] = value
+        window = int(hash_tb['window'])
+
+        df = Data.copy()
+        df['hl_range'] = (df['high'] - df['low']) / df['close'].shift(1)
+        df['volume_eff'] = df['hl_range'] / (df['volume'] + 1e-8)
+        df['factor'] = df['volume_eff'].rolling(window).mean()
+        return df['factor']
+
+
+class fac_volume_weighted_hl_range:
+    param_range = {'window': [5, 10, 20]}
+
+    @staticmethod
+    def operate(Data: pd.DataFrame, **kwargs):
+        hash_tb = {chr(i): 0 for i in range(97, 123)}
+        for key, value in kwargs.items():
+            hash_tb[key] = value
+        window = int(hash_tb['window'])
+
+        df = Data.copy()
+        df['hl_range'] = (df['high'] - df['low']) / df['close'].shift(1)
+        df['vw_hl_range'] = df['hl_range'] * df['volume']
+        df['factor'] = df['vw_hl_range'].rolling(window).mean()
+        
+        return df['factor']
+
+
+class fac_open_close_position_ratio:
+    param_range = {'window': [5, 10, 20]}
+
+    @staticmethod
+    def operate(Data: pd.DataFrame, **kwargs):
+        hash_tb = {chr(i): 0 for i in range(97, 123)}
+        for key, value in kwargs.items():
+            hash_tb[key] = value
+        window = int(hash_tb['window'])
+
+        df = Data.copy()
+        df['oc_ratio'] = df['close'] / df['open']
+        df['position_change'] = df['position'].pct_change()
+        df['factor'] = df['oc_ratio'] * df['position_change']
+        df['factor'] = df['factor'].rolling(window).mean()
+        
+        return df['factor']
+
+
+class fac_volume_acceleration_hl:
+    param_range = {'window': [5, 10, 20]}
+
+    @staticmethod
+    def operate(Data: pd.DataFrame, **kwargs):
+        hash_tb = {chr(i): 0 for i in range(97, 123)}
+        for key, value in kwargs.items():
+            hash_tb[key] = value
+        window = int(hash_tb['window'])
+
+        df = Data.copy()
+        df['hl_mean'] = (df['high'] + df['low']) / 2
+        df['volume_change'] = df['volume'].pct_change()
+        df['hl_change'] = df['hl_mean'].pct_change()
+        df['factor'] = df['volume_change'] * df['hl_change']
+        df['factor'] = df['factor'].rolling(window).mean()
+        
+        return df['factor']
+
+
+class fac_close_position_momentum:
+    param_range = {'window': [5, 10, 20]}
+
+    @staticmethod
+    def operate(Data: pd.DataFrame, **kwargs):
+        hash_tb = {chr(i): 0 for i in range(97, 123)}
+        for key, value in kwargs.items():
+            hash_tb[key] = value
+        window = int(hash_tb['window'])
+
+        df = Data.copy()
+        df['close_mom'] = df['close'].pct_change(window)
+        df['position_mom'] = df['position'].pct_change(window)
+        df['factor'] = df['close_mom'] * df['position_mom']
+        
+        return df['factor']
+
+
+class fac_volume_weighted_intraday_return:
+    param_range = {'window': [5, 10, 20]}
+
+    @staticmethod
+    def operate(Data: pd.DataFrame, **kwargs):
+        hash_tb = {chr(i): 0 for i in range(97, 123)}
+        for key, value in kwargs.items():
+            hash_tb[key] = value
+        window = int(hash_tb['window'])
+
+        df = Data.copy()
+        df['intraday_ret'] = (df['close'] - df['open']) / df['open']
+        df['vw_ret'] = df['intraday_ret'] * df['volume']
+        df['factor'] = df['vw_ret'].rolling(window).mean()
+        
+        return df['factor']
+
+
+class fac_volume_open_interest_ratio:
+    param_range = {'window': [5, 10, 20]}
+
+    @staticmethod
+    def operate(Data: pd.DataFrame, **kwargs):
+        hash_tb = {chr(i): 0 for i in range(97, 123)}
+        for key, value in kwargs.items():
+            hash_tb[key] = value
+        window = int(hash_tb['window'])
+
+        df = Data.copy()
+        df['vol_oi_ratio'] = df['volume'] / (df['position'] + 1e-8)
+        df['factor'] = df['vol_oi_ratio'].rolling(window).mean()
+        return df['factor']
+
+
+class fac_intraday_volume_skewness:
+    param_range = {'window': [5, 10, 20]}
+
+    @staticmethod
+    def operate(Data: pd.DataFrame, **kwargs):
+        hash_tb = {chr(i): 0 for i in range(97, 123)}
+        for key, value in kwargs.items():
+            hash_tb[key] = value
+        window = int(hash_tb['window'])
+
+        df = Data.copy()
+        df['intraday_range'] = df['high'] - df['low']
+        df['volume_skew'] = df['volume'] * df['intraday_range']
+        df['factor'] = df['volume_skew'].rolling(window).mean()
+        return df['factor']
+
+
+class fac_close_position_trend:
+    param_range = {'window': [5, 10, 20]}
+
+    @staticmethod
+    def operate(Data: pd.DataFrame, **kwargs):
+        hash_tb = {chr(i): 0 for i in range(97, 123)}
+        for key, value in kwargs.items():
+            hash_tb[key] = value
+        window = int(hash_tb['window'])
+
+        df = Data.copy()
+        df['close_change'] = df['close'].pct_change()
+        df['position_change'] = df['position'].pct_change()
+        df['trend'] = df['close_change'] * df['position_change']
+        df['factor'] = df['trend'].rolling(window).sum()
+        return df['factor']
+
+
+class fac_volume_weighted_hlc3:
+    param_range = {'window': [5, 10, 20]}
+
+    @staticmethod
+    def operate(Data: pd.DataFrame, **kwargs):
+        hash_tb = {chr(i): 0 for i in range(97, 123)}
+        for key, value in kwargs.items():
+            hash_tb[key] = value
+        window = int(hash_tb['window'])
+
+        df = Data.copy()
+        df['hlc3'] = (df['high'] + df['low'] + df['close']) / 3
+        df['vwap_hlc3'] = (df['hlc3'] * df['volume']).rolling(window).sum() / df['volume'].rolling(window).sum()
+        df['factor'] = df['close'] / df['vwap_hlc3'] - 1
+        return df['factor']
+
+
+class fac_intraday_volatility:
+    param_range = {'window': [5, 10, 20]}
+
+    @staticmethod
+    def operate(Data: pd.DataFrame, **kwargs):
+        hash_tb = {chr(i): 0 for i in range(97, 123)}
+        for key, value in kwargs.items():
+            hash_tb[key] = value
+        window = int(hash_tb['window'])
+
+        df = Data.copy()
+        df['intraday_range'] = (df['high'] - df['low']) / df['close'].shift(1)
+        df['factor'] = df['intraday_range'].rolling(window).std()
+        return df['factor']
+
+
+class fac_close_vwap_distance:
+    param_range = {'window': [5, 10, 20]}
+
+    @staticmethod
+    def operate(Data: pd.DataFrame, **kwargs):
+        hash_tb = {chr(i): 0 for i in range(97, 123)}
+        for key, value in kwargs.items():
+            hash_tb[key] = value
+        window = int(hash_tb['window'])
+
+        df = Data.copy()
+        df['typical_price'] = (df['high'] + df['low'] + df['close']) / 3
+        df['vwap'] = (df['typical_price'] * df['volume']).rolling(window).sum() / df['volume'].rolling(window).sum()
+        df['factor'] = (df['close'] - df['vwap']) / df['vwap']
+        return df['factor']
+
+
+class fac_volume_weighted_intraday_volatility:
+    param_range = {'window': [5, 10, 20]}
+
+    @staticmethod
+    def operate(Data: pd.DataFrame, **kwargs):
+        hash_tb = {chr(i): 0 for i in range(97, 123)}
+        for key, value in kwargs.items():
+            hash_tb[key] = value
+        window = int(hash_tb['window'])
+
+        df = Data.copy()
+        intraday_range = (df['high'] - df['low']) / df['close'].shift(1)
+        df['vw_vol'] = (df['volume'] * intraday_range).rolling(window).sum() / df['volume'].rolling(window).sum()
+        return df['vw_vol']
+
+
+class fac_open_interest_momentum:
+    param_range = {'short': [5, 10], 'long': [20, 30]}
+
+    @staticmethod
+    def operate(Data: pd.DataFrame, **kwargs):
+        hash_tb = {chr(i): 0 for i in range(97, 123)}
+        for key, value in kwargs.items():
+            hash_tb[key] = value
+        short = int(hash_tb['short'])
+        long = int(hash_tb['long'])
+
+        df = Data.copy()
+        oi_short = df['position'].rolling(short).mean()
+        oi_long = df['position'].rolling(long).mean()
+        return (oi_short - oi_long) / oi_long
+
+
+class fac_volume_adjusted_close:
+    param_range = {'window': [5, 10, 20]}
+
+    @staticmethod
+    def operate(Data: pd.DataFrame, **kwargs):
+        hash_tb = {chr(i): 0 for i in range(97, 123)}
+        for key, value in kwargs.items():
+            hash_tb[key] = value
+        window = int(hash_tb['window'])
+
+        df = Data.copy()
+        vol_ratio = df['volume'] / df['volume'].rolling(window).mean()
+        return df['close'] * vol_ratio
+
+
+class fac_intraday_efficiency_ratio:
+    param_range = {'window': [5, 10, 20]}
+
+    @staticmethod
+    def operate(Data: pd.DataFrame, **kwargs):
+        hash_tb = {chr(i): 0 for i in range(97, 123)}
+        for key, value in kwargs.items():
+            hash_tb[key] = value
+        window = int(hash_tb['window'])
+
+        df = Data.copy()
+        price_change = abs(df['close'] - df['close'].shift(1))
+        intraday_range = df['high'] - df['low']
+        er = price_change / intraday_range.replace(0, 1e-6)
+        return er.rolling(window).mean()
