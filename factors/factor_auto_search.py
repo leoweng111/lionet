@@ -1,0 +1,729 @@
+"""
+Automatic factor generation utilities.
+"""
+import json
+from datetime import datetime
+from pathlib import Path
+from typing import List, Optional, Sequence, Union, cast
+
+import numpy as np
+import pandas as pd
+
+from data import get_futures_continuous_contract_price
+from utils.logging import log
+
+from .backtest import BackTester
+from .factor_utils import get_future_ret
+
+
+class FactorGenerator:
+    """
+    Generate factor values automatically and run backtests.
+
+    The generated data is aligned with BackTester external-data format:
+    `time`, `instrument_id`, `future_ret`, and factor columns.
+    """
+
+    def __init__(self,
+                 method: str = 'tsfresh',
+                 instrument_type: str = 'futures_continuous_contract',
+                 instrument_id_list: Union[str, List[str]] = 'C0',
+                 fc_freq: str = '1d',
+                 data: Optional[pd.DataFrame] = None,
+                 start_time: Optional[str] = None,
+                 end_time: Optional[str] = None,
+                 portfolio_adjust_method: str = '1D',
+                 interest_method: str = 'compound',
+                 risk_free_rate: bool = False,
+                 n_jobs: int = 5,
+                 base_col_list: Optional[Sequence[str]] = None,
+                 min_window_size: int = 30,
+                 max_factor_count: Optional[int] = 200,
+                 tsfresh_profile: str = 'minimal',
+                 apply_rolling_norm: bool = True,
+                 rolling_norm_window: int = 30,
+                 rolling_norm_min_periods: int = 10,
+                 rolling_norm_eps: float = 1e-8,
+                 rolling_norm_clip: float = 10.0):
+        self.method = method
+        self.instrument_type = instrument_type
+        self.instrument_id_list = [instrument_id_list] if isinstance(instrument_id_list, str) else list(instrument_id_list)
+        self.fc_freq = fc_freq
+        self.data = data
+        self.start_time = start_time
+        self.end_time = end_time
+        self.portfolio_adjust_method = portfolio_adjust_method
+        self.interest_method = interest_method
+        self.risk_free_rate = risk_free_rate
+        self.n_jobs = n_jobs
+
+        self.base_col_list = list(base_col_list) if base_col_list else ['open', 'high', 'low', 'close', 'volume', 'position']
+        self.min_window_size = min_window_size
+        self.max_factor_count = max_factor_count
+        self.tsfresh_profile = tsfresh_profile
+        self.apply_rolling_norm = apply_rolling_norm
+        self.rolling_norm_window = rolling_norm_window
+        self.rolling_norm_min_periods = rolling_norm_min_periods
+        self.rolling_norm_eps = rolling_norm_eps
+        self.rolling_norm_clip = rolling_norm_clip
+
+        self.generated_data: Optional[pd.DataFrame] = None
+        self.generated_fc_name_list: List[str] = []
+        self.backtester: Optional[BackTester] = None
+
+        assert self.fc_freq in ['1m', '5m', '1d'], f'Only support 1m, 5m or 1d fc_freq, got {self.fc_freq}.'
+        assert self.portfolio_adjust_method in ['min', '1D', '1M', '1Q'], \
+            f'Only support min, 1D, 1M or 1Q portfolio_adjust_method, got {self.portfolio_adjust_method}.'
+        assert self.method in ['tsfresh'], f'Unsupported method: {self.method}.'
+
+    def _load_base_data(self) -> pd.DataFrame:
+        if isinstance(self.data, pd.DataFrame):
+            df = self.data.copy()
+        else:
+            if self.instrument_type != 'futures_continuous_contract':
+                raise ValueError(f'Unsupported instrument type: {self.instrument_type}.')
+            df = get_futures_continuous_contract_price(
+                instrument_id=self.instrument_id_list,
+                start_date=self.start_time,
+                end_date=self.end_time,
+                from_database=True
+            )
+
+        required_cols = ['time', 'instrument_id'] + self.base_col_list
+        for col in required_cols:
+            if col not in df.columns:
+                raise ValueError(f'Input data does not contain required column: {col}')
+
+        df = df[required_cols].copy()
+        df['time'] = pd.to_datetime(df['time'])
+        df = df.sort_values(['instrument_id', 'time']).reset_index(drop=True)
+
+        available_instruments = df['instrument_id'].dropna().unique().tolist()
+        invalid_instruments = [x for x in self.instrument_id_list if x not in available_instruments]
+        if invalid_instruments:
+            raise ValueError(
+                f'Invalid instrument_id_list: {invalid_instruments}. Available instruments: {available_instruments}'
+            )
+
+        return df
+
+    @staticmethod
+    def _get_tsfresh_fc_parameters(profile: str):
+        from tsfresh.feature_extraction import (
+            ComprehensiveFCParameters,
+            EfficientFCParameters,
+            MinimalFCParameters,
+        )
+
+        profile = profile.lower()
+        if profile == 'minimal':
+            return MinimalFCParameters()
+        if profile == 'efficient':
+            return EfficientFCParameters()
+        if profile == 'comprehensive':
+            return ComprehensiveFCParameters()
+        raise ValueError(f'Unsupported tsfresh_profile: {profile}. Use minimal/efficient/comprehensive.')
+
+    def _generate_by_tsfresh(self,
+                             df: pd.DataFrame,
+                             selected_fc_names: Optional[List[str]] = None) -> pd.DataFrame:
+        from tsfresh import extract_features
+        from tsfresh.feature_extraction.settings import from_columns
+
+        fc_parameters = self._get_tsfresh_fc_parameters(self.tsfresh_profile)
+
+        window_meta_list = []
+        long_df_list = []
+
+        for instrument_id, df_i in df.groupby('instrument_id', sort=False):
+            df_i = df_i.sort_values('time').reset_index(drop=True)
+            if len(df_i) < self.min_window_size:
+                log.warning(f'Skip instrument {instrument_id}: insufficient rows ({len(df_i)} < {self.min_window_size}).')
+                continue
+
+            for end_idx in range(self.min_window_size - 1, len(df_i)):
+                window_id = f'{instrument_id}__{int(df_i.loc[end_idx, "time"].value)}'
+                window_df = df_i.iloc[end_idx - self.min_window_size + 1: end_idx + 1]
+                window_meta_list.append({
+                    'window_id': window_id,
+                    'time': df_i.loc[end_idx, 'time'],
+                    'instrument_id': instrument_id,
+                })
+
+                for col in self.base_col_list:
+                    long_df = pd.DataFrame({
+                        'id': window_id,
+                        'time': range(self.min_window_size),
+                        'kind': col,
+                        'value': window_df[col].values,
+                    })
+                    long_df_list.append(long_df)
+
+        if not long_df_list:
+            raise ValueError('No rolling windows generated for tsfresh extraction. Please check input size.')
+
+        tsfresh_input = pd.concat(long_df_list, ignore_index=True)
+        if selected_fc_names:
+            extracted = extract_features(
+                tsfresh_input,
+                column_id='id',
+                column_sort='time',
+                column_kind='kind',
+                column_value='value',
+                kind_to_fc_parameters=from_columns(selected_fc_names),
+                disable_progressbar=True,
+                n_jobs=self.n_jobs,
+            )
+        else:
+            extracted = extract_features(
+                tsfresh_input,
+                column_id='id',
+                column_sort='time',
+                column_kind='kind',
+                column_value='value',
+                default_fc_parameters=dict(fc_parameters),
+                disable_progressbar=True,
+                n_jobs=self.n_jobs,
+            )
+        extracted = extracted.reset_index()
+        if 'id' in extracted.columns:
+            extracted = extracted.rename(columns={'id': 'window_id'})
+        elif 'index' in extracted.columns:
+            extracted = extracted.rename(columns={'index': 'window_id'})
+        else:
+            extracted = extracted.rename(columns={extracted.columns[0]: 'window_id'})
+
+        df_meta = pd.DataFrame(window_meta_list)
+        df_feature = df_meta.merge(extracted, on='window_id', how='left', validate='1:1')
+
+        factor_cols = [c for c in df_feature.columns if c not in ['window_id', 'time', 'instrument_id']]
+        if not factor_cols:
+            raise ValueError('No factor columns were generated by tsfresh.')
+
+        if selected_fc_names is not None:
+            # When explicit feature names are provided, keep all requested columns
+            # (fill missing as NaN) to make slice/full comparisons strictly aligned.
+            for col in selected_fc_names:
+                if col not in df_feature.columns:
+                    df_feature[col] = np.nan
+
+            df_feature = df_feature[['time', 'instrument_id'] + list(selected_fc_names)].copy()
+            df_feature = df_feature.sort_values(['instrument_id', 'time']).reset_index(drop=True)
+            return df_feature
+
+        # Remove fully-empty or constant columns; they are not useful in backtest.
+        valid_cols = []
+        for col in factor_cols:
+            series = df_feature[col]
+            if series.isna().all():
+                continue
+            if series.nunique(dropna=True) <= 1:
+                continue
+            valid_cols.append(col)
+
+        if not valid_cols:
+            raise ValueError('All generated tsfresh features are empty/constant after filtering.')
+
+        if self.max_factor_count is not None and len(valid_cols) > self.max_factor_count:
+            valid_cols = valid_cols[:self.max_factor_count]
+
+        df_feature = df_feature[['time', 'instrument_id'] + valid_cols].copy()
+        df_feature = df_feature.sort_values(['instrument_id', 'time']).reset_index(drop=True)
+
+        return df_feature
+
+    def _rolling_normalize_features(self,
+                                    df: pd.DataFrame,
+                                    factor_cols: Sequence[str]) -> pd.DataFrame:
+        """
+        Rolling normalization per instrument without future leakage.
+
+        For each timestamp t, statistics are calculated from history up to t-1:
+            z_t = (x_t - mean_{<=t-1}) / std_{<=t-1}
+
+        Then values are clipped to keep position magnitude under control.
+        """
+        if not factor_cols:
+            return df
+
+        df_out = df.copy()
+        df_out = df_out.sort_values(['instrument_id', 'time']).reset_index(drop=True)
+
+        grouped = df_out.groupby('instrument_id', sort=False)
+        for col in factor_cols:
+            hist_mean = grouped[col].transform(
+                lambda x: x.shift(1).rolling(self.rolling_norm_window,
+                                             min_periods=self.rolling_norm_min_periods).mean()
+            )
+            hist_std = grouped[col].transform(
+                lambda x: x.shift(1).rolling(self.rolling_norm_window,
+                                             min_periods=self.rolling_norm_min_periods).std()
+            )
+
+            hist_std = hist_std.replace(0, np.nan)
+            z = (df_out[col] - hist_mean) / (hist_std + self.rolling_norm_eps)
+            # Keep early samples neutral to avoid unstable oversized positions.
+            z = z.replace([np.inf, -np.inf], np.nan).fillna(0.0)
+            df_out[col] = z.clip(-self.rolling_norm_clip, self.rolling_norm_clip)
+
+        return df_out
+
+    def generate(self,
+                 selected_fc_name_list: Optional[List[str]] = None) -> pd.DataFrame:
+        """
+        Generate factor values based on selected method.
+        """
+        base_df = self._load_base_data()
+        if self.method == 'tsfresh':
+            factor_df = self._generate_by_tsfresh(base_df, selected_fc_names=selected_fc_name_list)
+        else:
+            raise ValueError(f'Unsupported method: {self.method}.')
+
+        if self.apply_rolling_norm:
+            factor_cols = [c for c in factor_df.columns if c not in ['time', 'instrument_id']]
+            factor_df = self._rolling_normalize_features(factor_df, factor_cols)
+
+        df_with_ret = get_future_ret(
+            base_df[['time', 'instrument_id', 'open', 'high', 'low', 'close', 'volume', 'position']].copy(),
+            portfolio_adjust_method=self.portfolio_adjust_method,
+            rfr=self.risk_free_rate,
+        )
+        df_with_ret = df_with_ret[['time', 'instrument_id', 'future_ret']].copy()
+
+        generated_data = df_with_ret.merge(factor_df, on=['time', 'instrument_id'], how='left', validate='1:1')
+        generated_data = generated_data.sort_values(['instrument_id', 'time']).reset_index(drop=True)
+
+        self.generated_fc_name_list = [c for c in generated_data.columns if c not in ['time', 'instrument_id', 'future_ret']]
+        self.generated_data = generated_data
+
+        log.info(f'Generated {len(self.generated_fc_name_list)} factors by method={self.method}.')
+        return generated_data
+
+    def generate_with_fc(self,
+                         fc_name_list: Union[str, List[str]]) -> pd.DataFrame:
+        """
+        Generate factor values only for the given tsfresh feature names.
+
+        This supports reusing previously saved feature names without extracting
+        the full tsfresh feature set.
+        """
+        if self.method != 'tsfresh':
+            raise ValueError('generate_with_fc is only supported when method=tsfresh.')
+        if isinstance(fc_name_list, str):
+            fc_name_list = [fc_name_list]
+        if not fc_name_list:
+            raise ValueError('fc_name_list is empty.')
+
+        return self.generate(selected_fc_name_list=list(fc_name_list))
+
+    def save_fc_value(self,
+                      fc_name_list: Union[str, List[str]],
+                      file_name: Optional[str] = None,
+                      file_format: str = 'parquet') -> Path:
+        """
+        Save selected factor columns from latest generated data.
+        """
+        if self.generated_data is None:
+            raise ValueError('Please call generate() before save_fc_value().')
+
+        if isinstance(fc_name_list, str):
+            fc_name_list = [fc_name_list]
+        generated_data = cast(pd.DataFrame, self.generated_data)
+        missing_cols = [c for c in fc_name_list if c not in generated_data.columns]
+        if missing_cols:
+            raise ValueError(f'Factor columns not found in generated data: {missing_cols}')
+
+        save_dir = Path(__file__).resolve().parents[1] / 'data' / 'factor_value'
+        save_dir.mkdir(parents=True, exist_ok=True)
+
+        if not file_name:
+            instrument_text = '-'.join(self.instrument_id_list)
+            file_name = f'{self.method}_{instrument_text}_{self.fc_freq}_{self.start_time}_{self.end_time}'
+
+        file_format = file_format.lower()
+        save_path = save_dir / f'{file_name}.{file_format}'
+
+        output_df = generated_data[['time', 'instrument_id', 'future_ret'] + list(fc_name_list)].copy()
+        if file_format == 'parquet':
+            output_df.to_parquet(save_path, index=False)
+        elif file_format == 'csv':
+            output_df.to_csv(save_path, index=False)
+        elif file_format in ['pkl', 'pickle']:
+            output_df.to_pickle(save_path)
+        else:
+            raise ValueError(f'Unsupported file_format: {file_format}. Use parquet/csv/pickle.')
+
+        log.info(f'Saved factor values to {save_path}.')
+        return save_path
+
+    def save_fc(self,
+                fc_name_list: Union[str, List[str]],
+                fc_package_name: Optional[str] = None,
+                save_dir: Optional[Union[str, Path]] = None) -> Path:
+        """
+        Save selected tsfresh feature definitions for future reuse.
+
+        Notes:
+        - tsfresh does not export raw Python source code for each feature.
+        - Reuse is achieved by storing feature names and converting them back to
+          tsfresh settings via `from_columns`.
+        """
+        from tsfresh.feature_extraction.settings import from_columns
+
+        if self.method != 'tsfresh':
+            raise ValueError('save_fc currently only supports method=tsfresh.')
+
+        if isinstance(fc_name_list, str):
+            fc_name_list = [fc_name_list]
+        if not fc_name_list:
+            raise ValueError('fc_name_list is empty.')
+
+        if self.generated_fc_name_list:
+            missing = [x for x in fc_name_list if x not in self.generated_fc_name_list]
+            if missing:
+                raise ValueError(f'fc_name_list contains unknown features: {missing}')
+
+        if save_dir is None:
+            save_dir = Path(__file__).resolve().parent / 'fc_from_tsfresh'
+        save_dir = Path(save_dir)
+        save_dir.mkdir(parents=True, exist_ok=True)
+
+        if not fc_package_name:
+            instrument_text = '-'.join(self.instrument_id_list)
+            now = datetime.now().strftime('%Y%m%d_%H%M%S')
+            fc_package_name = f'tsfresh_fc_{instrument_text}_{now}'
+
+        fc_name_list = list(fc_name_list)
+        kind_to_fc_parameters = from_columns(fc_name_list)
+        payload = {
+            'method': self.method,
+            'created_at': datetime.now().isoformat(timespec='seconds'),
+            'fc_name_list': fc_name_list,
+            'kind_to_fc_parameters': kind_to_fc_parameters,
+            'meta': {
+                'instrument_type': self.instrument_type,
+                'instrument_id_list': self.instrument_id_list,
+                'fc_freq': self.fc_freq,
+                'base_col_list': self.base_col_list,
+                'min_window_size': self.min_window_size,
+                'tsfresh_profile': self.tsfresh_profile,
+                'apply_rolling_norm': self.apply_rolling_norm,
+                'rolling_norm_window': self.rolling_norm_window,
+                'rolling_norm_min_periods': self.rolling_norm_min_periods,
+                'rolling_norm_clip': self.rolling_norm_clip,
+            }
+        }
+
+        config_path = save_dir / f'{fc_package_name}.json'
+        with open(config_path, 'w', encoding='utf-8') as f:
+            json.dump(payload, f, ensure_ascii=True, indent=2)
+
+        helper_path = save_dir / f'{fc_package_name}.py'
+        helper_content = (
+            '"""Auto-generated tsfresh feature package.\n\n'
+            'Use `FC_NAME_LIST` with FactorGenerator.generate_with_fc(...) or\n'
+            'FactorGenerator.backtest(data=..., fc_name_list=FC_NAME_LIST).\n'
+            '"""\n\n'
+            f'FC_NAME_LIST = {repr(fc_name_list)}\n'
+        )
+        with open(helper_path, 'w', encoding='utf-8') as f:
+            f.write(helper_content)
+
+        log.info(f'Saved tsfresh feature package to {config_path} and {helper_path}.')
+        return config_path
+
+    @staticmethod
+    def load_fc(config_path: Union[str, Path]) -> List[str]:
+        """
+        Load saved tsfresh feature names from `save_fc` config.
+        """
+        config_path = Path(config_path)
+        with open(config_path, 'r', encoding='utf-8') as f:
+            payload = json.load(f)
+        fc_name_list = payload.get('fc_name_list', [])
+        if not isinstance(fc_name_list, list) or not fc_name_list:
+            raise ValueError(f'Invalid config file: {config_path}.')
+        return fc_name_list
+
+    def backtest_from_fc_config(self,
+                                config_path: Union[str, Path],
+                                n_jobs: Optional[int] = None,
+                                strict_meta: bool = False) -> BackTester:
+        """
+        One-step workflow:
+        load saved feature config -> generate selected factors -> run backtest.
+        """
+        config_path = Path(config_path)
+        if not config_path.exists():
+            raise FileNotFoundError(f'Config file not found: {config_path}')
+
+        with open(config_path, 'r', encoding='utf-8') as f:
+            payload = json.load(f)
+
+        config_method = payload.get('method')
+        if config_method and config_method != self.method:
+            raise ValueError(
+                f'Config method={config_method} does not match current generator method={self.method}.'
+            )
+
+        fc_name_list = payload.get('fc_name_list', [])
+        if not isinstance(fc_name_list, list) or not fc_name_list:
+            raise ValueError(f'Invalid config file: {config_path}. Missing non-empty fc_name_list.')
+
+        if strict_meta:
+            meta = payload.get('meta', {})
+            if meta.get('fc_freq') and meta.get('fc_freq') != self.fc_freq:
+                raise ValueError(
+                    f'Config fc_freq={meta.get("fc_freq")} does not match current fc_freq={self.fc_freq}.'
+                )
+            if meta.get('instrument_type') and meta.get('instrument_type') != self.instrument_type:
+                raise ValueError(
+                    f'Config instrument_type={meta.get("instrument_type")} '
+                    f'does not match current instrument_type={self.instrument_type}.'
+                )
+            if meta.get('base_col_list') and list(meta.get('base_col_list')) != list(self.base_col_list):
+                raise ValueError(
+                    'Config base_col_list does not match current base_col_list when strict_meta=True.'
+                )
+
+        self.generate_with_fc(fc_name_list)
+        return self.backtest(fc_name_list=fc_name_list, n_jobs=n_jobs)
+
+    def filter_fc_by_threshold(self,
+                               performance_summary: Optional[pd.DataFrame] = None,
+                               net_ret_threshold: float = 0.0,
+                               sharpe_threshold: float = 0.5,
+                               require_all_row: bool = True,
+                               require_all_instruments: bool = True) -> List[str]:
+        """
+        Filter factors by net return and net sharpe thresholds.
+
+        A factor is kept only if ALL required rows satisfy thresholds:
+        - every year row
+        - and row `year == 'all'` when require_all_row is True
+
+        For multi-instrument backtest summary:
+        - require_all_instruments=True: all instruments must pass
+        - require_all_instruments=False: at least one instrument must pass
+        """
+        if performance_summary is None:
+            if self.backtester is None or self.backtester.performance_summary is None:
+                raise ValueError('No performance summary available. Please run backtest() first.')
+            summary_df = self.backtester.performance_summary.copy()
+        else:
+            summary_df = performance_summary.copy()
+
+        if 'year' not in summary_df.columns:
+            summary_df = summary_df.reset_index()
+
+        required_cols = ['year', 'Factor Name', 'Net Return', 'Net Sharpe']
+        for col in required_cols:
+            if col not in summary_df.columns:
+                raise ValueError(f'performance_summary does not contain required column: {col}')
+
+        mask = (
+            (summary_df['Net Return'] >= net_ret_threshold) &
+            (summary_df['Net Sharpe'] >= sharpe_threshold)
+        )
+        summary_df = summary_df.assign(_pass=mask)
+
+        selected_fc_name_list = []
+        for fc_name, df_fc in summary_df.groupby('Factor Name', sort=False):
+            if 'Instrument ID' in df_fc.columns:
+                instrument_pass_list = []
+                for _, df_ins in df_fc.groupby('Instrument ID', sort=False):
+                    if require_all_row and 'all' not in df_ins['year'].astype(str).values:
+                        instrument_pass_list.append(False)
+                    else:
+                        instrument_pass_list.append(bool(df_ins['_pass'].all()))
+
+                if not instrument_pass_list:
+                    continue
+                fc_pass = all(instrument_pass_list) if require_all_instruments else any(instrument_pass_list)
+            else:
+                if require_all_row and 'all' not in df_fc['year'].astype(str).values:
+                    continue
+                fc_pass = bool(df_fc['_pass'].all())
+
+            if fc_pass:
+                selected_fc_name_list.append(fc_name)
+
+        return selected_fc_name_list
+
+    def auto_mine_select_and_save_fc(self,
+                                     net_ret_threshold: float,
+                                     sharpe_threshold: float,
+                                     fc_package_name: Optional[str] = None,
+                                     save_dir: Optional[Union[str, Path]] = None,
+                                     n_jobs: Optional[int] = None,
+                                     require_all_row: bool = True,
+                                     require_all_instruments: bool = True) -> dict:
+        """
+        One-step automation:
+        generate factors -> backtest -> threshold filter -> save selected config.
+        """
+        generated_df = self.generate()
+        bt = self.backtest(data=generated_df, fc_name_list=self.generated_fc_name_list, n_jobs=n_jobs)
+        selected_fc_name_list = self.filter_fc_by_threshold(
+            performance_summary=bt.performance_summary,
+            net_ret_threshold=net_ret_threshold,
+            sharpe_threshold=sharpe_threshold,
+            require_all_row=require_all_row,
+            require_all_instruments=require_all_instruments,
+        )
+
+        if not selected_fc_name_list:
+            raise ValueError(
+                f'No factors passed thresholds: net_ret_threshold={net_ret_threshold}, '
+                f'sharpe_threshold={sharpe_threshold}.'
+            )
+
+        config_path = self.save_fc(
+            fc_name_list=selected_fc_name_list,
+            fc_package_name=fc_package_name,
+            save_dir=save_dir,
+        )
+
+        return {
+            'config_path': config_path,
+            'selected_fc_name_list': selected_fc_name_list,
+            'bt': bt,
+        }
+
+    def check_if_leakage(self,
+                         fc_name_list: Optional[Union[str, List[str]]] = None,
+                         atol: float = 1e-10,
+                         rtol: float = 1e-8,
+                         raise_error: bool = True) -> dict:
+        """
+        Strict leakage check by expanding-time-slice recomputation.
+
+        Procedure:
+        1) Compute full-sample factor series.
+        2) For each day t, recompute factors using only data <= t, and take factor values at t.
+        3) Compare the two series day-by-day for each factor.
+        """
+        if isinstance(fc_name_list, str):
+            fc_name_list = [fc_name_list]
+
+        base_df = self._load_base_data()
+
+        # Resolve feature list to check.
+        if fc_name_list:
+            selected_fc_name_list = list(fc_name_list)
+        else:
+            factor_df_for_names = self._generate_by_tsfresh(base_df)
+            selected_fc_name_list = [
+                c for c in factor_df_for_names.columns if c not in ['time', 'instrument_id']
+            ]
+
+        if not selected_fc_name_list:
+            raise ValueError('No factor columns available for leakage check.')
+
+        # Full-sample factor series.
+        full_factor_df = self._generate_by_tsfresh(base_df, selected_fc_names=selected_fc_name_list)
+        if self.apply_rolling_norm:
+            full_factor_df = self._rolling_normalize_features(full_factor_df, selected_fc_name_list)
+
+        check_time_list = sorted(full_factor_df['time'].dropna().unique().tolist())
+        if not check_time_list:
+            raise ValueError('No valid time points available for leakage check.')
+
+        # Expanding-slice factor series: for each day, only use data up to that day.
+        slice_factor_list = []
+        for t in check_time_list:
+            df_slice = base_df.loc[base_df['time'] <= t].copy()
+            factor_df_slice = self._generate_by_tsfresh(df_slice, selected_fc_names=selected_fc_name_list)
+            if self.apply_rolling_norm:
+                factor_df_slice = self._rolling_normalize_features(factor_df_slice, selected_fc_name_list)
+
+            factor_df_slice = factor_df_slice.loc[
+                factor_df_slice['time'] == t,
+                ['time', 'instrument_id'] + selected_fc_name_list
+            ].copy()
+            slice_factor_list.append(factor_df_slice)
+
+        slice_factor_df = pd.concat(slice_factor_list, ignore_index=True)
+
+        left = full_factor_df[['time', 'instrument_id'] + selected_fc_name_list].copy()
+        right = slice_factor_df[['time', 'instrument_id'] + selected_fc_name_list].copy()
+
+        merged = left.merge(
+            right,
+            on=['time', 'instrument_id'],
+            how='outer',
+            suffixes=('_full', '_slice'),
+            indicator=True,
+        )
+
+        missing_row_df = merged.loc[merged['_merge'] != 'both', ['time', 'instrument_id', '_merge']].copy()
+        mismatch_detail = {}
+
+        both_df = merged.loc[merged['_merge'] == 'both'].copy()
+        for fc_name in selected_fc_name_list:
+            col_full = f'{fc_name}_full'
+            col_slice = f'{fc_name}_slice'
+            is_equal = np.isclose(
+                both_df[col_full].astype(float),
+                both_df[col_slice].astype(float),
+                rtol=rtol,
+                atol=atol,
+                equal_nan=True,
+            )
+            mismatch_count = int((~is_equal).sum())
+            if mismatch_count > 0:
+                mismatch_detail[fc_name] = mismatch_count
+
+        passed = (len(missing_row_df) == 0) and (len(mismatch_detail) == 0)
+        result = {
+            'passed': passed,
+            'checked_factor_count': len(selected_fc_name_list),
+            'checked_time_count': len(check_time_list),
+            'missing_row_count': int(len(missing_row_df)),
+            'mismatch_factor_count': int(len(mismatch_detail)),
+            'mismatch_detail': mismatch_detail,
+        }
+
+        if raise_error and not passed:
+            raise ValueError(f'Leakage check failed: {result}')
+
+        return result
+
+    def backtest(self,
+                 data: Optional[pd.DataFrame] = None,
+                 fc_name_list: Optional[Union[str, List[str]]] = None,
+                 n_jobs: Optional[int] = None) -> BackTester:
+        """
+        Run backtest with generated or external factor dataframe.
+        """
+        if data is None:
+            if self.generated_data is None:
+                raise ValueError('Please call generate() first, or pass `data` explicitly.')
+            data = self.generated_data
+
+        if fc_name_list is None:
+            fc_name_list = self.generated_fc_name_list
+        if not fc_name_list:
+            raise ValueError('fc_name_list is empty. Please specify factor columns for backtesting.')
+
+        bt = BackTester(
+            fc_name_list=fc_name_list,
+            instrument_type=self.instrument_type,
+            instrument_id_list=self.instrument_id_list,
+            fc_freq=self.fc_freq,
+            data=data,
+            start_time=self.start_time,
+            end_time=self.end_time,
+            portfolio_adjust_method=self.portfolio_adjust_method,
+            interest_method=self.interest_method,
+            risk_free_rate=self.risk_free_rate,
+            n_jobs=n_jobs or self.n_jobs,
+        )
+        bt.backtest()
+        self.backtester = bt
+        return bt
+
+
+
+
+

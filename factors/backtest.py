@@ -76,7 +76,7 @@ class BackTester:
         self.performance_summary = None
         self.ts_performance_summary = None
         self.is_backtested = False
-        self.is_preprocessed = False
+        self.is_preprocessed = isinstance(self.data, pd.DataFrame)
 
         assert self.fc_freq in ['1m', '5m', '1d'], f'Only support 1m, 5m or 1d fc_freq, but got {fc_freq} instead.'
         assert self.portfolio_adjust_method in ['min', '1D', '1M', '1Q'], \
@@ -108,6 +108,7 @@ class BackTester:
                                                                   from_database=True)
             else:
                 raise ValueError(f'Does not support instrument type {self.instrument_type}.')
+            self.is_preprocessed = False
 
         available_instruments = self.data['instrument_id'].dropna().unique().tolist()
         invalid_instruments = [x for x in self.instrument_id_list if x not in available_instruments]
@@ -123,9 +124,14 @@ class BackTester:
 
         self.fc_name_with_param_list = []
         for fc_name in self.fc_name_list:
+            if self.is_preprocessed and fc_name in self.data.columns:
+                self.fc_name_with_param_list.append(fc_name)
+                continue
+
             parameters = resolve_factor_class(fc_name).param_range
-            self.fc_name_with_param_list += \
-                [join_fc_name_and_parameter(fc_name, parameter) for parameter in iterdict(parameters)]
+            self.fc_name_with_param_list += [
+                join_fc_name_and_parameter(fc_name, parameter) for parameter in iterdict(parameters)
+            ]
 
     def _preprocess_data(self):
         """
@@ -144,7 +150,10 @@ class BackTester:
 
     def plot_nav(self,
                  fc_name: Union[str, list, None] = None,
-                 instrument_id_list: Union[str, list, None] = None):
+                 instrument_id_list: Union[str, list, None] = None,
+                 x_tick_rotation: int = 45,
+                 auto_layout: bool = True,
+                 close_fig: bool = True):
         """
         Plot the cumulative return(i.e. nav) graph for factor.
         e.g. bt.plot_nav()
@@ -182,6 +191,18 @@ class BackTester:
                 ax2.set_title(f'Cumulative Net Return of factor {fac} ({instrument_id})')
                 ax2.set_xlabel('time')
 
+                for ax in [ax1, ax2]:
+                    ax.tick_params(axis='x', labelrotation=x_tick_rotation)
+                    for label in ax.get_xticklabels():
+                        label.set_horizontalalignment('right')
+
+                if auto_layout:
+                    fig.tight_layout()
+
+                plt.show()
+                if close_fig:
+                    plt.close(fig)
+
     def backtest(self):
         """
         Use this method for backtesting.
@@ -208,6 +229,7 @@ class BackTester:
         # Parallel strategy:
         # - single instrument: parallelize inside get_performance (across factors)
         # - multi instrument: parallelize across instruments and keep inner factor jobs to 1
+        result_list = []
         if len(self.instrument_id_list) == 1:
             result_list = [_run_one_instrument(self.instrument_id_list[0], max(1, self.n_jobs))]
         else:

@@ -112,7 +112,7 @@ def get_future_ret(Data: pd.DataFrame,
     if portfolio_adjust_method == '1D':
         # open to open ret. For day T, using (T+2 open - T+1 open) / T+1 open
         df = df.sort_values(by='time')
-        df['future_ret'] = df.groupby('instrument_id')['open'].transform(lambda x: x.pct_change().shift(-1))
+        df['future_ret'] = df.groupby('instrument_id')['open'].transform(lambda x: x.pct_change().shift(-2))
 
     # df['transaction_price'] = df['close'].pct_change()
     # # transaction price of one bar is the average transaction price for a transaction that is completed at
