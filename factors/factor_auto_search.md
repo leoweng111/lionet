@@ -44,9 +44,29 @@ result = fg.auto_mine_select_and_save_fc(
     sharpe_threshold=0.8,
     fc_package_name='tsfresh_high_quality_fc',
     require_all_instruments=False,
+    method='tsfresh',
 )
 print(result['config_path'])
 print(result['selected_fc_name_list'])
+
+# llm prompt mode (DeepSeek)
+fg_llm = FactorGenerator(
+    method='llm_prompt',
+    instrument_id_list=['C0'],
+    fc_freq='1d',
+    start_time='20230101',
+    end_time='20260310',
+    model_name='deepseek',
+    llm_temperature=0.7,
+    llm_factor_count=6,
+    llm_user_requirement='Generate simple momentum and volatility factors.'
+)
+result_llm = fg_llm.auto_mine_select_and_save_fc(
+    net_ret_threshold=0.03,
+    sharpe_threshold=0.6,
+    method='llm_prompt',
+)
+print(result_llm['config_path'])
 ```
 
 ## Output Data Format
@@ -62,6 +82,8 @@ Saved factor files are written to `data/factor_value/`.
 
 Selected tsfresh feature definitions are saved under `factors/fc_from_tsfresh/`.
 
+LLM-generated valid factor classes are persisted to `factors/factor_from_llm.py`.
+
 ## Rolling Normalization (No Leakage)
 
 - Normalization is done per `instrument_id` and per factor column.
@@ -76,4 +98,9 @@ Selected tsfresh feature definitions are saved under `factors/fc_from_tsfresh/`.
 - By default, `year='all'` row must also pass (`require_all_row=True`).
 - For multi-instrument results, default is all instruments must pass (`require_all_instruments=True`).
 - Set `require_all_instruments=False` to keep factors when at least one instrument passes.
+
+## LLM Config
+
+- Set `DEEPSEEK_API_KEY` and `DEEPSEEK_BASE_URL` in `utils/params.py`.
+- `llm_prompt` mode expects strict JSON output from LLM and validates syntax/runtime before use.
 

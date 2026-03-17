@@ -2,9 +2,13 @@
 Automatic factor generation utilities.
 """
 import json
+import re
+import ast
+import importlib
+import os
 from datetime import datetime
 from pathlib import Path
-from typing import List, Optional, Sequence, Union, cast
+from typing import Any, Dict, List, Optional, Sequence, Tuple, Union, cast
 
 import numpy as np
 import pandas as pd
@@ -13,7 +17,8 @@ from data import get_futures_continuous_contract_price
 from utils.logging import log
 
 from .backtest import BackTester
-from .factor_utils import get_future_ret
+from .factor_utils import get_future_ret, join_fc_name_and_parameter
+from stats import iterdict
 
 
 class FactorGenerator:
@@ -42,9 +47,13 @@ class FactorGenerator:
                  tsfresh_profile: str = 'minimal',
                  apply_rolling_norm: bool = True,
                  rolling_norm_window: int = 30,
-                 rolling_norm_min_periods: int = 10,
+                 rolling_norm_min_periods: int = 20,
                  rolling_norm_eps: float = 1e-8,
-                 rolling_norm_clip: float = 10.0):
+                 rolling_norm_clip: float = 10.0,
+                 model_name: str = 'deepseek',
+                 llm_temperature: float = 0.7,
+                 llm_factor_count: int = 5,
+                 llm_user_requirement: str = '生成期货的日频量价因子'):
         self.method = method
         self.instrument_type = instrument_type
         self.instrument_id_list = [instrument_id_list] if isinstance(instrument_id_list, str) else list(instrument_id_list)
@@ -66,15 +75,20 @@ class FactorGenerator:
         self.rolling_norm_min_periods = rolling_norm_min_periods
         self.rolling_norm_eps = rolling_norm_eps
         self.rolling_norm_clip = rolling_norm_clip
+        self.model_name = model_name
+        self.llm_temperature = llm_temperature
+        self.llm_factor_count = llm_factor_count
+        self.llm_user_requirement = llm_user_requirement
 
         self.generated_data: Optional[pd.DataFrame] = None
         self.generated_fc_name_list: List[str] = []
         self.backtester: Optional[BackTester] = None
+        self.generated_factor_code_map: Dict[str, str] = {}
 
         assert self.fc_freq in ['1m', '5m', '1d'], f'Only support 1m, 5m or 1d fc_freq, got {self.fc_freq}.'
         assert self.portfolio_adjust_method in ['min', '1D', '1M', '1Q'], \
             f'Only support min, 1D, 1M or 1Q portfolio_adjust_method, got {self.portfolio_adjust_method}.'
-        assert self.method in ['tsfresh'], f'Unsupported method: {self.method}.'
+        assert self.method in ['tsfresh', 'llm_prompt'], f'Unsupported method: {self.method}.'
 
     def _load_base_data(self) -> pd.DataFrame:
         if isinstance(self.data, pd.DataFrame):
@@ -268,6 +282,256 @@ class FactorGenerator:
 
         return df_out
 
+    @staticmethod
+    def _auto_load_project_env() -> bool:
+        """Best-effort load of .env from common project-root locations."""
+        candidate_paths = [
+            Path(__file__).resolve().parents[1] / '.env',
+            Path(__file__).resolve().parents[2] / '.env',
+        ]
+
+        for env_path in candidate_paths:
+            if not env_path.exists():
+                continue
+            try:
+                from dotenv import load_dotenv
+                load_dotenv(env_path, override=False)
+                return True
+            except Exception:
+                # Fallback parser for simple KEY=VALUE lines.
+                try:
+                    for raw_line in env_path.read_text(encoding='utf-8').splitlines():
+                        line = raw_line.strip()
+                        if not line or line.startswith('#') or '=' not in line:
+                            continue
+                        key, value = line.split('=', 1)
+                        key = key.strip()
+                        value = value.strip().strip('"').strip("'")
+                        if key and key not in os.environ:
+                            os.environ[key] = value
+                    return True
+                except Exception:
+                    continue
+        return False
+
+    @staticmethod
+    def get_llm(temperature: float = 0.7, model_name: Optional[str] = None):
+        """Load chat LLM instance for prompt-based factor generation."""
+        model_name = model_name or 'deepseek'
+        if model_name != 'deepseek':
+            raise ValueError(f'Unsupported model_name: {model_name}.')
+
+        FactorGenerator._auto_load_project_env()
+        deepseek_api_key = os.getenv('DEEPSEEK_API_KEY')
+        deepseek_base_url = os.getenv('DEEPSEEK_BASE_URL', 'https://api.deepseek.com')
+        if not deepseek_api_key:
+            raise ValueError('Missing environment variable: DEEPSEEK_API_KEY.')
+        try:
+            ChatOpenAI = importlib.import_module('langchain_openai').ChatOpenAI
+        except Exception as e:
+            raise ImportError('Please install langchain-openai to use method=llm_prompt.') from e
+
+        return ChatOpenAI(
+            model='deepseek-chat',
+            temperature=temperature,
+            api_key=deepseek_api_key,
+            base_url=deepseek_base_url,
+        )
+
+    def _build_llm_few_shot_prompt(self, factor_count: int) -> str:
+        example_code = (
+            "class fac_winrate:\n"
+            "    param_range = {'a': [10, 20, 30]}\n\n"
+            "    @staticmethod\n"
+            "    def operate(Data: pd.DataFrame, **kwargs):\n"
+            "        hash_tb = {chr(i): 0 for i in range(97, 123)}\n"
+            "        for key, value in kwargs.items():\n"
+            "            hash_tb[key] = value\n"
+            "        a = int(hash_tb['a'])\n\n"
+            "        df = Data.copy()\n"
+            "        df['ret'] = df['close'].pct_change()\n"
+            "        df['win_ratio'] = (df['ret'] > 0) * 1\n"
+            "        df['win_ratio'] = df['win_ratio'].rolling(a).mean()\n\n"
+            "        return df['win_ratio']\n"
+        )
+        return (
+            '你是量化研究助理。'
+            '请用 Python 生成简单的期货日频因子类。'
+            '输出必须是严格 JSON，格式如下：'
+            '{"factors": [{"fc_name": "fac_xxx", "code": "class fac_xxx: ..."}, ...]}。'
+            '规则：'
+            '1）fc_name 必须以 fac_ 开头。'
+            '2）class 代码必须包含 param_range(dict) 和 @staticmethod operate(Data: pd.DataFrame, **kwargs)。'
+            '3）operate 只能使用历史/当前行，禁止未来函数（例如 shift(-k)）。'
+            '4）因子逻辑保持简单稳健，基于 open/high/low/close/volume/position。'
+            f'5）必须返回且仅返回 {factor_count} 个因子。'
+            '6）不要输出 markdown 代码块或额外解释。'
+            f'Few-shot 示例：\n{example_code}\n'
+            f'额外需求：{self.llm_user_requirement}'
+        )
+
+    @staticmethod
+    def _extract_json_text(raw_text: str) -> str:
+        raw_text = raw_text.strip()
+        if raw_text.startswith('{') and raw_text.endswith('}'):
+            return raw_text
+        match = re.search(r'\{[\s\S]*}', raw_text)
+        if not match:
+            raise ValueError('Failed to parse JSON from LLM output.')
+        return match.group(0)
+
+    @staticmethod
+    def _first_parameter(param_range: dict) -> dict:
+        if not param_range:
+            return {}
+        first_param = {}
+        for k, v in param_range.items():
+            if isinstance(v, list) and len(v) > 0:
+                first_param[k] = v[0]
+            else:
+                raise ValueError(f'Invalid param_range for key `{k}`: {v}')
+        return first_param
+
+    def _validate_llm_factor_class(self, fc_name: str, code: str, sample_df: pd.DataFrame):
+        ast.parse(code)
+        local_ns: Dict[str, object] = {}
+        exec(code, {'pd': pd, 'np': np}, local_ns)
+        fc_class = cast(Any, local_ns.get(fc_name))
+        if fc_class is None or not isinstance(fc_class, type):
+            raise ValueError(f'LLM code does not define class `{fc_name}`.')
+        if not hasattr(fc_class, 'param_range'):
+            raise ValueError(f'Factor class `{fc_name}` missing param_range.')
+        if not hasattr(fc_class, 'operate'):
+            raise ValueError(f'Factor class `{fc_name}` missing operate method.')
+
+        first_param = self._first_parameter(fc_class.param_range)
+        output = fc_class.operate(sample_df.copy(), **first_param)
+        if output is None:
+            raise ValueError(f'Factor class `{fc_name}` returned None.')
+        output_series = pd.Series(output)
+        if len(output_series) != len(sample_df):
+            raise ValueError(
+                f'Factor class `{fc_name}` output length mismatch: {len(output_series)} vs {len(sample_df)}'
+            )
+        return fc_class
+
+    @staticmethod
+    def _save_valid_llm_factor_code(valid_factor_items: List[Tuple[str, str]]):
+        file_path = Path(__file__).resolve().parent / 'factor_from_llm.py'
+        if file_path.exists():
+            existing = file_path.read_text(encoding='utf-8')
+        else:
+            existing = '"""LLM-generated factors."""\nimport pandas as pd\nimport numpy as np\n\n'
+
+        append_blocks = []
+        for fc_name, code in valid_factor_items:
+            if f'class {fc_name}' in existing:
+                continue
+            append_blocks.append(f'\n\n{code.strip()}\n')
+
+        if append_blocks:
+            file_path.write_text(existing + ''.join(append_blocks), encoding='utf-8')
+        return file_path
+
+    @staticmethod
+    def _load_llm_factor_class(fc_name: str):
+        module = importlib.import_module('factors.factor_from_llm')
+        module = importlib.reload(module)
+        fc_class = getattr(module, fc_name, None)
+        if fc_class is None:
+            raise ValueError(f'Cannot find `{fc_name}` in factors/factor_from_llm.py.')
+        return fc_class
+
+    @staticmethod
+    def _load_all_llm_factor_classes() -> Dict[str, Any]:
+        module = importlib.import_module('factors.factor_from_llm')
+        module = importlib.reload(module)
+        fc_class_map = {}
+        for name, obj in vars(module).items():
+            if name.startswith('fac_') and isinstance(obj, type) and hasattr(obj, 'param_range') and hasattr(obj, 'operate'):
+                fc_class_map[name] = obj
+        if not fc_class_map:
+            raise ValueError('No valid factor classes found in factors/factor_from_llm.py.')
+        return fc_class_map
+
+    def _compute_factor_df_from_classes(self,
+                                        df: pd.DataFrame,
+                                        fc_class_map: Dict[str, Any],
+                                        selected_fc_names: Optional[List[str]] = None) -> pd.DataFrame:
+        out_df = df[['time', 'instrument_id']].copy().reset_index(drop=True)
+
+        column_mapping: Dict[str, Tuple[str, dict]] = {}
+        for fc_name, fc_class in fc_class_map.items():
+            for parameter in iterdict(fc_class.param_range):
+                col_name = join_fc_name_and_parameter(fc_name, parameter)
+                column_mapping[col_name] = (fc_name, parameter)
+
+        target_columns = selected_fc_names if selected_fc_names is not None else list(column_mapping.keys())
+
+        grouped_indices = df.groupby('instrument_id', sort=False).groups
+        for col_name in target_columns:
+            if col_name not in column_mapping:
+                raise ValueError(f'Factor column `{col_name}` is not defined by available LLM factors.')
+            fc_name, parameter = column_mapping[col_name]
+            fc_class = fc_class_map[fc_name]
+            col_values = pd.Series(np.nan, index=df.index, dtype=float)
+            for _, idx in grouped_indices.items():
+                idx_list = list(idx)
+                df_i = df.loc[idx_list].copy().reset_index(drop=True)
+                signal = fc_class.operate(df_i, **parameter)
+                signal = pd.Series(signal).reset_index(drop=True)
+                if len(signal) != len(df_i):
+                    raise ValueError(f'Factor `{fc_name}` generated invalid length for parameter {parameter}.')
+                col_values.loc[idx_list] = signal.values
+            out_df[col_name] = col_values.values
+
+        return out_df.sort_values(['instrument_id', 'time']).reset_index(drop=True)
+
+    def _generate_by_llm_prompt(self,
+                                df: pd.DataFrame,
+                                selected_fc_names: Optional[List[str]] = None) -> pd.DataFrame:
+        if selected_fc_names is not None:
+            fc_class_map = self._load_all_llm_factor_classes()
+            return self._compute_factor_df_from_classes(df, fc_class_map, selected_fc_names=selected_fc_names)
+
+        llm = self.get_llm(temperature=self.llm_temperature, model_name=self.model_name)
+        prompt = self._build_llm_few_shot_prompt(self.llm_factor_count)
+        log.info(f'LLM prompt: {prompt}')
+        response = llm.invoke(prompt)
+        log.info(f'LLM response: {response}. Processing output...')
+        content = getattr(response, 'content', '')
+        payload = json.loads(self._extract_json_text(content))
+
+        factors = payload.get('factors', [])
+        if not isinstance(factors, list) or not factors:
+            raise ValueError('Invalid LLM output: missing factors list.')
+
+        sample_df = df.groupby('instrument_id', sort=False).head(max(30, self.min_window_size)).copy()
+        valid_items: List[Tuple[str, str]] = []
+        fc_class_map: Dict[str, Any] = {}
+
+        for item in factors:
+            fc_name = item.get('fc_name')
+            code = item.get('code')
+            if not isinstance(fc_name, str) or not fc_name.startswith('fac_'):
+                continue
+            if not isinstance(code, str) or f'class {fc_name}' not in code:
+                continue
+            try:
+                fc_class = self._validate_llm_factor_class(fc_name, code, sample_df)
+            except Exception as e:
+                log.warning(f'Skip invalid LLM factor `{fc_name}`: {e}')
+                continue
+            valid_items.append((fc_name, code))
+            fc_class_map[fc_name] = fc_class
+
+        if not valid_items:
+            raise ValueError('No valid factors generated by LLM prompt.')
+
+        self.generated_factor_code_map = {name: code for name, code in valid_items}
+        self._save_valid_llm_factor_code(valid_items)
+        return self._compute_factor_df_from_classes(df, fc_class_map)
+
     def generate(self,
                  selected_fc_name_list: Optional[List[str]] = None) -> pd.DataFrame:
         """
@@ -276,6 +540,8 @@ class FactorGenerator:
         base_df = self._load_base_data()
         if self.method == 'tsfresh':
             factor_df = self._generate_by_tsfresh(base_df, selected_fc_names=selected_fc_name_list)
+        elif self.method == 'llm_prompt':
+            factor_df = self._generate_by_llm_prompt(base_df, selected_fc_names=selected_fc_name_list)
         else:
             raise ValueError(f'Unsupported method: {self.method}.')
 
@@ -307,8 +573,6 @@ class FactorGenerator:
         This supports reusing previously saved feature names without extracting
         the full tsfresh feature set.
         """
-        if self.method != 'tsfresh':
-            raise ValueError('generate_with_fc is only supported when method=tsfresh.')
         if isinstance(fc_name_list, str):
             fc_name_list = [fc_name_list]
         if not fc_name_list:
@@ -368,11 +632,6 @@ class FactorGenerator:
         - Reuse is achieved by storing feature names and converting them back to
           tsfresh settings via `from_columns`.
         """
-        from tsfresh.feature_extraction.settings import from_columns
-
-        if self.method != 'tsfresh':
-            raise ValueError('save_fc currently only supports method=tsfresh.')
-
         if isinstance(fc_name_list, str):
             fc_name_list = [fc_name_list]
         if not fc_name_list:
@@ -394,12 +653,10 @@ class FactorGenerator:
             fc_package_name = f'tsfresh_fc_{instrument_text}_{now}'
 
         fc_name_list = list(fc_name_list)
-        kind_to_fc_parameters = from_columns(fc_name_list)
         payload = {
             'method': self.method,
             'created_at': datetime.now().isoformat(timespec='seconds'),
             'fc_name_list': fc_name_list,
-            'kind_to_fc_parameters': kind_to_fc_parameters,
             'meta': {
                 'instrument_type': self.instrument_type,
                 'instrument_id_list': self.instrument_id_list,
@@ -413,6 +670,14 @@ class FactorGenerator:
                 'rolling_norm_clip': self.rolling_norm_clip,
             }
         }
+        if self.method == 'tsfresh':
+            from tsfresh.feature_extraction.settings import from_columns
+            payload['kind_to_fc_parameters'] = from_columns(fc_name_list)
+        elif self.method == 'llm_prompt':
+            payload['source_factor_file'] = 'factors/factor_from_llm.py'
+            payload['model_name'] = self.model_name
+        else:
+            raise ValueError(f'save_fc does not support method={self.method}.')
 
         config_path = save_dir / f'{fc_package_name}.json'
         with open(config_path, 'w', encoding='utf-8') as f:
@@ -462,8 +727,9 @@ class FactorGenerator:
 
         config_method = payload.get('method')
         if config_method and config_method != self.method:
-            raise ValueError(
-                f'Config method={config_method} does not match current generator method={self.method}.'
+            log.warning(
+                f'Config method={config_method} is different from current method={self.method}. '
+                'Temporarily switching to config method for this run.'
             )
 
         fc_name_list = payload.get('fc_name_list', [])
@@ -486,8 +752,14 @@ class FactorGenerator:
                     'Config base_col_list does not match current base_col_list when strict_meta=True.'
                 )
 
-        self.generate_with_fc(fc_name_list)
-        return self.backtest(fc_name_list=fc_name_list, n_jobs=n_jobs)
+        current_method = self.method
+        try:
+            if config_method:
+                self.method = config_method
+            self.generate_with_fc(fc_name_list)
+            return self.backtest(fc_name_list=fc_name_list, n_jobs=n_jobs)
+        finally:
+            self.method = current_method
 
     def filter_fc_by_threshold(self,
                                performance_summary: Optional[pd.DataFrame] = None,
@@ -557,38 +829,46 @@ class FactorGenerator:
                                      save_dir: Optional[Union[str, Path]] = None,
                                      n_jobs: Optional[int] = None,
                                      require_all_row: bool = True,
-                                     require_all_instruments: bool = True) -> dict:
+                                     require_all_instruments: bool = True,
+                                     method: Optional[str] = None) -> dict:
         """
         One-step automation:
         generate factors -> backtest -> threshold filter -> save selected config.
         """
-        generated_df = self.generate()
-        bt = self.backtest(data=generated_df, fc_name_list=self.generated_fc_name_list, n_jobs=n_jobs)
-        selected_fc_name_list = self.filter_fc_by_threshold(
-            performance_summary=bt.performance_summary,
-            net_ret_threshold=net_ret_threshold,
-            sharpe_threshold=sharpe_threshold,
-            require_all_row=require_all_row,
-            require_all_instruments=require_all_instruments,
-        )
+        original_method = self.method
+        try:
+            if method is not None:
+                self.method = method
 
-        if not selected_fc_name_list:
-            raise ValueError(
-                f'No factors passed thresholds: net_ret_threshold={net_ret_threshold}, '
-                f'sharpe_threshold={sharpe_threshold}.'
+            generated_df = self.generate()
+            bt = self.backtest(data=generated_df, fc_name_list=self.generated_fc_name_list, n_jobs=n_jobs)
+            selected_fc_name_list = self.filter_fc_by_threshold(
+                performance_summary=bt.performance_summary,
+                net_ret_threshold=net_ret_threshold,
+                sharpe_threshold=sharpe_threshold,
+                require_all_row=require_all_row,
+                require_all_instruments=require_all_instruments,
             )
 
-        config_path = self.save_fc(
-            fc_name_list=selected_fc_name_list,
-            fc_package_name=fc_package_name,
-            save_dir=save_dir,
-        )
+            if not selected_fc_name_list:
+                raise ValueError(
+                    f'No factors passed thresholds: net_ret_threshold={net_ret_threshold}, '
+                    f'sharpe_threshold={sharpe_threshold}.'
+                )
 
-        return {
-            'config_path': config_path,
-            'selected_fc_name_list': selected_fc_name_list,
-            'bt': bt,
-        }
+            config_path = self.save_fc(
+                fc_name_list=selected_fc_name_list,
+                fc_package_name=fc_package_name,
+                save_dir=save_dir,
+            )
+
+            return {
+                'config_path': config_path,
+                'selected_fc_name_list': selected_fc_name_list,
+                'bt': bt,
+            }
+        finally:
+            self.method = original_method
 
     def check_if_leakage(self,
                          fc_name_list: Optional[Union[str, List[str]]] = None,
@@ -612,7 +892,12 @@ class FactorGenerator:
         if fc_name_list:
             selected_fc_name_list = list(fc_name_list)
         else:
-            factor_df_for_names = self._generate_by_tsfresh(base_df)
+            if self.method == 'tsfresh':
+                factor_df_for_names = self._generate_by_tsfresh(base_df)
+            elif self.method == 'llm_prompt':
+                factor_df_for_names = self._generate_by_llm_prompt(base_df)
+            else:
+                raise ValueError(f'Unsupported method for leakage check: {self.method}.')
             selected_fc_name_list = [
                 c for c in factor_df_for_names.columns if c not in ['time', 'instrument_id']
             ]
@@ -621,7 +906,12 @@ class FactorGenerator:
             raise ValueError('No factor columns available for leakage check.')
 
         # Full-sample factor series.
-        full_factor_df = self._generate_by_tsfresh(base_df, selected_fc_names=selected_fc_name_list)
+        if self.method == 'tsfresh':
+            full_factor_df = self._generate_by_tsfresh(base_df, selected_fc_names=selected_fc_name_list)
+        elif self.method == 'llm_prompt':
+            full_factor_df = self._generate_by_llm_prompt(base_df, selected_fc_names=selected_fc_name_list)
+        else:
+            raise ValueError(f'Unsupported method for leakage check: {self.method}.')
         if self.apply_rolling_norm:
             full_factor_df = self._rolling_normalize_features(full_factor_df, selected_fc_name_list)
 
@@ -633,7 +923,12 @@ class FactorGenerator:
         slice_factor_list = []
         for t in check_time_list:
             df_slice = base_df.loc[base_df['time'] <= t].copy()
-            factor_df_slice = self._generate_by_tsfresh(df_slice, selected_fc_names=selected_fc_name_list)
+            if self.method == 'tsfresh':
+                factor_df_slice = self._generate_by_tsfresh(df_slice, selected_fc_names=selected_fc_name_list)
+            elif self.method == 'llm_prompt':
+                factor_df_slice = self._generate_by_llm_prompt(df_slice, selected_fc_names=selected_fc_name_list)
+            else:
+                raise ValueError(f'Unsupported method for leakage check: {self.method}.')
             if self.apply_rolling_norm:
                 factor_df_slice = self._rolling_normalize_features(factor_df_slice, selected_fc_name_list)
 

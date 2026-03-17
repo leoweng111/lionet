@@ -1,6 +1,7 @@
 # This script contains some important universal paths.
 from pathlib import Path
 import datetime
+import os
 
 from .configuration import get_config
 
@@ -37,3 +38,8 @@ END_DATE_STR = datetime.date.today().strftime('%Y%m%d')
 
 # Instrument-level trading fee config.
 FEE = {"C0": "0.0002", "FG0": "0.0002"}
+
+# LLM (DeepSeek)
+DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
+DEEPSEEK_BASE_URL = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
+
