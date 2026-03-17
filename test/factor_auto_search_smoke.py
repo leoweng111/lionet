@@ -30,6 +30,7 @@ if __name__ == '__main__':
         min_window_size=20,
         max_factor_count=8,
         tsfresh_profile='minimal',
+        version='smoke_20260317_000000',
         n_jobs=1,
     )
     generated = fg.generate()
@@ -40,7 +41,7 @@ if __name__ == '__main__':
     saved_path = fg.save_fc_value(selected, file_name='smoke_tsfresh_factor', file_format='csv')
     print('saved path:', saved_path)
 
-    fc_config_path = fg.save_fc(selected, fc_package_name='smoke_tsfresh_fc')
+    fc_config_path = fg.save_fc(selected)
     loaded_fc = FactorGenerator.load_fc(fc_config_path)
     generated_subset = fg.generate_with_fc(loaded_fc)
     print('saved fc config path:', fc_config_path)
@@ -52,7 +53,6 @@ if __name__ == '__main__':
     auto_result = fg.auto_mine_select_and_save_fc(
         net_ret_threshold=-1.0,
         sharpe_threshold=-1.0,
-        fc_package_name='smoke_tsfresh_auto_selected',
         n_jobs=1,
         require_all_instruments=False,
     )

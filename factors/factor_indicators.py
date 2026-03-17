@@ -330,6 +330,7 @@ def get_performance(Data: pd.DataFrame,
                     fc_freq: str = '1d',
                     portfolio_adjust_method: str = '1D',
                     interest_method: str = 'simple',
+                    calculate_baseline: bool = False,
                     n_jobs=5):
 
     if isinstance(fc_name_list, str):
@@ -339,7 +340,13 @@ def get_performance(Data: pd.DataFrame,
     df = Data.copy()
     if df['instrument_id'].nunique() != 1:
         raise ValueError('get_performance expects Data of one instrument only.')
-    f = lambda x: get_performance_for_one_factor(df, x, fc_freq, portfolio_adjust_method, interest_method)
+    f = lambda x: get_performance_for_one_factor(df,
+                                                 x,
+                                                 fc_freq,
+                                                 portfolio_adjust_method,
+                                                 interest_method,
+                                                 calculate_baseline=calculate_baseline
+                                                 )
 
     with Parallel(n_jobs=n_jobs) as parallel:
         performance_list = parallel(delayed(f)(fc_name) for fc_name in fc_name_list)
@@ -357,7 +364,8 @@ def get_performance_for_one_factor(Data: pd.DataFrame,
                                    fc_name: str,
                                    fc_freq: str = '1d',
                                    portfolio_adjust_method: str = '1D',
-                                   interest_method: str = 'simple'):
+                                   interest_method: str = 'simple',
+                                   calculate_baseline: bool = False):
     """
     Get time-series performance for one factor in single-instrument strategy research.
     """
@@ -424,6 +432,42 @@ def get_performance_for_one_factor(Data: pd.DataFrame,
                          'daily_net_ret': df_net_ret_ts,
                          'daily_turnover': df_turnover_ts}
 
+    baseline_col_long = '__baseline_long__'
+    baseline_col_short = '__baseline_short__'
+    if calculate_baseline:
+        baseline_df = df[['time', 'instrument_id', 'future_ret']].copy()
+        baseline_df[baseline_col_long] = 1.0
+        baseline_df[baseline_col_short] = -1.0
+
+        baseline_cols = [baseline_col_long, baseline_col_short]
+        baseline_gross_ret_ts, baseline_net_ret_ts, baseline_turnover_ts = get_ts_ret_and_turnover(baseline_df, baseline_cols)
+        baseline_gross_ret_ts = baseline_gross_ret_ts.reset_index()
+        baseline_net_ret_ts = baseline_net_ret_ts.reset_index()
+        baseline_turnover_ts = baseline_turnover_ts.reset_index()
+
+        # Gross baseline metrics
+        baseline_gross_ret_annual = get_annualized_ret(baseline_gross_ret_ts, baseline_cols, interest_method)
+        baseline_gross_vol_annual = get_annualized_volatility(baseline_gross_ret_ts, baseline_cols)
+        baseline_gross_sharpe_annual = get_annualized_sharpe(baseline_gross_ret_annual, baseline_gross_vol_annual)
+        baseline_gross_sortino_annual = get_annualized_sortino_ratio(baseline_gross_ret_ts, baseline_cols, interest_method)
+        _, baseline_gross_maxdd_annual = get_annualized_drawdown(baseline_gross_ret_ts, baseline_cols)
+        baseline_gross_calmar_annual = get_annualized_calmar_ratio(baseline_gross_ret_annual, baseline_gross_vol_annual)
+        baseline_gross_win_rate_annual = get_annualized_win_rate(baseline_gross_ret_ts, baseline_cols)
+
+        # Net baseline metrics
+        baseline_net_ret_annual = get_annualized_ret(baseline_net_ret_ts, baseline_cols, interest_method)
+        baseline_net_vol_annual = get_annualized_volatility(baseline_net_ret_ts, baseline_cols)
+        baseline_net_sharpe_annual = get_annualized_sharpe(baseline_net_ret_annual, baseline_net_vol_annual)
+        baseline_net_sortino_annual = get_annualized_sortino_ratio(baseline_net_ret_ts, baseline_cols, interest_method)
+        _, baseline_net_maxdd_annual = get_annualized_drawdown(baseline_net_ret_ts, baseline_cols)
+        baseline_net_calmar_annual = get_annualized_calmar_ratio(baseline_net_ret_annual, baseline_net_vol_annual)
+        baseline_net_win_rate_annual = get_annualized_win_rate(baseline_net_ret_ts, baseline_cols)
+        baseline_turnover_annual = get_annualized_turnover(baseline_turnover_ts, baseline_cols)
+
+        ts_performance_dc['daily_gross_ret_baseline'] = baseline_gross_ret_ts
+        ts_performance_dc['daily_net_ret_baseline'] = baseline_net_ret_ts
+        ts_performance_dc['daily_turnover_baseline'] = baseline_turnover_ts
+
     ts_performance_summary_list = \
         [gross_annualized_ret_ts[[fc_name]].rename(columns={fc_name: 'Gross Return'}),
          net_annualized_ret_ts[[fc_name]].rename(columns={fc_name: 'Net Return'}),
@@ -453,6 +497,43 @@ def get_performance_for_one_factor(Data: pd.DataFrame,
          ]
 
     ts_performance_summary = merge_dataframe(ts_performance_summary_list, on='year')
+
+    if calculate_baseline:
+        baseline_metric_map = {
+            'Gross Return': baseline_gross_ret_annual,
+            'Net Return': baseline_net_ret_annual,
+            'Gross Volatility': baseline_gross_vol_annual,
+            'Net Volatility': baseline_net_vol_annual,
+            'Gross Sharpe': baseline_gross_sharpe_annual,
+            'Net Sharpe': baseline_net_sharpe_annual,
+            'Gross Sortino': baseline_gross_sortino_annual,
+            'Net Sortino': baseline_net_sortino_annual,
+            'Gross MaxDD': baseline_gross_maxdd_annual,
+            'Net MaxDD': baseline_net_maxdd_annual,
+            'Gross Calmar': baseline_gross_calmar_annual,
+            'Net Calmar': baseline_net_calmar_annual,
+            'Gross Win Rate': baseline_gross_win_rate_annual,
+            'Net Win Rate': baseline_net_win_rate_annual,
+            'Turnover': baseline_turnover_annual,
+        }
+
+        def _format_triplet(val, long_val, short_val) -> str:
+            def _fmt(x):
+                if pd.isna(x):
+                    return 'nan'
+                return f'{float(x):.6g}'
+            return f'{_fmt(val)}({_fmt(long_val)},{_fmt(short_val)})'
+
+        for metric_col, baseline_df_metric in baseline_metric_map.items():
+            if metric_col not in ts_performance_summary.columns:
+                continue
+            long_series = baseline_df_metric[baseline_col_long].reindex(ts_performance_summary.index)
+            short_series = baseline_df_metric[baseline_col_short].reindex(ts_performance_summary.index)
+            ts_performance_summary[f'{metric_col} (With Baseline)'] = [
+                _format_triplet(v, lv, sv)
+                for v, lv, sv in zip(ts_performance_summary[metric_col], long_series, short_series)
+            ]
+
     ts_performance_summary['Factor Name'] = fc_name
     ts_performance_summary['Factor Freq'] = fc_freq
     ts_performance_summary['Fee'] = fee

@@ -40,6 +40,7 @@ class FactorGenerator:
                  portfolio_adjust_method: str = '1D',
                  interest_method: str = 'compound',
                  risk_free_rate: bool = False,
+                 calculate_baseline: bool = False,
                  n_jobs: int = 5,
                  base_col_list: Optional[Sequence[str]] = None,
                  min_window_size: int = 30,
@@ -53,6 +54,7 @@ class FactorGenerator:
                  model_name: str = 'deepseek',
                  llm_temperature: float = 0.7,
                  llm_factor_count: int = 5,
+                 version: Optional[str] = None,
                  llm_user_requirement: str = '生成期货的日频量价因子'):
         self.method = method
         self.instrument_type = instrument_type
@@ -64,6 +66,7 @@ class FactorGenerator:
         self.portfolio_adjust_method = portfolio_adjust_method
         self.interest_method = interest_method
         self.risk_free_rate = risk_free_rate
+        self.calculate_baseline = calculate_baseline
         self.n_jobs = n_jobs
 
         self.base_col_list = list(base_col_list) if base_col_list else ['open', 'high', 'low', 'close', 'volume', 'position']
@@ -78,6 +81,7 @@ class FactorGenerator:
         self.model_name = model_name
         self.llm_temperature = llm_temperature
         self.llm_factor_count = llm_factor_count
+        self.version = version or datetime.now().strftime('%Y%m%d_%H%M%S')
         self.llm_user_requirement = llm_user_requirement
 
         self.generated_data: Optional[pd.DataFrame] = None
@@ -653,7 +657,6 @@ class FactorGenerator:
 
     def save_fc(self,
                 fc_name_list: Union[str, List[str]],
-                fc_package_name: Optional[str] = None,
                 save_dir: Optional[Union[str, Path]] = None) -> Path:
         """
         Save selected feature definitions for future reuse.
@@ -679,40 +682,64 @@ class FactorGenerator:
         save_dir = Path(save_dir)
         save_dir.mkdir(parents=True, exist_ok=True)
 
-        if not fc_package_name:
-            instrument_text = '-'.join(self.instrument_id_list)
-            now = datetime.now().strftime('%Y%m%d_%H%M%S')
-            package_prefix = 'llm_fc' if self.method == 'llm_prompt' else 'tsfresh_fc'
-            fc_package_name = f'{package_prefix}_{instrument_text}_{now}'
+        package_prefix = 'llm_fc' if self.method == 'llm_prompt' else 'tsfresh_fc'
+        fc_package_name = f'{package_prefix}_{self.version}'
 
         fc_name_list = list(fc_name_list)
-        payload = {
-            'method': self.method,
-            'created_at': datetime.now().isoformat(timespec='seconds'),
-            'fc_name_list': fc_name_list,
-            'meta': {
-                'instrument_type': self.instrument_type,
-                'instrument_id_list': self.instrument_id_list,
-                'fc_freq': self.fc_freq,
-                'base_col_list': self.base_col_list,
-                'min_window_size': self.min_window_size,
-                'tsfresh_profile': self.tsfresh_profile,
-                'apply_rolling_norm': self.apply_rolling_norm,
-                'rolling_norm_window': self.rolling_norm_window,
-                'rolling_norm_min_periods': self.rolling_norm_min_periods,
-                'rolling_norm_clip': self.rolling_norm_clip,
-            }
-        }
-        if self.method == 'tsfresh':
-            from tsfresh.feature_extraction.settings import from_columns
-            payload['kind_to_fc_parameters'] = from_columns(fc_name_list)
-        elif self.method == 'llm_prompt':
-            payload['source_factor_file'] = 'factors/factor_from_llm.py'
-            payload['model_name'] = self.model_name
-        else:
+
+        if self.method not in ['tsfresh', 'llm_prompt']:
             raise ValueError(f'save_fc does not support method={self.method}.')
 
+        def _build_payload(selected_fc_name_list: List[str], created_at: Optional[str] = None) -> dict:
+            payload_i = {
+                'method': self.method,
+                'created_at': created_at or datetime.now().isoformat(timespec='seconds'),
+                'version': self.version,
+                'fc_name_list': list(selected_fc_name_list),
+                # Keep only strict_meta related fields and basic traceability fields.
+                'meta': {
+                    'instrument_type': self.instrument_type,
+                    'instrument_id_list': self.instrument_id_list,
+                    'fc_freq': self.fc_freq,
+                    'base_col_list': self.base_col_list,
+                }
+            }
+            if self.method == 'tsfresh':
+                from tsfresh.feature_extraction.settings import from_columns
+                payload_i['kind_to_fc_parameters'] = from_columns(selected_fc_name_list)
+            return payload_i
+
+        payload = _build_payload(fc_name_list)
+
         config_path = save_dir / f'{fc_package_name}.json'
+        if config_path.exists():
+            with open(config_path, 'r', encoding='utf-8') as f:
+                existing_payload = json.load(f)
+
+            existing_method = existing_payload.get('method')
+            if existing_method and existing_method != self.method:
+                raise ValueError(
+                    f'Existing config method={existing_method} mismatches current method={self.method}: {config_path}'
+                )
+
+            existing_fc_name_list = existing_payload.get('fc_name_list', [])
+            if not isinstance(existing_fc_name_list, list):
+                existing_fc_name_list = []
+
+            merged_fc_name_list = list(existing_fc_name_list)
+            for fc_name in fc_name_list:
+                if fc_name not in merged_fc_name_list:
+                    merged_fc_name_list.append(fc_name)
+
+            payload = _build_payload(
+                merged_fc_name_list,
+                created_at=existing_payload.get('created_at') if isinstance(existing_payload, dict) else None,
+            )
+            payload['updated_at'] = datetime.now().isoformat(timespec='seconds')
+
+            added_count = len(merged_fc_name_list) - len(existing_fc_name_list)
+            log.info(f'Existing config found, merged {added_count} new factors into {config_path}.')
+
         with open(config_path, 'w', encoding='utf-8') as f:
             json.dump(payload, f, ensure_ascii=True, indent=2)
 
@@ -847,7 +874,6 @@ class FactorGenerator:
     def auto_mine_select_and_save_fc(self,
                                      net_ret_threshold: float,
                                      sharpe_threshold: float,
-                                     fc_package_name: Optional[str] = None,
                                      save_dir: Optional[Union[str, Path]] = None,
                                      n_jobs: Optional[int] = None,
                                      require_all_row: bool = True,
@@ -888,7 +914,6 @@ class FactorGenerator:
 
             config_path = self.save_fc(
                 fc_name_list=selected_fc_name_list,
-                fc_package_name=fc_package_name,
                 save_dir=save_dir,
             )
 
@@ -1042,6 +1067,272 @@ class FactorGenerator:
             portfolio_adjust_method=self.portfolio_adjust_method,
             interest_method=self.interest_method,
             risk_free_rate=self.risk_free_rate,
+            calculate_baseline=self.calculate_baseline,
+            n_jobs=n_jobs or self.n_jobs,
+        )
+        bt.backtest()
+        self.backtester = bt
+        return bt
+
+
+class FactorFusioner:
+    """
+    Fuse factors from saved configs (tsfresh + llm_prompt) by version.
+
+    Current supported fusion strategy:
+    - average_weight: equal-weight average of all loaded factor columns.
+    """
+
+    def __init__(self,
+                 version_list: Union[str, List[str]],
+                 fusion_strategy: str = 'average_weight',
+                 instrument_type: str = 'futures_continuous_contract',
+                 instrument_id_list: Union[str, List[str]] = 'C0',
+                 fc_freq: str = '1d',
+                 data: Optional[pd.DataFrame] = None,
+                 start_time: Optional[str] = None,
+                 end_time: Optional[str] = None,
+                 portfolio_adjust_method: str = '1D',
+                 interest_method: str = 'compound',
+                 risk_free_rate: bool = False,
+                 calculate_baseline: bool = False,
+                 n_jobs: int = 5,
+                 base_col_list: Optional[Sequence[str]] = None,
+                 min_window_size: int = 30,
+                 max_factor_count: Optional[int] = 200,
+                 tsfresh_profile: str = 'minimal',
+                 apply_rolling_norm: bool = True,
+                 rolling_norm_window: int = 30,
+                 rolling_norm_min_periods: int = 20,
+                 rolling_norm_eps: float = 1e-8,
+                 rolling_norm_clip: float = 10.0,
+                 model_name: str = 'deepseek',
+                 llm_temperature: float = 0.7,
+                 llm_factor_count: int = 5):
+        self.version_list = [version_list] if isinstance(version_list, str) else list(version_list)
+        self.fusion_strategy = fusion_strategy
+        self.instrument_type = instrument_type
+        self.instrument_id_list = [instrument_id_list] if isinstance(instrument_id_list, str) else list(instrument_id_list)
+        self.fc_freq = fc_freq
+        self.data = data
+        self.start_time = start_time
+        self.end_time = end_time
+        self.portfolio_adjust_method = portfolio_adjust_method
+        self.interest_method = interest_method
+        self.risk_free_rate = risk_free_rate
+        self.calculate_baseline = calculate_baseline
+        self.n_jobs = n_jobs
+
+        # Keep generator-related knobs so fused run stays consistent with source factor generation.
+        self.base_col_list = list(base_col_list) if base_col_list else ['open', 'high', 'low', 'close', 'volume', 'position']
+        self.min_window_size = min_window_size
+        self.max_factor_count = max_factor_count
+        self.tsfresh_profile = tsfresh_profile
+        self.apply_rolling_norm = apply_rolling_norm
+        self.rolling_norm_window = rolling_norm_window
+        self.rolling_norm_min_periods = rolling_norm_min_periods
+        self.rolling_norm_eps = rolling_norm_eps
+        self.rolling_norm_clip = rolling_norm_clip
+        self.model_name = model_name
+        self.llm_temperature = llm_temperature
+        self.llm_factor_count = llm_factor_count
+
+        self.generated_data: Optional[pd.DataFrame] = None
+        self.generated_fc_name_list: List[str] = []
+        self.backtester: Optional[BackTester] = None
+        self.loaded_config_info_list: List[Dict[str, Any]] = []
+        self.fused_fc_name = f'fac_fusion_{self.fusion_strategy}'
+
+        if not self.version_list:
+            raise ValueError('version_list is empty.')
+        if self.fusion_strategy != 'average_weight':
+            raise ValueError(f'Unsupported fusion_strategy: {self.fusion_strategy}.')
+
+    @staticmethod
+    def _config_dir_by_method(method: str) -> Path:
+        if method == 'tsfresh':
+            return Path(__file__).resolve().parent / 'fc_from_tsfresh'
+        if method == 'llm_prompt':
+            return Path(__file__).resolve().parent / 'fc_from_llm'
+        raise ValueError(f'Unsupported method: {method}')
+
+    @staticmethod
+    def _config_stem_by_method(method: str) -> str:
+        if method == 'tsfresh':
+            return 'tsfresh_fc'
+        if method == 'llm_prompt':
+            return 'llm_fc'
+        raise ValueError(f'Unsupported method: {method}')
+
+    def _load_config_payload(self, config_path: Path) -> Dict[str, Any]:
+        with open(config_path, 'r', encoding='utf-8') as f:
+            payload = json.load(f)
+        if not isinstance(payload, dict):
+            raise ValueError(f'Invalid config format: {config_path}')
+        fc_name_list = payload.get('fc_name_list', [])
+        if not isinstance(fc_name_list, list) or not fc_name_list:
+            raise ValueError(f'Invalid config file: {config_path}. Missing non-empty fc_name_list.')
+        return payload
+
+    def _load_configs_by_versions(self) -> List[Dict[str, Any]]:
+        config_info_list: List[Dict[str, Any]] = []
+        for version in self.version_list:
+            missing_methods = []
+            for method in ['tsfresh', 'llm_prompt']:
+                config_dir = self._config_dir_by_method(method)
+                config_stem = self._config_stem_by_method(method)
+                config_path = config_dir / f'{config_stem}_{version}.json'
+                if not config_path.exists():
+                    missing_methods.append(method)
+                    continue
+                payload = self._load_config_payload(config_path)
+                config_info_list.append({
+                    'version': version,
+                    'method': method,
+                    'config_path': config_path,
+                    'fc_name_list': list(payload['fc_name_list']),
+                })
+
+            if missing_methods:
+                expected_tsfresh_path = (
+                    self._config_dir_by_method('tsfresh') /
+                    f'{self._config_stem_by_method("tsfresh")}_{version}.json'
+                )
+                expected_llm_path = (
+                    self._config_dir_by_method('llm_prompt') /
+                    f'{self._config_stem_by_method("llm_prompt")}_{version}.json'
+                )
+                raise FileNotFoundError(
+                    f'Incomplete config set for version={version}. Missing methods: {missing_methods}. '
+                    f'Expected files: {expected_tsfresh_path} and {expected_llm_path}.'
+                )
+        return config_info_list
+
+    def _build_generator(self, method: str) -> FactorGenerator:
+        return FactorGenerator(
+            method=method,
+            instrument_type=self.instrument_type,
+            instrument_id_list=self.instrument_id_list,
+            fc_freq=self.fc_freq,
+            data=self.data,
+            start_time=self.start_time,
+            end_time=self.end_time,
+            portfolio_adjust_method=self.portfolio_adjust_method,
+            interest_method=self.interest_method,
+            risk_free_rate=self.risk_free_rate,
+            calculate_baseline=self.calculate_baseline,
+            n_jobs=self.n_jobs,
+            base_col_list=self.base_col_list,
+            min_window_size=self.min_window_size,
+            max_factor_count=self.max_factor_count,
+            tsfresh_profile=self.tsfresh_profile,
+            apply_rolling_norm=self.apply_rolling_norm,
+            rolling_norm_window=self.rolling_norm_window,
+            rolling_norm_min_periods=self.rolling_norm_min_periods,
+            rolling_norm_eps=self.rolling_norm_eps,
+            rolling_norm_clip=self.rolling_norm_clip,
+            model_name=self.model_name,
+            llm_temperature=self.llm_temperature,
+            llm_factor_count=self.llm_factor_count,
+        )
+
+    def generate(self) -> pd.DataFrame:
+        """
+        Generate fused factor values from all factors referenced by version_list.
+        """
+        config_info_list = self._load_configs_by_versions()
+        self.loaded_config_info_list = config_info_list
+
+        data_generator = self._build_generator(method='tsfresh')
+        base_df = data_generator._load_base_data()
+        df_with_ret = get_future_ret(
+            base_df[['time', 'instrument_id', 'open', 'high', 'low', 'close', 'volume', 'position']].copy(),
+            portfolio_adjust_method=self.portfolio_adjust_method,
+            rfr=self.risk_free_rate,
+        )
+        df_with_ret = df_with_ret[['time', 'instrument_id', 'future_ret']].copy()
+
+        merged_factor_df = base_df[['time', 'instrument_id']].copy()
+        all_factor_cols: List[str] = []
+
+        for config_info in config_info_list:
+            method = cast(str, config_info['method'])
+            fc_name_list = cast(List[str], config_info['fc_name_list'])
+
+            generator = self._build_generator(method=method)
+            if method == 'tsfresh':
+                factor_df_i = generator._generate_by_tsfresh(base_df, selected_fc_names=fc_name_list)
+            elif method == 'llm_prompt':
+                factor_df_i = generator._generate_by_llm_prompt(base_df, selected_fc_names=fc_name_list)
+            else:
+                raise ValueError(f'Unsupported method in fusion config: {method}')
+
+            if generator.apply_rolling_norm:
+                factor_df_i = generator._rolling_normalize_features(factor_df_i, fc_name_list)
+
+            # Avoid collisions across methods/versions by adding stable suffix.
+            version = cast(str, config_info['version'])
+            renamed_cols = {
+                c: f'{c}__{method}__{version}'
+                for c in fc_name_list
+                if c in factor_df_i.columns
+            }
+            factor_df_i = factor_df_i[['time', 'instrument_id'] + list(renamed_cols.keys())].rename(columns=renamed_cols)
+            all_factor_cols.extend(list(renamed_cols.values()))
+            merged_factor_df = merged_factor_df.merge(factor_df_i, on=['time', 'instrument_id'], how='left')
+
+        if not all_factor_cols:
+            raise ValueError('No factor columns loaded from version configs for fusion.')
+
+        # Equal-weight fusion over all selected source factors.
+        merged_factor_df[self.fused_fc_name] = merged_factor_df[all_factor_cols].mean(axis=1, skipna=True)
+        merged_factor_df[self.fused_fc_name] = merged_factor_df[self.fused_fc_name].fillna(0.0)
+
+        generated_data = df_with_ret.merge(
+            merged_factor_df[['time', 'instrument_id', self.fused_fc_name]],
+            on=['time', 'instrument_id'],
+            how='left',
+            validate='1:1',
+        )
+        generated_data = generated_data.sort_values(['instrument_id', 'time']).reset_index(drop=True)
+
+        self.generated_data = generated_data
+        self.generated_fc_name_list = [self.fused_fc_name]
+        log.info(
+            f'Generated fused factor `{self.fused_fc_name}` from {len(all_factor_cols)} source factors '
+            f'across {len(config_info_list)} configs.'
+        )
+        return generated_data
+
+    def backtest(self,
+                 data: Optional[pd.DataFrame] = None,
+                 fc_name_list: Optional[Union[str, List[str]]] = None,
+                 n_jobs: Optional[int] = None) -> BackTester:
+        """
+        Run backtest for fused factor result.
+        """
+        if data is None:
+            if self.generated_data is None:
+                raise ValueError('Please call generate() first, or pass `data` explicitly.')
+            data = self.generated_data
+
+        if fc_name_list is None:
+            fc_name_list = self.generated_fc_name_list
+        if not fc_name_list:
+            raise ValueError('fc_name_list is empty. Please specify factor columns for backtesting.')
+
+        bt = BackTester(
+            fc_name_list=fc_name_list,
+            instrument_type=self.instrument_type,
+            instrument_id_list=self.instrument_id_list,
+            fc_freq=self.fc_freq,
+            data=data,
+            start_time=self.start_time,
+            end_time=self.end_time,
+            portfolio_adjust_method=self.portfolio_adjust_method,
+            interest_method=self.interest_method,
+            risk_free_rate=self.risk_free_rate,
+            calculate_baseline=self.calculate_baseline,
             n_jobs=n_jobs or self.n_jobs,
         )
         bt.backtest()

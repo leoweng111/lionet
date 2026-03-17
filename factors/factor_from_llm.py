@@ -2095,3 +2095,114 @@ class fac_intraday_efficiency_ratio:
         intraday_range = df['high'] - df['low']
         er = price_change / intraday_range.replace(0, 1e-6)
         return er.rolling(window).mean()
+
+
+class fac_price_skewness:
+    param_range = {'window': [10, 20, 30]}
+    
+    @staticmethod
+    def operate(Data: pd.DataFrame, **kwargs):
+        hash_tb = {chr(i): 0 for i in range(97, 123)}
+        for key, value in kwargs.items():
+            hash_tb[key] = value
+        window = int(hash_tb['window'])
+        
+        df = Data.copy()
+        df['ret'] = df['close'].pct_change()
+        df['skewness'] = df['ret'].rolling(window).skew()
+        
+        return df['skewness']
+
+
+class fac_price_volatility:
+    param_range = {'window': [5, 10, 20]}
+
+    @staticmethod
+    def operate(Data: pd.DataFrame, **kwargs):
+        hash_tb = {chr(i): 0 for i in range(97, 123)}
+        for key, value in kwargs.items():
+            hash_tb[key] = value
+        window = int(hash_tb['window'])
+
+        df = Data.copy()
+        returns = df['close'].pct_change()
+        volatility = returns.rolling(window).std()
+        return volatility
+
+
+class fac_momentum:
+    param_range = {'window': [5, 10, 20]}
+
+    @staticmethod
+    def operate(Data: pd.DataFrame, **kwargs):
+        hash_tb = {chr(i): 0 for i in range(97, 123)}
+        for key, value in kwargs.items():
+            hash_tb[key] = value
+        window = int(hash_tb['window'])
+
+        df = Data.copy()
+        factor = df['close'].pct_change(window)
+        return factor
+
+
+class fac_open_close_ratio:
+    param_range = {'window': [5, 10, 20]}
+
+    @staticmethod
+    def operate(Data: pd.DataFrame, **kwargs):
+        hash_tb = {chr(i): 0 for i in range(97, 123)}
+        for key, value in kwargs.items():
+            hash_tb[key] = value
+        window = int(hash_tb['window'])
+
+        df = Data.copy()
+        df['oc_ratio'] = df['close'] / df['open'] - 1
+        factor = df['oc_ratio'].rolling(window).mean()
+        return factor
+
+
+class fac_ohlc_volatility:
+    param_range = {'window': [5, 10, 20]}
+
+    @staticmethod
+    def operate(Data: pd.DataFrame, **kwargs):
+        hash_tb = {chr(i): 0 for i in range(97, 123)}
+        for key, value in kwargs.items():
+            hash_tb[key] = value
+        window = int(hash_tb['window'])
+
+        df = Data.copy()
+        range_ratio = (df['high'] - df['low']) / df['close']
+        factor = range_ratio.rolling(window).mean()
+        return factor
+
+
+class fac_open_close_trend:
+    param_range = {'n': [5, 10, 20]}
+
+    @staticmethod
+    def operate(Data: pd.DataFrame, **kwargs):
+        hash_tb = {chr(i): 0 for i in range(97, 123)}
+        for key, value in kwargs.items():
+            hash_tb[key] = value
+        n = int(hash_tb['n'])
+
+        df = Data.copy()
+        df['oc_ratio'] = (df['close'] - df['open']) / df['open']
+        df['oc_trend'] = df['oc_ratio'].rolling(n).mean()
+        return df['oc_trend']
+
+
+class fac_close_bias:
+    param_range = {'window': [5, 10, 20]}
+
+    @staticmethod
+    def operate(Data: pd.DataFrame, **kwargs):
+        hash_tb = {chr(i): 0 for i in range(97, 123)}
+        for key, value in kwargs.items():
+            hash_tb[key] = value
+        window = int(hash_tb['window'])
+
+        df = Data.copy()
+        ma = df['close'].rolling(window).mean()
+        return (df['close'] - ma) / ma

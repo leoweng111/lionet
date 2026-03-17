@@ -6,6 +6,7 @@
 
 ```python
 from factors.factor_auto_search import FactorGenerator
+from factors.factor_auto_search import FactorFusioner
 
 fg = FactorGenerator(
     method='tsfresh',
@@ -20,6 +21,7 @@ fg = FactorGenerator(
     rolling_norm_window=252,
     rolling_norm_min_periods=20,
     rolling_norm_clip=10.0,
+    version='20260317_201530',
     n_jobs=5,
 )
 
@@ -42,7 +44,6 @@ bt2 = fg.backtest_from_fc_config(config_path)
 result = fg.auto_mine_select_and_save_fc(
     net_ret_threshold=0.05,
     sharpe_threshold=0.8,
-    fc_package_name='tsfresh_high_quality_fc',
     require_all_instruments=False,
     method='tsfresh',
 )
@@ -67,6 +68,19 @@ result_llm = fg_llm.auto_mine_select_and_save_fc(
     method='llm_prompt',
 )
 print(result_llm['config_path'])
+
+# factor fusion mode (average_weight)
+fusion = FactorFusioner(
+    version_list=['20260317_201530', '20260317_210000'],
+    fusion_strategy='average_weight',
+    instrument_id_list=['C0'],
+    fc_freq='1d',
+    start_time='20230101',
+    end_time='20260310',
+)
+fusion_df = fusion.generate()
+bt_fusion = fusion.backtest()
+print(fusion.generated_fc_name_list)
 ```
 
 ## Output Data Format
@@ -85,6 +99,12 @@ Selected feature definitions are saved under:
 - `factors/fc_from_llm/` for `method='llm_prompt'`
 
 LLM-generated valid factor classes are persisted to `factors/factor_from_llm.py`.
+
+`FactorFusioner(version_list=..., fusion_strategy='average_weight')` loads:
+- `factors/fc_from_tsfresh/tsfresh_fc_<version>.json`
+- `factors/fc_from_llm/llm_fc_<version>.json`
+
+It then equal-weights all loaded factors into one fused signal column: `fac_fusion_average_weight`.
 
 ## Rolling Normalization (No Leakage)
 

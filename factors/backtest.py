@@ -31,6 +31,7 @@ class BackTester:
                  portfolio_adjust_method: str = '1D',
                  interest_method: str = 'compound',
                  risk_free_rate: bool = False,
+                 calculate_baseline: bool = False,
                  n_jobs: int = 5):
         # todo: 数据频率，调仓频率和收益率计算频率三者相关
         # 对数据频率1min，调仓频率为1day情况，计算IC需要先将一分钟的数据聚合成一天的，然后计算日频收益率，再计算日频因子值和日频收益率
@@ -69,6 +70,7 @@ class BackTester:
         self.fc_freq = fc_freq
         self.interest_method = interest_method
         self.rfr = risk_free_rate
+        self.calculate_baseline = calculate_baseline
         self.n_jobs = n_jobs
 
         self.fc_name_with_param_list = None
@@ -153,6 +155,7 @@ class BackTester:
                  instrument_id_list: Union[str, list, None] = None,
                  start_time: Union[str, pd.Timestamp, None] = None,
                  end_time: Union[str, pd.Timestamp, None] = None,
+                 show_baseline: bool = False,
                  x_tick_rotation: int = 45,
                  auto_layout: bool = True,
                  close_fig: bool = True):
@@ -180,6 +183,7 @@ class BackTester:
         if isinstance(instrument_id_list, str):
             instrument_id_list = [instrument_id_list]
 
+        legend_drawn = False
         for instrument_id in instrument_id_list:
             for fac in fc_name:
                 fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 4))
@@ -191,7 +195,7 @@ class BackTester:
                     gross_ret = gross_ret.loc[gross_ret['time'] <= end_ts]
                 gross_ret = gross_ret.set_index('time')
                 cum_gross_ret = (1 + gross_ret[fac]).cumprod()
-                ax1.plot(cum_gross_ret.index, cum_gross_ret)
+                line_gross_strategy, = ax1.plot(cum_gross_ret.index, cum_gross_ret, label='Strategy')
                 ax1.set_title(f'Cumulative Gross Return of factor {fac} ({instrument_id})')
                 ax1.set_xlabel('time')
 
@@ -203,17 +207,87 @@ class BackTester:
                     net_ret = net_ret.loc[net_ret['time'] <= end_ts]
                 net_ret = net_ret.set_index('time')
                 cum_net_ret = (1 + net_ret[fac]).cumprod()
-                ax2.plot(cum_net_ret.index, cum_net_ret)
+                line_net_strategy, = ax2.plot(cum_net_ret.index, cum_net_ret, label='Strategy')
                 ax2.set_title(f'Cumulative Net Return of factor {fac} ({instrument_id})')
                 ax2.set_xlabel('time')
+
+                legend_handles = [line_gross_strategy]
+                legend_labels = ['Strategy']
+
+                if show_baseline:
+                    baseline_key = 'daily_gross_ret_baseline'
+                    if baseline_key not in self.performance_dc[instrument_id][fac]:
+                        raise ValueError(
+                            'Baseline series not found. Please run backtest with calculate_baseline=True.'
+                        )
+
+                    gross_baseline = self.performance_dc[instrument_id][fac]['daily_gross_ret_baseline'].copy()
+                    net_baseline = self.performance_dc[instrument_id][fac]['daily_net_ret_baseline'].copy()
+
+                    if start_ts is not None:
+                        gross_baseline = gross_baseline.loc[gross_baseline['time'] >= start_ts]
+                        net_baseline = net_baseline.loc[net_baseline['time'] >= start_ts]
+                    if end_ts is not None:
+                        gross_baseline = gross_baseline.loc[gross_baseline['time'] <= end_ts]
+                        net_baseline = net_baseline.loc[net_baseline['time'] <= end_ts]
+
+                    gross_baseline = gross_baseline.set_index('time')
+                    net_baseline = net_baseline.set_index('time')
+
+                    line_gross_long, = ax1.plot(
+                        gross_baseline.index,
+                        (1 + gross_baseline['__baseline_long__']).cumprod(),
+                        color='tab:red',
+                        linestyle='--',
+                        label='Baseline Long',
+                    )
+                    line_gross_short, = ax1.plot(
+                        gross_baseline.index,
+                        (1 + gross_baseline['__baseline_short__']).cumprod(),
+                        color='tab:green',
+                        linestyle='--',
+                        label='Baseline Short',
+                    )
+                    ax2.plot(
+                        net_baseline.index,
+                        (1 + net_baseline['__baseline_long__']).cumprod(),
+                        color='tab:red',
+                        linestyle='--',
+                        label='Baseline Long',
+                    )
+                    ax2.plot(
+                        net_baseline.index,
+                        (1 + net_baseline['__baseline_short__']).cumprod(),
+                        color='tab:green',
+                        linestyle='--',
+                        label='Baseline Short',
+                    )
+
+                    legend_handles = [line_gross_strategy, line_gross_long, line_gross_short]
+                    legend_labels = ['Strategy', 'Baseline Long', 'Baseline Short']
 
                 for ax in [ax1, ax2]:
                     ax.tick_params(axis='x', labelrotation=x_tick_rotation)
                     for label in ax.get_xticklabels():
                         label.set_horizontalalignment('right')
 
+                should_show_legend = show_baseline and (not legend_drawn)
+                if should_show_legend:
+                    # Put legend above axes to avoid covering subplot titles.
+                    fig.legend(
+                        legend_handles,
+                        legend_labels,
+                        loc='lower center',
+                        bbox_to_anchor=(0.5, 1.0),
+                        ncol=3,
+                        frameon=False,
+                    )
+                    legend_drawn = True
+
                 if auto_layout:
-                    fig.tight_layout()
+                    # Reserve top margin for figure-level legend when shown.
+                    top_margin = 0.90 if should_show_legend else 0.98
+                    fig.tight_layout(rect=[0, 0, 1, top_margin])
 
                 plt.show()
                 if close_fig:
@@ -239,6 +313,7 @@ class BackTester:
                                       self.fc_freq,
                                       self.portfolio_adjust_method,
                                       self.interest_method,
+                                      calculate_baseline=self.calculate_baseline,
                                      n_jobs=factor_n_jobs)
             return instrument_id, _result
 
