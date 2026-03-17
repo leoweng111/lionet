@@ -151,6 +151,8 @@ class BackTester:
     def plot_nav(self,
                  fc_name: Union[str, list, None] = None,
                  instrument_id_list: Union[str, list, None] = None,
+                 start_time: Union[str, pd.Timestamp, None] = None,
+                 end_time: Union[str, pd.Timestamp, None] = None,
                  x_tick_rotation: int = 45,
                  auto_layout: bool = True,
                  close_fig: bool = True):
@@ -167,6 +169,12 @@ class BackTester:
             fc_name = self.fc_name_with_param_list
         if instrument_id_list is None:
             instrument_id_list = self.instrument_id_list
+        if start_time is None:
+            start_time = self.start_time
+        if end_time is None:
+            end_time = self.end_time
+        start_ts = pd.to_datetime(start_time) if start_time is not None else None
+        end_ts = pd.to_datetime(end_time) if end_time is not None else None
         if isinstance(fc_name, str):
             fc_name = [fc_name]
         if isinstance(instrument_id_list, str):
@@ -177,6 +185,10 @@ class BackTester:
                 fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 4))
                 # gross ret
                 gross_ret = self.performance_dc[instrument_id][fac]['daily_gross_ret'].copy()
+                if start_ts is not None:
+                    gross_ret = gross_ret.loc[gross_ret['time'] >= start_ts]
+                if end_ts is not None:
+                    gross_ret = gross_ret.loc[gross_ret['time'] <= end_ts]
                 gross_ret = gross_ret.set_index('time')
                 cum_gross_ret = (1 + gross_ret[fac]).cumprod()
                 ax1.plot(cum_gross_ret.index, cum_gross_ret)
@@ -185,6 +197,10 @@ class BackTester:
 
                 # net ret
                 net_ret = self.performance_dc[instrument_id][fac]['daily_net_ret'].copy()
+                if start_ts is not None:
+                    net_ret = net_ret.loc[net_ret['time'] >= start_ts]
+                if end_ts is not None:
+                    net_ret = net_ret.loc[net_ret['time'] <= end_ts]
                 net_ret = net_ret.set_index('time')
                 cum_net_ret = (1 + net_ret[fac]).cumprod()
                 ax2.plot(cum_net_ret.index, cum_net_ret)
