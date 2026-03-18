@@ -5411,3 +5411,20 @@ class fac_position_volume_elasticity_v7:
         df['smoothed_elasticity'] = df['combined_elasticity'].rolling(smooth_window).mean()
         
         return df['smoothed_elasticity']
+
+
+class fac_price_position:
+    param_range = {'window': [10, 20, 30]}
+
+    @staticmethod
+    def operate(Data: pd.DataFrame, **kwargs):
+        hash_tb = {chr(i): 0 for i in range(97, 123)}
+        for key, value in kwargs.items():
+            hash_tb[key] = value
+        window = int(hash_tb['window'])
+
+        df = Data.copy()
+        high_max = df['high'].rolling(window).max()
+        low_min = df['low'].rolling(window).min()
+        price_position = (df['close'] - low_min) / (high_max - low_min + 1e-8)
+        return price_position
