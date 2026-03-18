@@ -5,11 +5,10 @@
 ## Quick Start
 
 ```python
-from factors.factor_auto_search import FactorGenerator
+from factors.factor_auto_search import TsfreshFactorGenerator, LLMPromptFactorGenerator
 from factors.factor_auto_search import FactorFusioner
 
-fg = FactorGenerator(
-    method='tsfresh',
+fg = TsfreshFactorGenerator(
     instrument_id_list=['C0', 'FG0'],
     fc_freq='1d',
     start_time='20230101',
@@ -45,14 +44,12 @@ result = fg.auto_mine_select_and_save_fc(
     net_ret_threshold=0.05,
     sharpe_threshold=0.8,
     require_all_instruments=False,
-    method='tsfresh',
 )
 print(result['config_path'])
 print(result['selected_fc_name_list'])
 
 # llm prompt mode (DeepSeek)
-fg_llm = FactorGenerator(
-    method='llm_prompt',
+fg_llm = LLMPromptFactorGenerator(
     instrument_id_list=['C0'],
     fc_freq='1d',
     start_time='20230101',
@@ -65,7 +62,6 @@ fg_llm = FactorGenerator(
 result_llm = fg_llm.auto_mine_select_and_save_fc(
     net_ret_threshold=0.03,
     sharpe_threshold=0.6,
-    method='llm_prompt',
 )
 print(result_llm['config_path'])
 

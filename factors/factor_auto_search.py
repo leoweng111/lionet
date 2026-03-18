@@ -29,8 +29,9 @@ class FactorGenerator:
     `time`, `instrument_id`, `future_ret`, and factor columns.
     """
 
+    method: str = 'base'
+
     def __init__(self,
-                 method: str = 'tsfresh',
                  instrument_type: str = 'futures_continuous_contract',
                  instrument_id_list: Union[str, List[str]] = 'C0',
                  fc_freq: str = '1d',
@@ -45,19 +46,12 @@ class FactorGenerator:
                  base_col_list: Optional[Sequence[str]] = None,
                  min_window_size: int = 30,
                  max_factor_count: Optional[int] = 200,
-                 tsfresh_profile: str = 'minimal',
                  apply_rolling_norm: bool = True,
                  rolling_norm_window: int = 30,
                  rolling_norm_min_periods: int = 20,
                  rolling_norm_eps: float = 1e-8,
                  rolling_norm_clip: float = 10.0,
-                 model_name: str = 'deepseek',
-                 llm_temperature: float = 0.7,
-                 llm_factor_count: int = 5,
-                 llm_early_stopping_round: int = 20,
-                 version: Optional[str] = None,
-                 llm_user_requirement: str = '生成期货的日频量价因子'):
-        self.method = method
+                 version: Optional[str] = None):
         self.instrument_type = instrument_type
         self.instrument_id_list = [instrument_id_list] if isinstance(instrument_id_list, str) else list(instrument_id_list)
         self.fc_freq = fc_freq
@@ -73,18 +67,21 @@ class FactorGenerator:
         self.base_col_list = list(base_col_list) if base_col_list else ['open', 'high', 'low', 'close', 'volume', 'position']
         self.min_window_size = min_window_size
         self.max_factor_count = max_factor_count
-        self.tsfresh_profile = tsfresh_profile
         self.apply_rolling_norm = apply_rolling_norm
         self.rolling_norm_window = rolling_norm_window
         self.rolling_norm_min_periods = rolling_norm_min_periods
         self.rolling_norm_eps = rolling_norm_eps
         self.rolling_norm_clip = rolling_norm_clip
-        self.model_name = model_name
-        self.llm_temperature = llm_temperature
-        self.llm_factor_count = llm_factor_count
-        self.llm_early_stopping_round = llm_early_stopping_round
+
+        # Subclasses overwrite these method-specific fields when needed.
+        self.tsfresh_profile = 'minimal'
+        self.model_name = 'deepseek'
+        self.llm_temperature = 0.7
+        self.llm_factor_count = 5
+        self.llm_early_stopping_round = 20
+        self.llm_user_requirement = '生成期货的日频量价因子'
+
         self.version = version or datetime.now().strftime('%Y%m%d_%H%M%S')
-        self.llm_user_requirement = llm_user_requirement
 
         self.generated_data: Optional[pd.DataFrame] = None
         self.generated_fc_name_list: List[str] = []
@@ -94,9 +91,9 @@ class FactorGenerator:
         assert self.fc_freq in ['1m', '5m', '1d'], f'Only support 1m, 5m or 1d fc_freq, got {self.fc_freq}.'
         assert self.portfolio_adjust_method in ['min', '1D', '1M', '1Q'], \
             f'Only support min, 1D, 1M or 1Q portfolio_adjust_method, got {self.portfolio_adjust_method}.'
-        assert self.method in ['tsfresh', 'llm_prompt'], f'Unsupported method: {self.method}.'
+        assert self.method in ['base', 'tsfresh', 'llm_prompt'], f'Unsupported method: {self.method}.'
 
-    def _load_base_data(self) -> pd.DataFrame:
+    def load_base_data(self) -> pd.DataFrame:
         if isinstance(self.data, pd.DataFrame):
             df = self.data.copy()
         else:
@@ -252,9 +249,9 @@ class FactorGenerator:
 
         return df_feature
 
-    def _rolling_normalize_features(self,
-                                    df: pd.DataFrame,
-                                    factor_cols: Sequence[str]) -> pd.DataFrame:
+    def rolling_normalize_features(self,
+                                   df: pd.DataFrame,
+                                   factor_cols: Sequence[str]) -> pd.DataFrame:
         """
         Rolling normalization per instrument without future leakage.
 
@@ -289,7 +286,7 @@ class FactorGenerator:
         return df_out
 
     @staticmethod
-    def _auto_load_project_env() -> bool:
+    def auto_load_project_env() -> bool:
         """Best-effort load of .env from common project-root locations."""
         candidate_paths = [
             Path(__file__).resolve().parents[1] / '.env',
@@ -327,7 +324,7 @@ class FactorGenerator:
         if model_name != 'deepseek':
             raise ValueError(f'Unsupported model_name: {model_name}.')
 
-        FactorGenerator._auto_load_project_env()
+        FactorGenerator.auto_load_project_env()
         deepseek_api_key = os.getenv('DEEPSEEK_API_KEY')
         deepseek_base_url = os.getenv('DEEPSEEK_BASE_URL', 'https://api.deepseek.com')
         if not deepseek_api_key:
@@ -609,19 +606,17 @@ class FactorGenerator:
     def generate(self,
                  selected_fc_name_list: Optional[List[str]] = None) -> pd.DataFrame:
         """
-        Generate factor values based on selected method.
+        Generate factor values for subclass-specific method.
         """
-        base_df = self._load_base_data()
-        if self.method == 'tsfresh':
-            factor_df = self._generate_by_tsfresh(base_df, selected_fc_names=selected_fc_name_list)
-        elif self.method == 'llm_prompt':
-            factor_df = self._generate_by_llm_prompt(base_df, selected_fc_names=selected_fc_name_list)
-        else:
-            raise ValueError(f'Unsupported method: {self.method}.')
+        raise NotImplementedError('Please use a concrete subclass, e.g. TsfreshFactorGenerator or LLMPromptFactorGenerator.')
 
+    def _finalize_generated_data(self,
+                                 base_df: pd.DataFrame,
+                                 factor_df: pd.DataFrame) -> pd.DataFrame:
+        """Merge factor dataframe with return label and update object state."""
         if self.apply_rolling_norm:
             factor_cols = [c for c in factor_df.columns if c not in ['time', 'instrument_id']]
-            factor_df = self._rolling_normalize_features(factor_df, factor_cols)
+            factor_df = self.rolling_normalize_features(factor_df, factor_cols)
 
         df_with_ret = get_future_ret(
             base_df[['time', 'instrument_id', 'open', 'high', 'low', 'close', 'volume', 'position']].copy(),
@@ -815,9 +810,9 @@ class FactorGenerator:
 
         config_method = payload.get('method')
         if config_method and config_method != self.method:
-            log.warning(
-                f'Config method={config_method} is different from current method={self.method}. '
-                'Temporarily switching to config method for this run.'
+            raise ValueError(
+                f'Config method={config_method} does not match current generator method={self.method}. '
+                'Please use the matching subclass.'
             )
 
         fc_name_list = payload.get('fc_name_list', [])
@@ -840,14 +835,8 @@ class FactorGenerator:
                     'Config base_col_list does not match current base_col_list when strict_meta=True.'
                 )
 
-        current_method = self.method
-        try:
-            if config_method:
-                self.method = config_method
-            self.generate_with_fc(fc_name_list)
-            return self.backtest(fc_name_list=fc_name_list, n_jobs=n_jobs)
-        finally:
-            self.method = current_method
+        self.generate_with_fc(fc_name_list)
+        return self.backtest(fc_name_list=fc_name_list, n_jobs=n_jobs)
 
     def filter_fc_by_threshold(self,
                                performance_summary: Optional[pd.DataFrame] = None,
@@ -916,53 +905,45 @@ class FactorGenerator:
                                      save_dir: Optional[Union[str, Path]] = None,
                                      n_jobs: Optional[int] = None,
                                      require_all_row: bool = True,
-                                     require_all_instruments: bool = True,
-                                     method: Optional[str] = None) -> dict:
+                                     require_all_instruments: bool = True) -> dict:
         """
         One-step automation:
         generate factors -> backtest -> threshold filter -> save selected config.
         """
-        original_method = self.method
-        try:
-            if method is not None:
-                self.method = method
+        generated_df = self.generate()
+        bt = self.backtest(data=generated_df, fc_name_list=self.generated_fc_name_list, n_jobs=n_jobs)
+        selected_fc_name_list = self.filter_fc_by_threshold(
+            performance_summary=bt.performance_summary,
+            net_ret_threshold=net_ret_threshold,
+            sharpe_threshold=sharpe_threshold,
+            require_all_row=require_all_row,
+            require_all_instruments=require_all_instruments,
+        )
 
-            generated_df = self.generate()
-            bt = self.backtest(data=generated_df, fc_name_list=self.generated_fc_name_list, n_jobs=n_jobs)
-            selected_fc_name_list = self.filter_fc_by_threshold(
-                performance_summary=bt.performance_summary,
-                net_ret_threshold=net_ret_threshold,
-                sharpe_threshold=sharpe_threshold,
-                require_all_row=require_all_row,
-                require_all_instruments=require_all_instruments,
+        if not selected_fc_name_list:
+            msg = (
+                f'No factors passed thresholds: net_ret_threshold={net_ret_threshold}, '
+                f'sharpe_threshold={sharpe_threshold}.'
             )
-
-            if not selected_fc_name_list:
-                msg = (
-                    f'No factors passed thresholds: net_ret_threshold={net_ret_threshold}, '
-                    f'sharpe_threshold={sharpe_threshold}.'
-                )
-                print(msg)
-                log.warning(msg)
-                return {
-                    'config_path': None,
-                    'selected_fc_name_list': [],
-                    'bt': bt,
-                    'message': msg,
-                }
-
-            config_path = self.save_fc(
-                fc_name_list=selected_fc_name_list,
-                save_dir=save_dir,
-            )
-
+            print(msg)
+            log.warning(msg)
             return {
-                'config_path': config_path,
-                'selected_fc_name_list': selected_fc_name_list,
+                'config_path': None,
+                'selected_fc_name_list': [],
                 'bt': bt,
+                'message': msg,
             }
-        finally:
-            self.method = original_method
+
+        config_path = self.save_fc(
+            fc_name_list=selected_fc_name_list,
+            save_dir=save_dir,
+        )
+
+        return {
+            'config_path': config_path,
+            'selected_fc_name_list': selected_fc_name_list,
+            'bt': bt,
+        }
 
     def check_if_leakage(self,
                          fc_name_list: Optional[Union[str, List[str]]] = None,
@@ -980,7 +961,7 @@ class FactorGenerator:
         if isinstance(fc_name_list, str):
             fc_name_list = [fc_name_list]
 
-        base_df = self._load_base_data()
+        base_df = self.load_base_data()
 
         # Resolve feature list to check.
         if fc_name_list:
@@ -1007,7 +988,7 @@ class FactorGenerator:
         else:
             raise ValueError(f'Unsupported method for leakage check: {self.method}.')
         if self.apply_rolling_norm:
-            full_factor_df = self._rolling_normalize_features(full_factor_df, selected_fc_name_list)
+            full_factor_df = self.rolling_normalize_features(full_factor_df, selected_fc_name_list)
 
         check_time_list = sorted(full_factor_df['time'].dropna().unique().tolist())
         if not check_time_list:
@@ -1024,7 +1005,7 @@ class FactorGenerator:
             else:
                 raise ValueError(f'Unsupported method for leakage check: {self.method}.')
             if self.apply_rolling_norm:
-                factor_df_slice = self._rolling_normalize_features(factor_df_slice, selected_fc_name_list)
+                factor_df_slice = self.rolling_normalize_features(factor_df_slice, selected_fc_name_list)
 
             factor_df_slice = factor_df_slice.loc[
                 factor_df_slice['time'] == t,
@@ -1112,6 +1093,130 @@ class FactorGenerator:
         bt.backtest()
         self.bt = bt
         return bt
+
+
+class TsfreshFactorGenerator(FactorGenerator):
+    """Factor generator using tsfresh feature extraction."""
+
+    method: str = 'tsfresh'
+
+    def __init__(self,
+                 instrument_type: str = 'futures_continuous_contract',
+                 instrument_id_list: Union[str, List[str]] = 'C0',
+                 fc_freq: str = '1d',
+                 data: Optional[pd.DataFrame] = None,
+                 start_time: Optional[str] = None,
+                 end_time: Optional[str] = None,
+                 portfolio_adjust_method: str = '1D',
+                 interest_method: str = 'compound',
+                 risk_free_rate: bool = False,
+                 calculate_baseline: bool = False,
+                 n_jobs: int = 5,
+                 base_col_list: Optional[Sequence[str]] = None,
+                 min_window_size: int = 30,
+                 max_factor_count: Optional[int] = 200,
+                 tsfresh_profile: str = 'minimal',
+                 apply_rolling_norm: bool = True,
+                 rolling_norm_window: int = 30,
+                 rolling_norm_min_periods: int = 20,
+                 rolling_norm_eps: float = 1e-8,
+                 rolling_norm_clip: float = 10.0,
+                 version: Optional[str] = None):
+        super().__init__(
+            instrument_type=instrument_type,
+            instrument_id_list=instrument_id_list,
+            fc_freq=fc_freq,
+            data=data,
+            start_time=start_time,
+            end_time=end_time,
+            portfolio_adjust_method=portfolio_adjust_method,
+            interest_method=interest_method,
+            risk_free_rate=risk_free_rate,
+            calculate_baseline=calculate_baseline,
+            n_jobs=n_jobs,
+            base_col_list=base_col_list,
+            min_window_size=min_window_size,
+            max_factor_count=max_factor_count,
+            apply_rolling_norm=apply_rolling_norm,
+            rolling_norm_window=rolling_norm_window,
+            rolling_norm_min_periods=rolling_norm_min_periods,
+            rolling_norm_eps=rolling_norm_eps,
+            rolling_norm_clip=rolling_norm_clip,
+            version=version,
+        )
+        self.tsfresh_profile = tsfresh_profile
+
+    def generate(self,
+                 selected_fc_name_list: Optional[List[str]] = None) -> pd.DataFrame:
+        base_df = self.load_base_data()
+        factor_df = self._generate_by_tsfresh(base_df, selected_fc_names=selected_fc_name_list)
+        return self._finalize_generated_data(base_df, factor_df)
+
+
+class LLMPromptFactorGenerator(FactorGenerator):
+    """Factor generator using LLM prompt-based factor synthesis."""
+
+    method: str = 'llm_prompt'
+
+    def __init__(self,
+                 instrument_type: str = 'futures_continuous_contract',
+                 instrument_id_list: Union[str, List[str]] = 'C0',
+                 fc_freq: str = '1d',
+                 data: Optional[pd.DataFrame] = None,
+                 start_time: Optional[str] = None,
+                 end_time: Optional[str] = None,
+                 portfolio_adjust_method: str = '1D',
+                 interest_method: str = 'compound',
+                 risk_free_rate: bool = False,
+                 calculate_baseline: bool = False,
+                 n_jobs: int = 5,
+                 base_col_list: Optional[Sequence[str]] = None,
+                 min_window_size: int = 30,
+                 max_factor_count: Optional[int] = 200,
+                 apply_rolling_norm: bool = True,
+                 rolling_norm_window: int = 30,
+                 rolling_norm_min_periods: int = 20,
+                 rolling_norm_eps: float = 1e-8,
+                 rolling_norm_clip: float = 10.0,
+                 model_name: str = 'deepseek',
+                 llm_temperature: float = 0.7,
+                 llm_factor_count: int = 5,
+                 llm_early_stopping_round: int = 20,
+                 llm_user_requirement: str = '生成期货的日频量价因子',
+                 version: Optional[str] = None):
+        super().__init__(
+            instrument_type=instrument_type,
+            instrument_id_list=instrument_id_list,
+            fc_freq=fc_freq,
+            data=data,
+            start_time=start_time,
+            end_time=end_time,
+            portfolio_adjust_method=portfolio_adjust_method,
+            interest_method=interest_method,
+            risk_free_rate=risk_free_rate,
+            calculate_baseline=calculate_baseline,
+            n_jobs=n_jobs,
+            base_col_list=base_col_list,
+            min_window_size=min_window_size,
+            max_factor_count=max_factor_count,
+            apply_rolling_norm=apply_rolling_norm,
+            rolling_norm_window=rolling_norm_window,
+            rolling_norm_min_periods=rolling_norm_min_periods,
+            rolling_norm_eps=rolling_norm_eps,
+            rolling_norm_clip=rolling_norm_clip,
+            version=version,
+        )
+        self.model_name = model_name
+        self.llm_temperature = llm_temperature
+        self.llm_factor_count = llm_factor_count
+        self.llm_early_stopping_round = llm_early_stopping_round
+        self.llm_user_requirement = llm_user_requirement
+
+    def generate(self,
+                 selected_fc_name_list: Optional[List[str]] = None) -> pd.DataFrame:
+        base_df = self.load_base_data()
+        factor_df = self._generate_by_llm_prompt(base_df, selected_fc_names=selected_fc_name_list)
+        return self._finalize_generated_data(base_df, factor_df)
 
 
 class FactorFusioner:
@@ -1261,27 +1366,31 @@ class FactorFusioner:
         return config_info_list
 
     def _build_generator(self, method: str) -> FactorGenerator:
-        return FactorGenerator(
-            method=method,
-            instrument_type=self.instrument_type,
-            instrument_id_list=self.instrument_id_list,
-            fc_freq=self.fc_freq,
-            data=self.data,
-            start_time=self.start_time,
-            end_time=self.end_time,
-            portfolio_adjust_method=self.portfolio_adjust_method,
-            interest_method=self.interest_method,
-            risk_free_rate=self.risk_free_rate,
-            calculate_baseline=self.calculate_baseline,
-            n_jobs=self.n_jobs,
-            base_col_list=self.base_col_list,
-            min_window_size=self.min_window_size,
-            apply_rolling_norm=self.apply_rolling_norm,
-            rolling_norm_window=self.rolling_norm_window,
-            rolling_norm_min_periods=self.rolling_norm_min_periods,
-            rolling_norm_eps=self.rolling_norm_eps,
-            rolling_norm_clip=self.rolling_norm_clip,
-        )
+        common_kwargs = {
+            'instrument_type': self.instrument_type,
+            'instrument_id_list': self.instrument_id_list,
+            'fc_freq': self.fc_freq,
+            'data': self.data,
+            'start_time': self.start_time,
+            'end_time': self.end_time,
+            'portfolio_adjust_method': self.portfolio_adjust_method,
+            'interest_method': self.interest_method,
+            'risk_free_rate': self.risk_free_rate,
+            'calculate_baseline': self.calculate_baseline,
+            'n_jobs': self.n_jobs,
+            'base_col_list': self.base_col_list,
+            'min_window_size': self.min_window_size,
+            'apply_rolling_norm': self.apply_rolling_norm,
+            'rolling_norm_window': self.rolling_norm_window,
+            'rolling_norm_min_periods': self.rolling_norm_min_periods,
+            'rolling_norm_eps': self.rolling_norm_eps,
+            'rolling_norm_clip': self.rolling_norm_clip,
+        }
+        if method == 'tsfresh':
+            return TsfreshFactorGenerator(**common_kwargs)
+        if method == 'llm_prompt':
+            return LLMPromptFactorGenerator(**common_kwargs)
+        raise ValueError(f'Unsupported method in fusion: {method}')
 
     def generate(self) -> pd.DataFrame:
         """
@@ -1292,7 +1401,7 @@ class FactorFusioner:
 
         # 用于得到基准的base_df
         data_generator = self._build_generator(method='tsfresh')
-        base_df = data_generator._load_base_data()
+        base_df = data_generator.load_base_data()
         df_with_ret = get_future_ret(
             base_df[['time', 'instrument_id', 'open', 'high', 'low', 'close', 'volume', 'position']].copy(),
             portfolio_adjust_method=self.portfolio_adjust_method,
@@ -1316,7 +1425,7 @@ class FactorFusioner:
                 raise ValueError(f'Unsupported method in fusion config: {method}')
 
             if generator.apply_rolling_norm:
-                factor_df_i = generator._rolling_normalize_features(factor_df_i, fc_name_list)
+                factor_df_i = generator.rolling_normalize_features(factor_df_i, fc_name_list)
 
             # Avoid collisions across methods/versions by adding stable suffix.
             version = cast(str, config_info['version'])
@@ -1339,7 +1448,7 @@ class FactorFusioner:
         if self.apply_rolling_norm_after_fusion:
             # Reuse the same rolling normalization implementation for post-fusion processing.
             norm_helper = self._build_generator(method='tsfresh')
-            merged_factor_df = norm_helper._rolling_normalize_features(merged_factor_df, [self.fused_fc_name])
+            merged_factor_df = norm_helper.rolling_normalize_features(merged_factor_df, [self.fused_fc_name])
 
         self.raw_fc_value = merged_factor_df
         generated_data = df_with_ret.merge(

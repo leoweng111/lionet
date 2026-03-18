@@ -1,6 +1,6 @@
 import pandas as pd
 
-from factors.factor_auto_search import FactorGenerator
+from factors.factor_auto_search import FactorGenerator, TsfreshFactorGenerator
 
 
 def build_mock_data(rows: int = 80) -> pd.DataFrame:
@@ -21,8 +21,7 @@ def build_mock_data(rows: int = 80) -> pd.DataFrame:
 
 if __name__ == '__main__':
     data = build_mock_data()
-    fg = FactorGenerator(
-        method='tsfresh',
+    fg = TsfreshFactorGenerator(
         instrument_id_list='C0',
         data=data,
         fc_freq='1d',
