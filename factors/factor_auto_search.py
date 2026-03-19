@@ -18,7 +18,9 @@ from utils.logging import log
 
 from .backtest import BackTester
 from .factor_utils import get_future_ret, join_fc_name_and_parameter
+from .gp_factor_engine import run_gp_evolution, GPCandidate
 from stats import iterdict
+from mongo.mongify import update_one_data
 
 
 class FactorGenerator:
@@ -83,7 +85,8 @@ class FactorGenerator:
         assert self.fc_freq in ['1m', '5m', '1d'], f'Only support 1m, 5m or 1d fc_freq, got {self.fc_freq}.'
         assert self.portfolio_adjust_method in ['min', '1D', '1M', '1Q'], \
             f'Only support min, 1D, 1M or 1Q portfolio_adjust_method, got {self.portfolio_adjust_method}.'
-        assert self.method in ['base', 'tsfresh', 'llm_prompt'], f'Unsupported method: {self.method}.'
+        assert self.method in ['base', 'tsfresh', 'llm_prompt', 'genetic_programming'], \
+            f'Unsupported method: {self.method}.'
 
     def load_base_data(self) -> pd.DataFrame:
         if isinstance(self.data, pd.DataFrame):
@@ -338,17 +341,31 @@ class FactorGenerator:
                 raise ValueError(f'fc_name_list contains unknown features: {missing}')
 
         if save_dir is None:
-            default_dir_name = 'fc_from_llm' if self.method == 'llm_prompt' else 'fc_from_tsfresh'
+            if self.method == 'llm_prompt':
+                default_dir_name = 'fc_from_llm'
+            elif self.method == 'tsfresh':
+                default_dir_name = 'fc_from_tsfresh'
+            elif self.method == 'genetic_programming':
+                default_dir_name = 'fc_from_genetic_programming'
+            else:
+                raise ValueError(f'save_fc does not support method={self.method}.')
             save_dir = Path(__file__).resolve().parent / default_dir_name
         save_dir = Path(save_dir)
         save_dir.mkdir(parents=True, exist_ok=True)
 
-        package_prefix = 'llm_fc' if self.method == 'llm_prompt' else 'tsfresh_fc'
+        if self.method == 'llm_prompt':
+            package_prefix = 'llm_fc'
+        elif self.method == 'tsfresh':
+            package_prefix = 'tsfresh_fc'
+        elif self.method == 'genetic_programming':
+            package_prefix = 'gp_fc'
+        else:
+            raise ValueError(f'save_fc does not support method={self.method}.')
         fc_package_name = f'{package_prefix}_{self.version}'
 
         fc_name_list = list(fc_name_list)
 
-        if self.method not in ['tsfresh', 'llm_prompt']:
+        if self.method not in ['tsfresh', 'llm_prompt', 'genetic_programming']:
             raise ValueError(f'save_fc does not support method={self.method}.')
 
         def _build_payload(selected_fc_name_list: List[str], created_at: Optional[str] = None) -> dict:
@@ -368,6 +385,15 @@ class FactorGenerator:
             if self.method == 'tsfresh':
                 from tsfresh.feature_extraction.settings import from_columns
                 payload_i['kind_to_fc_parameters'] = from_columns(selected_fc_name_list)
+            elif self.method == 'genetic_programming':
+                formula_map = getattr(self, 'factor_formula_map', {})
+                fitness_map = getattr(self, 'factor_fitness_map', {})
+                payload_i['formula_map'] = {
+                    k: formula_map[k] for k in selected_fc_name_list if isinstance(formula_map, dict) and k in formula_map
+                }
+                payload_i['fitness_map'] = {
+                    k: fitness_map[k] for k in selected_fc_name_list if isinstance(fitness_map, dict) and k in fitness_map
+                }
             return payload_i
 
         payload = _build_payload(fc_name_list)
@@ -1265,6 +1291,305 @@ class LLMPromptFactorGenerator(FactorGenerator):
         return self._finalize_generated_data(base_df, factor_df)
 
 
+class GeneticFactorGenerator(FactorGenerator):
+    """Factor generator using genetic programming AST evolution."""
+
+    method: str = 'genetic_programming'
+
+    def __init__(self,
+                 instrument_type: str = 'futures_continuous_contract',
+                 instrument_id_list: Union[str, List[str]] = 'C0',
+                 fc_freq: str = '1d',
+                 data: Optional[pd.DataFrame] = None,
+                 start_time: Optional[str] = None,
+                 end_time: Optional[str] = None,
+                 portfolio_adjust_method: str = '1D',
+                 interest_method: str = 'compound',
+                 risk_free_rate: bool = False,
+                 calculate_baseline: bool = False,
+                 n_jobs: int = 5,
+                 base_col_list: Optional[Sequence[str]] = None,
+                 min_window_size: int = 30,
+                 max_factor_count: Optional[int] = 200,
+                 apply_rolling_norm: bool = True,
+                 rolling_norm_window: int = 30,
+                 rolling_norm_min_periods: int = 20,
+                 rolling_norm_eps: float = 1e-8,
+                 rolling_norm_clip: float = 10.0,
+                 version: Optional[str] = None,
+                 gp_generations: int = 50,
+                 gp_population_size: int = 200,
+                 gp_max_depth: int = 4,
+                 gp_elite_size: int = 20,
+                 gp_tournament_size: int = 6,
+                 gp_crossover_prob: float = 0.7,
+                 gp_mutation_prob: float = 0.25,
+                 gp_leaf_prob: float = 0.2,
+                 gp_const_prob: float = 0.02,
+                 gp_window_choices: Optional[Sequence[int]] = None,
+                 fitness_metric: str = 'ic',
+                 random_seed: Optional[int] = None,
+                 gp_depth_penalty_coef: float = 0.0,
+                 gp_depth_penalty_start_depth: int = 3,
+                 gp_depth_penalty_linear_coef: float = 0.0,
+                 gp_depth_penalty_quadratic_coef: float = 0.0,
+                 gp_log_interval: int = 5):
+        """
+        Genetic programming key controls:
+
+        - `max_factor_count`: keep top-N candidates after full evolution.
+        - `gp_generations`: number of evolution iterations.
+        - `gp_population_size`: number of individuals per generation.
+        - `gp_max_depth`: max AST depth to limit formula complexity.
+        - `gp_elite_size`: top-K individuals copied directly to next generation.
+        - `gp_tournament_size`: candidate pool size in tournament selection.
+        - `gp_crossover_prob` / `gp_mutation_prob`: probabilities for genetic operators.
+        - `gp_leaf_prob`: probability to stop expanding and create a leaf node.
+        - `gp_const_prob`: probability of using constant leaves vs data-field leaves.
+        - `gp_window_choices`: allowed rolling windows for time-series operators.
+        - `fitness_metric`: objective for evolution, currently `ic` or `sharpe`.
+        - `random_seed`: random seed for reproducible evolution.
+        - `gp_depth_penalty_coef`: base depth regularization coefficient.
+          base_penalty = gp_depth_penalty_coef * tree_depth.
+        - `gp_depth_penalty_start_depth`: dynamic penalty starts after this depth.
+        - `gp_depth_penalty_linear_coef`: linear dynamic penalty slope.
+        - `gp_depth_penalty_quadratic_coef`: quadratic dynamic penalty slope.
+          total_penalty = base_penalty + linear_coef * extra_depth + quadratic_coef * extra_depth^2,
+          where extra_depth = max(tree_depth - start_depth, 0).
+        - `gp_log_interval`: log progress every N generations.
+        """
+        super().__init__(
+            instrument_type=instrument_type,
+            instrument_id_list=instrument_id_list,
+            fc_freq=fc_freq,
+            data=data,
+            start_time=start_time,
+            end_time=end_time,
+            portfolio_adjust_method=portfolio_adjust_method,
+            interest_method=interest_method,
+            risk_free_rate=risk_free_rate,
+            calculate_baseline=calculate_baseline,
+            n_jobs=n_jobs,
+            base_col_list=base_col_list,
+            min_window_size=min_window_size,
+            max_factor_count=max_factor_count,
+            apply_rolling_norm=apply_rolling_norm,
+            rolling_norm_window=rolling_norm_window,
+            rolling_norm_min_periods=rolling_norm_min_periods,
+            rolling_norm_eps=rolling_norm_eps,
+            rolling_norm_clip=rolling_norm_clip,
+            version=version,
+        )
+
+        # Evolution loop controls
+        self.gp_generations = gp_generations
+        self.gp_population_size = gp_population_size
+        self.gp_max_depth = gp_max_depth
+
+        # Selection and reproduction controls
+        self.gp_elite_size = gp_elite_size
+        self.gp_tournament_size = gp_tournament_size
+        self.gp_crossover_prob = gp_crossover_prob
+        self.gp_mutation_prob = gp_mutation_prob
+
+        # Tree-shape / primitive sampling controls
+        self.gp_leaf_prob = gp_leaf_prob
+        self.gp_const_prob = gp_const_prob
+        self.gp_window_choices = list(gp_window_choices) if gp_window_choices else [5, 10, 20]
+
+        # Objective and reproducibility controls
+        self.fitness_metric = fitness_metric
+        self.random_seed = random_seed
+        self.gp_depth_penalty_coef = float(gp_depth_penalty_coef)
+        self.gp_depth_penalty_start_depth = int(gp_depth_penalty_start_depth)
+        self.gp_depth_penalty_linear_coef = float(gp_depth_penalty_linear_coef)
+        self.gp_depth_penalty_quadratic_coef = float(gp_depth_penalty_quadratic_coef)
+        self.gp_log_interval = gp_log_interval
+
+        self.factor_tree_map: Dict[str, Any] = {}
+        self.factor_formula_map: Dict[str, str] = {}
+        self.factor_fitness_map: Dict[str, Dict[str, float]] = {}
+
+        assert self.fitness_metric in ['ic', 'sharpe'], \
+            f'Unsupported fitness_metric={self.fitness_metric}, use ic/sharpe.'
+
+    def _prepare_df_for_gp(self, df: pd.DataFrame) -> pd.DataFrame:
+        base_cols = ['time', 'instrument_id', 'open', 'high', 'low', 'close', 'volume', 'position']
+        for col in base_cols:
+            if col not in df.columns:
+                raise ValueError(f'Missing required column for GP: {col}')
+
+        df_eval = df[base_cols].copy()
+        df_eval = df_eval.sort_values(['instrument_id', 'time']).reset_index(drop=True)
+        df_eval = get_future_ret(
+            df_eval,
+            portfolio_adjust_method=self.portfolio_adjust_method,
+            rfr=self.risk_free_rate,
+        )
+        return df_eval
+
+    def _build_factor_df_from_candidates(self,
+                                         df_eval: pd.DataFrame,
+                                         candidates: List[GPCandidate]) -> pd.DataFrame:
+        factor_df = df_eval[['time', 'instrument_id']].copy()
+        self.factor_tree_map = {}
+        self.factor_formula_map = {}
+        self.factor_fitness_map = {}
+
+        for idx, cand in enumerate(candidates, start=1):
+            fc_name = f'fac_gp_{idx:04d}'
+            signal = cand.node.calc(df_eval)
+            signal = pd.to_numeric(signal, errors='coerce')
+            factor_df[fc_name] = signal.values
+            self.factor_tree_map[fc_name] = cand.node
+            self.factor_formula_map[fc_name] = cand.formula
+            self.factor_fitness_map[fc_name] = {self.fitness_metric: float(cand.fitness)}
+
+        return factor_df
+
+    def generate_factor_df(self,
+                           df: pd.DataFrame,
+                           selected_fc_names: Optional[List[str]] = None) -> pd.DataFrame:
+        df_eval = self._prepare_df_for_gp(df)
+
+        if selected_fc_names is not None:
+            if not self.factor_tree_map:
+                raise ValueError('No GP factor tree cache found. Please run generate() first for this object.')
+            resolved_names = self._expand_requested_factor_names(
+                selected_fc_names,
+                list(self.factor_tree_map.keys()),
+                separators=('_',),
+            )
+            factor_df = df_eval[['time', 'instrument_id']].copy()
+            for fc_name in resolved_names:
+                signal = self.factor_tree_map[fc_name].calc(df_eval)
+                factor_df[fc_name] = pd.to_numeric(signal, errors='coerce').values
+            return factor_df
+
+        limit = int(self.max_factor_count or 0)
+        if limit <= 0:
+            raise ValueError('max_factor_count must be positive for genetic programming.')
+
+        log.info(
+            f'GeneticFactorGenerator generate start: instrument_id_list={self.instrument_id_list}, '
+            f'start_time={self.start_time}, end_time={self.end_time}, max_factor_count={limit}, '
+            f'fitness_metric={self.fitness_metric}, gp_generations={self.gp_generations}, '
+            f'gp_population_size={self.gp_population_size}, '
+            f'gp_depth_penalty_coef={self.gp_depth_penalty_coef}, '
+            f'gp_depth_penalty_start_depth={self.gp_depth_penalty_start_depth}, '
+            f'gp_depth_penalty_linear_coef={self.gp_depth_penalty_linear_coef}, '
+            f'gp_depth_penalty_quadratic_coef={self.gp_depth_penalty_quadratic_coef}'
+        )
+
+        candidates = run_gp_evolution(
+            df=df_eval,
+            data_fields=self.base_col_list,
+            fitness_metric=self.fitness_metric,
+            max_factor_count=limit,
+            generations=self.gp_generations,
+            population_size=self.gp_population_size,
+            max_depth=self.gp_max_depth,
+            elite_size=self.gp_elite_size,
+            tournament_size=self.gp_tournament_size,
+            crossover_prob=self.gp_crossover_prob,
+            mutation_prob=self.gp_mutation_prob,
+            window_choices=self.gp_window_choices,
+            const_prob=self.gp_const_prob,
+            leaf_prob=self.gp_leaf_prob,
+            random_seed=self.random_seed,
+            log_interval=self.gp_log_interval,
+            depth_penalty_coef=self.gp_depth_penalty_coef,
+            depth_penalty_start_depth=self.gp_depth_penalty_start_depth,
+            depth_penalty_linear_coef=self.gp_depth_penalty_linear_coef,
+            depth_penalty_quadratic_coef=self.gp_depth_penalty_quadratic_coef,
+        )
+
+        if not candidates:
+            raise ValueError('Genetic programming produced no valid candidates.')
+        log.info(f'GeneticFactorGenerator generate finished: candidate_count={len(candidates)}')
+        return self._build_factor_df_from_candidates(df_eval, candidates)
+
+    def generate(self,
+                 selected_fc_name_list: Optional[List[str]] = None) -> pd.DataFrame:
+        base_df = self.load_base_data()
+        factor_df = self.generate_factor_df(base_df, selected_fc_names=selected_fc_name_list)
+        return self._finalize_generated_data(base_df, factor_df)
+
+    def _save_selected_factors_to_database(self,
+                                           selected_fc_name_list: List[str],
+                                           performance_summary: Optional[pd.DataFrame]) -> None:
+        if not selected_fc_name_list:
+            return
+        if performance_summary is None:
+            return
+
+        summary_df = performance_summary.copy()
+        if 'year' not in summary_df.columns:
+            summary_df = summary_df.reset_index()
+
+        for fc_name in selected_fc_name_list:
+            formula = self.factor_formula_map.get(fc_name)
+            fitness_dict = self.factor_fitness_map.get(fc_name)
+            if formula is None or fitness_dict is None:
+                continue
+
+            df_fc = summary_df.loc[summary_df['Factor Name'] == fc_name].copy()
+            if 'Instrument ID' in df_fc.columns:
+                instrument_ids = [x for x in df_fc['Instrument ID'].dropna().unique().tolist()]
+            else:
+                instrument_ids = list(self.instrument_id_list)
+            if not instrument_ids:
+                instrument_ids = list(self.instrument_id_list)
+
+            for ins_id in instrument_ids:
+                record = {
+                    'method': self.method,
+                    'version': self.version,
+                    'factor_name': fc_name,
+                    'instrument_id': ins_id,
+                    'start_date': self.start_time,
+                    'end_date': self.end_time,
+                    'fitness': {k: float(v) for k, v in fitness_dict.items() if v is not None and not pd.isna(v)},
+                    'formula': formula,
+                    'created_at': datetime.now().isoformat(timespec='seconds'),
+                }
+                mongo_operator = {
+                    'version': self.version,
+                    'factor_name': fc_name,
+                    'instrument_id': ins_id,
+                    'start_date': self.start_time,
+                    'end_date': self.end_time,
+                }
+                update_one_data(
+                    database='factors',
+                    collection='genetic_programming',
+                    mongo_operator=mongo_operator,
+                    data=record,
+                    upsert=True,
+                )
+
+    def auto_mine_select_and_save_fc(self,
+                                     net_ret_threshold: float,
+                                     sharpe_threshold: float,
+                                     save_dir: Optional[Union[str, Path]] = None,
+                                     n_jobs: Optional[int] = None,
+                                     require_all_row: bool = True,
+                                     require_all_instruments: bool = True) -> dict:
+        result = super().auto_mine_select_and_save_fc(
+            net_ret_threshold=net_ret_threshold,
+            sharpe_threshold=sharpe_threshold,
+            save_dir=save_dir,
+            n_jobs=n_jobs,
+            require_all_row=require_all_row,
+            require_all_instruments=require_all_instruments,
+        )
+        self._save_selected_factors_to_database(
+            selected_fc_name_list=result.get('selected_fc_name_list', []),
+            performance_summary=result.get('bt').performance_summary if result.get('bt') is not None else None,
+        )
+        return result
+
+
 class FactorFusioner:
     """
     Fuse factors from saved configs (tsfresh + llm_prompt) by version.
@@ -1542,8 +1867,4 @@ class FactorFusioner:
         bt.backtest()
         self.bt = bt
         return bt
-
-
-
-
 
