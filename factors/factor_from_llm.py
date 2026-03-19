@@ -660,7 +660,7 @@ class fac_volatility_ratio:
         df['volatility'] = df['ret'].rolling(window).std()
         df['volatility_ratio'] = df['volatility'] / df['volatility'].rolling(window).mean()
 
-        return df['volatility_ratio']
+        return -df['volatility_ratio']
 
 
 class fac_hl_range:

@@ -99,7 +99,7 @@ class BackTester:
         if isinstance(self.data, pd.DataFrame):
             # when data is provided, it should have been preprocessed, and we will not preprocess it here.
             for col in ['time', 'instrument_id', 'future_ret'] + self.fc_name_list:
-                assert col in self.data.columns
+                assert col in self.data.columns, f'Provided data does not contain column {col}.'
 
         # otherwise we load data from local database
         else:
