@@ -17,7 +17,7 @@ from data import get_futures_continuous_contract_price
 from utils.logging import log
 
 from .backtest import BackTester
-from .factor_utils import get_future_ret, join_fc_name_and_parameter
+from .factor_utils import get_future_ret, join_fc_name_and_parameter, rolling_normalize_features
 from .gp_factor_engine import run_gp_evolution, GPCandidate
 from stats import iterdict
 from mongo.mongify import update_one_data
@@ -119,42 +119,6 @@ class FactorGenerator:
 
         return df
 
-    def rolling_normalize_features(self,
-                                   df: pd.DataFrame,
-                                   factor_cols: Sequence[str]) -> pd.DataFrame:
-        """
-        Rolling normalization per instrument without future leakage.
-
-        For each timestamp t, statistics are calculated from history up to t-1:
-            z_t = (x_t - mean_{<=t-1}) / std_{<=t-1}
-
-        Then values are clipped to keep position magnitude under control.
-        """
-        if not factor_cols:
-            return df
-
-        df_out = df.copy()
-        df_out = df_out.sort_values(['instrument_id', 'time']).reset_index(drop=True)
-
-        grouped = df_out.groupby('instrument_id', sort=False)
-        for col in factor_cols:
-            hist_mean = grouped[col].transform(
-                lambda x: x.shift(1).rolling(self.rolling_norm_window,
-                                             min_periods=self.rolling_norm_min_periods).mean()
-            )
-            hist_std = grouped[col].transform(
-                lambda x: x.shift(1).rolling(self.rolling_norm_window,
-                                             min_periods=self.rolling_norm_min_periods).std()
-            )
-
-            hist_std = hist_std.replace(0, np.nan)
-            z = (df_out[col] - hist_mean) / (hist_std + self.rolling_norm_eps)
-            # Keep early samples neutral to avoid unstable oversized positions.
-            z = z.replace([np.inf, -np.inf], np.nan).fillna(0.0)
-            df_out[col] = z.clip(-self.rolling_norm_clip, self.rolling_norm_clip)
-
-        return df_out
-
     @staticmethod
     def auto_load_project_env() -> bool:
         """Best-effort load of .env from common project-root locations."""
@@ -246,7 +210,15 @@ class FactorGenerator:
         """Merge factor dataframe with return label and update object state."""
         if self.apply_rolling_norm:
             factor_cols = [c for c in factor_df.columns if c not in ['time', 'instrument_id']]
-            factor_df = self.rolling_normalize_features(factor_df, factor_cols)
+            factor_df = rolling_normalize_features(
+                df=factor_df,
+                factor_cols=list(factor_cols),
+                rolling_norm_window=self.rolling_norm_window,
+                rolling_norm_min_periods=self.rolling_norm_min_periods,
+                rolling_norm_eps=self.rolling_norm_eps,
+                rolling_norm_clip=self.rolling_norm_clip,
+                instrument_col='instrument_id',
+            )
 
         df_with_ret = get_future_ret(
             base_df[['time', 'instrument_id', 'open', 'high', 'low', 'close', 'volume', 'position']].copy(),
@@ -631,7 +603,15 @@ class FactorGenerator:
         # Full-sample factor series.
         full_factor_df = self.generate_factor_df(base_df, selected_fc_names=selected_fc_name_list)
         if self.apply_rolling_norm:
-            full_factor_df = self.rolling_normalize_features(full_factor_df, selected_fc_name_list)
+            full_factor_df = rolling_normalize_features(
+                df=full_factor_df,
+                factor_cols=list(selected_fc_name_list),
+                rolling_norm_window=self.rolling_norm_window,
+                rolling_norm_min_periods=self.rolling_norm_min_periods,
+                rolling_norm_eps=self.rolling_norm_eps,
+                rolling_norm_clip=self.rolling_norm_clip,
+                instrument_col='instrument_id',
+            )
 
         check_time_list = sorted(full_factor_df['time'].dropna().unique().tolist())
         if not check_time_list:
@@ -643,7 +623,15 @@ class FactorGenerator:
             df_slice = base_df.loc[base_df['time'] <= t].copy()
             factor_df_slice = self.generate_factor_df(df_slice, selected_fc_names=selected_fc_name_list)
             if self.apply_rolling_norm:
-                factor_df_slice = self.rolling_normalize_features(factor_df_slice, selected_fc_name_list)
+                factor_df_slice = rolling_normalize_features(
+                    df=factor_df_slice,
+                    factor_cols=list(selected_fc_name_list),
+                    rolling_norm_window=self.rolling_norm_window,
+                    rolling_norm_min_periods=self.rolling_norm_min_periods,
+                    rolling_norm_eps=self.rolling_norm_eps,
+                    rolling_norm_clip=self.rolling_norm_clip,
+                    instrument_col='instrument_id',
+                )
 
             factor_df_slice = factor_df_slice.loc[
                 factor_df_slice['time'] == t,
@@ -1502,6 +1490,11 @@ class GeneticFactorGenerator(FactorGenerator):
             depth_penalty_start_depth=self.gp_depth_penalty_start_depth,
             depth_penalty_linear_coef=self.gp_depth_penalty_linear_coef,
             depth_penalty_quadratic_coef=self.gp_depth_penalty_quadratic_coef,
+            apply_rolling_norm=self.apply_rolling_norm,
+            rolling_norm_window=self.rolling_norm_window,
+            rolling_norm_min_periods=self.rolling_norm_min_periods,
+            rolling_norm_eps=self.rolling_norm_eps,
+            rolling_norm_clip=self.rolling_norm_clip,
         )
 
         if not candidates:
@@ -1791,7 +1784,15 @@ class FactorFusioner:
             factor_df_i = generator.generate_factor_df(base_df, selected_fc_names=fc_name_list)
 
             if generator.apply_rolling_norm:
-                factor_df_i = generator.rolling_normalize_features(factor_df_i, fc_name_list)
+                factor_df_i = rolling_normalize_features(
+                    df=factor_df_i,
+                    factor_cols=list(fc_name_list),
+                    rolling_norm_window=generator.rolling_norm_window,
+                    rolling_norm_min_periods=generator.rolling_norm_min_periods,
+                    rolling_norm_eps=generator.rolling_norm_eps,
+                    rolling_norm_clip=generator.rolling_norm_clip,
+                    instrument_col='instrument_id',
+                )
 
             # Avoid collisions across methods/versions by adding stable suffix.
             version = cast(str, config_info['version'])
@@ -1814,7 +1815,15 @@ class FactorFusioner:
         if self.apply_rolling_norm_after_fusion:
             # Reuse the same rolling normalization implementation for post-fusion processing.
             norm_helper = self._build_generator(method='tsfresh')
-            merged_factor_df = norm_helper.rolling_normalize_features(merged_factor_df, [self.fused_fc_name])
+            merged_factor_df = rolling_normalize_features(
+                df=merged_factor_df,
+                factor_cols=[self.fused_fc_name],
+                rolling_norm_window=norm_helper.rolling_norm_window,
+                rolling_norm_min_periods=norm_helper.rolling_norm_min_periods,
+                rolling_norm_eps=norm_helper.rolling_norm_eps,
+                rolling_norm_clip=norm_helper.rolling_norm_clip,
+                instrument_col='instrument_id',
+            )
 
         self.raw_fc_value = merged_factor_df
         generated_data = df_with_ret.merge(

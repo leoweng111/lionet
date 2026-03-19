@@ -11,6 +11,20 @@ from utils.params import FEE
 EPSILON = 1e-6
 
 
+def _safe_corr(x: pd.Series,
+               y: pd.Series,
+               method: str = 'pearson') -> float:
+    """Return correlation without triggering warnings on constant/empty inputs."""
+    s = pd.concat([pd.to_numeric(x, errors='coerce'), pd.to_numeric(y, errors='coerce')], axis=1).dropna()
+    if s.empty:
+        return np.nan
+    if s.iloc[:, 0].nunique(dropna=True) <= 1:
+        return np.nan
+    if s.iloc[:, 1].nunique(dropna=True) <= 1:
+        return np.nan
+    return float(s.iloc[:, 0].corr(s.iloc[:, 1], method=method))
+
+
 def _get_fee_for_instrument(Data: pd.DataFrame) -> float:
     instrument_ids = Data['instrument_id'].dropna().unique().tolist()
     if len(instrument_ids) != 1:
@@ -42,12 +56,16 @@ def get_annualized_ts_ic_and_t_corr(Data: pd.DataFrame,
     df = df.sort_values(by='time')
     df['year'] = pd.to_datetime(df['time']).dt.year
 
-    ic_ts_year = df.groupby('year')[fc_col].corr(df['future_ret'], method='pearson')
-    ic_ts_all = pd.Series(df[fc_col].corr(df['future_ret'], method='pearson'), index=['all'])
+    ic_ts_year = df.groupby('year')[[fc_col, 'future_ret']].apply(
+        lambda g: _safe_corr(g[fc_col], g['future_ret'], method='pearson')
+    )
+    ic_ts_all = pd.Series(_safe_corr(df[fc_col], df['future_ret'], method='pearson'), index=['all'])
     ic_ts = pd.concat([ic_ts_year, ic_ts_all]).to_frame('TS IC')
 
-    rank_ic_ts_year = df.groupby('year')[fc_col].corr(df['future_ret'], method='spearman')
-    rank_ic_ts_all = pd.Series(df[fc_col].corr(df['future_ret'], method='spearman'), index=['all'])
+    rank_ic_ts_year = df.groupby('year')[[fc_col, 'future_ret']].apply(
+        lambda g: _safe_corr(g[fc_col], g['future_ret'], method='spearman')
+    )
+    rank_ic_ts_all = pd.Series(_safe_corr(df[fc_col], df['future_ret'], method='spearman'), index=['all'])
     rank_ic_ts = pd.concat([rank_ic_ts_year, rank_ic_ts_all]).to_frame('TS RankIC')
 
     ic_ts = pd.concat([ic_ts, rank_ic_ts], axis=1)

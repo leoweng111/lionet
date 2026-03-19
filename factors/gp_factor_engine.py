@@ -19,6 +19,7 @@ from .factor_indicators import (
     get_annualized_ts_ic_and_t_corr,
     get_annualized_volatility,
 )
+from .factor_utils import rolling_normalize_features
 
 
 class FactorNode:
@@ -318,11 +319,18 @@ def _calc_sharpe_fitness_from_factor_indicators(eval_df: pd.DataFrame,
             continue
 
         ret_df = df_ins[['time']].copy()
-        ret_df[factor_col] = pd.to_numeric(df_ins[factor_col], errors='coerce').fillna(0.0) * \
-            pd.to_numeric(df_ins['future_ret'], errors='coerce').fillna(0.0)
+        signal = pd.to_numeric(df_ins[factor_col], errors='coerce').replace([np.inf, -np.inf], np.nan).fillna(0.0)
+        future_ret = pd.to_numeric(df_ins['future_ret'], errors='coerce').replace([np.inf, -np.inf], np.nan).fillna(0.0)
+
+        # Keep GP fitness numerically stable on extreme formulas.
+        signal = signal.clip(-20.0, 20.0)
+        strategy_ret = (signal * future_ret).replace([np.inf, -np.inf], np.nan).fillna(0.0)
+        strategy_ret = strategy_ret.clip(-1.0, 1.0)
+        ret_df[factor_col] = strategy_ret
 
         try:
-            annual_ret = get_annualized_ret(ret_df, factor_col, interest_method='compound')
+            # Use simple annualization to avoid cumprod overflow in compound path.
+            annual_ret = get_annualized_ret(ret_df, factor_col, interest_method='simple')
             annual_vol = get_annualized_volatility(ret_df, factor_col)
             annual_sharpe = get_annualized_sharpe(annual_ret[[factor_col]], annual_vol[[factor_col]])
         except Exception:
@@ -351,9 +359,32 @@ def calc_fitness_and_sign(tree: FactorNode,
                           depth_penalty_coef: float = 0.0,
                           depth_penalty_start_depth: int = 0,
                           depth_penalty_linear_coef: float = 0.0,
-                          depth_penalty_quadratic_coef: float = 0.0) -> Tuple[float, int]:
+                          depth_penalty_quadratic_coef: float = 0.0,
+                          apply_rolling_norm: bool = True,
+                          rolling_norm_window: int = 30,
+                          rolling_norm_min_periods: int = 20,
+                          rolling_norm_eps: float = 1e-8,
+                          rolling_norm_clip: float = 10.0) -> Tuple[float, int]:
     try:
-        factor_series = tree.calc(df)
+        factor_series = pd.to_numeric(tree.calc(df), errors='coerce')
+        if apply_rolling_norm:
+            norm_df = pd.DataFrame({'factor': factor_series})
+            if 'time' in df.columns:
+                norm_df['time'] = pd.to_datetime(df['time'], errors='coerce')
+            if 'instrument_id' in df.columns:
+                norm_df['instrument_id'] = df['instrument_id']
+
+            norm_df = rolling_normalize_features(
+                df=norm_df,
+                factor_cols='factor',
+                rolling_norm_window=rolling_norm_window,
+                rolling_norm_min_periods=rolling_norm_min_periods,
+                rolling_norm_eps=rolling_norm_eps,
+                rolling_norm_clip=rolling_norm_clip,
+                instrument_col='instrument_id',
+            )
+            factor_series = norm_df['factor']
+
         eval_df = pd.DataFrame({
             'time': pd.to_datetime(df['time'], errors='coerce') if 'time' in df.columns else pd.NaT,
             'instrument_id': df['instrument_id'] if 'instrument_id' in df.columns else 'UNKNOWN',
@@ -415,6 +446,11 @@ def run_gp_evolution(
     depth_penalty_start_depth: int = 0,
     depth_penalty_linear_coef: float = 0.0,
     depth_penalty_quadratic_coef: float = 0.0,
+    apply_rolling_norm: bool = True,
+    rolling_norm_window: int = 30,
+    rolling_norm_min_periods: int = 20,
+    rolling_norm_eps: float = 1e-8,
+    rolling_norm_clip: float = 10.0,
 ) -> List[GPCandidate]:
     rng = random.Random(random_seed)
 
@@ -428,7 +464,8 @@ def run_gp_evolution(
         f'depth_penalty_coef={depth_penalty_coef}, '
         f'depth_penalty_start_depth={depth_penalty_start_depth}, '
         f'depth_penalty_linear_coef={depth_penalty_linear_coef}, '
-        f'depth_penalty_quadratic_coef={depth_penalty_quadratic_coef}'
+        f'depth_penalty_quadratic_coef={depth_penalty_quadratic_coef}, '
+        f'apply_rolling_norm={apply_rolling_norm}'
     )
 
     population = [
@@ -449,6 +486,11 @@ def run_gp_evolution(
                 depth_penalty_start_depth=depth_penalty_start_depth,
                 depth_penalty_linear_coef=depth_penalty_linear_coef,
                 depth_penalty_quadratic_coef=depth_penalty_quadratic_coef,
+                apply_rolling_norm=apply_rolling_norm,
+                rolling_norm_window=rolling_norm_window,
+                rolling_norm_min_periods=rolling_norm_min_periods,
+                rolling_norm_eps=rolling_norm_eps,
+                rolling_norm_clip=rolling_norm_clip,
             )
             scored_pop.append((tree, fitness))
 

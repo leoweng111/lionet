@@ -1,5 +1,6 @@
 from typing import Union
 from collections import Counter
+import numpy as np
 import pandas as pd
 from joblib import Parallel, delayed
 from .factor import *
@@ -147,3 +148,46 @@ def get_future_ret(Data: pd.DataFrame,
     # 计算结果中，部分时间截面的future ret可能为nan，原因是：
     # 此时间截面到最终时间截面的长度小于transaction_period，导致无法求出future ret
     return df
+
+
+def rolling_normalize_features(df: pd.DataFrame,
+                               factor_cols: Union[str, list],
+                               rolling_norm_window: int = 30,
+                               rolling_norm_min_periods: int = 20,
+                               rolling_norm_eps: float = 1e-8,
+                               rolling_norm_clip: float = 10.0,
+                               instrument_col: str = 'instrument_id') -> pd.DataFrame:
+    """Rolling normalize factor columns without look-ahead leakage.
+
+    At time t, normalization uses history up to t-1 via shift(1) + rolling(...).
+    """
+    if isinstance(factor_cols, str):
+        factor_cols = [factor_cols]
+    if not factor_cols:
+        return df.copy()
+
+    df_out = df.copy()
+    sort_cols = [instrument_col, 'time'] if instrument_col in df_out.columns else ['time']
+    if 'time' in df_out.columns:
+        df_out = df_out.sort_values(sort_cols).reset_index(drop=True)
+
+    for col in factor_cols:
+        series = pd.to_numeric(df_out[col], errors='coerce')
+        if instrument_col in df_out.columns:
+            hist_mean = series.groupby(df_out[instrument_col]).transform(
+                lambda x: x.shift(1).rolling(rolling_norm_window, min_periods=rolling_norm_min_periods).mean()
+            )
+            hist_std = series.groupby(df_out[instrument_col]).transform(
+                lambda x: x.shift(1).rolling(rolling_norm_window, min_periods=rolling_norm_min_periods).std()
+            )
+        else:
+            hist_mean = series.shift(1).rolling(rolling_norm_window, min_periods=rolling_norm_min_periods).mean()
+            hist_std = series.shift(1).rolling(rolling_norm_window, min_periods=rolling_norm_min_periods).std()
+
+        hist_std = hist_std.replace(0, np.nan)
+        z = (series - hist_mean) / (hist_std + rolling_norm_eps)
+        z = z.replace([np.inf, -np.inf], np.nan).fillna(0.0)
+        df_out[col] = z.clip(-rolling_norm_clip, rolling_norm_clip)
+
+    return df_out
+
