@@ -14,6 +14,7 @@ import numpy as np
 import pandas as pd
 
 from data import get_futures_continuous_contract_price, update_factor_info
+from utils.params import SUPPORTED_FILTER_INDICATORS
 from utils.logging import log
 
 from .backtest import BackTester
@@ -31,7 +32,6 @@ class FactorGenerator:
     """
 
     method: str = 'base'
-
     def __init__(self,
                  instrument_type: str = 'futures_continuous_contract',
                  instrument_id_list: Union[str, List[str]] = 'C0',
@@ -464,16 +464,28 @@ class FactorGenerator:
 
     def filter_fc_by_threshold(self,
                                performance_summary: Optional[pd.DataFrame] = None,
-                               net_ret_threshold: float = 0.0,
-                               sharpe_threshold: float = 0.5,
+                               filter_indicator_dict: Dict[str, Tuple[float, float, int]] = None,
                                require_all_row: bool = True,
                                require_all_instruments: bool = True) -> List[str]:
         """
-        Filter factors by net return and net sharpe thresholds.
+        Filter factors by indicator thresholds.
 
-        A factor is kept only if ALL required rows satisfy thresholds:
-        - every year row
-        - and row `year == 'all'` when require_all_row is True
+        `filter_indicator_dict` format:
+            {
+                'Net Return': (0.05, 0.03, 1),
+                'Net Volatility': (0.02, 0.03, -1),
+            }
+        value tuple means:
+            (annual_mean_threshold, each_year_threshold, direction)
+        direction:
+            1  -> metric >= threshold
+            -1 -> metric <= threshold
+
+        For each indicator:
+        1) Compute the mean over yearly rows (year != 'all').
+        2) Check yearly mean against annual_mean_threshold.
+        3) Check every yearly value against each_year_threshold.
+        4) Indicator passes only if both 2) and 3) pass.
 
         For multi-instrument backtest summary:
         - require_all_instruments=True: all instruments must pass
@@ -489,43 +501,130 @@ class FactorGenerator:
         if 'year' not in summary_df.columns:
             summary_df = summary_df.reset_index()
 
-        required_cols = ['year', 'Factor Name', 'Net Return', 'Net Sharpe']
+        required_cols = ['year', 'Factor Name']
         for col in required_cols:
             if col not in summary_df.columns:
                 raise ValueError(f'performance_summary does not contain required column: {col}')
 
-        mask = (
-            (summary_df['Net Return'] >= net_ret_threshold) &
-            (summary_df['Net Sharpe'] >= sharpe_threshold)
-        )
-        summary_df = summary_df.assign(_pass=mask)
+        if not filter_indicator_dict:
+            raise ValueError('filter_indicator_dict is required and cannot be empty.')
 
-        selected_fc_name_list = []
-        for fc_name, df_fc in summary_df.groupby('Factor Name', sort=False):
-            if 'Instrument ID' in df_fc.columns:
-                instrument_pass_list = []
-                for _, df_ins in df_fc.groupby('Instrument ID', sort=False):
-                    if require_all_row and 'all' not in df_ins['year'].astype(str).values:
-                        instrument_pass_list.append(False)
-                    else:
-                        instrument_pass_list.append(bool(df_ins['_pass'].all()))
+        indicator_list = list(filter_indicator_dict.keys())
+        for indicator in indicator_list:
+            if indicator not in summary_df.columns:
+                raise ValueError(f'performance_summary does not contain required indicator: {indicator}')
 
-                if not instrument_pass_list:
-                    continue
-                fc_pass = all(instrument_pass_list) if require_all_instruments else any(instrument_pass_list)
+        # Build pass columns indicator by indicator.
+        summary_df = summary_df.copy()
+        summary_df['__year_str__'] = summary_df['year'].astype(str)
+        summary_df['__is_yearly__'] = summary_df['__year_str__'] != 'all'
+
+        # Per-row yearly threshold checks.
+        for indicator, conf in filter_indicator_dict.items():
+            if not isinstance(conf, tuple) or len(conf) != 3:
+                raise ValueError(
+                    f'Invalid filter config for `{indicator}`: {conf}. '
+                    'Expected tuple(mean_threshold, yearly_threshold, direction).'
+                )
+
+            _, yearly_threshold, direction = conf
+            if direction not in [1, -1]:
+                raise ValueError(
+                    f'Invalid direction for `{indicator}`: {direction}. Use 1 (>=) or -1 (<=).'
+                )
+
+            numeric_series = pd.to_numeric(summary_df[indicator], errors='coerce')
+            pass_col = f'__pass_yearly__{indicator}'
+            if direction == 1:  # 非年度行直接通过；年度行必须满足 indicator >= yearly_threshold 才通过。
+                summary_df[pass_col] = (~summary_df['__is_yearly__']) | (numeric_series >= float(yearly_threshold))
             else:
-                if require_all_row and 'all' not in df_fc['year'].astype(str).values:
-                    continue
-                fc_pass = bool(df_fc['_pass'].all())
+                summary_df[pass_col] = (~summary_df['__is_yearly__']) | (numeric_series <= float(yearly_threshold))
 
-            if fc_pass:
-                selected_fc_name_list.append(fc_name)
+        group_cols = ['Factor Name'] + (['Instrument ID'] if 'Instrument ID' in summary_df.columns else [])
 
+        def _eval_group(df_group: pd.DataFrame) -> bool:
+            # Optional strictness: require an `all` row to exist in each factor/instrument slice.
+            if require_all_row and 'all' not in df_group['__year_str__'].values:
+                return False
+
+            df_year = df_group.loc[df_group['__is_yearly__']].copy()
+            # Need at least one yearly row; otherwise annual mean is undefined.
+            if df_year.empty:
+                return False
+
+            for indicator, conf in filter_indicator_dict.items():
+                mean_threshold, _, direction = conf
+                yearly_values = pd.to_numeric(df_year[indicator], errors='coerce').dropna()
+                # If all yearly values are non-numeric/missing, this indicator fails.
+                if yearly_values.empty:
+                    return False
+
+                yearly_mean = float(yearly_values.mean())
+                if direction == 1 and not (yearly_mean >= float(mean_threshold)):
+                    return False
+                if direction == -1 and not (yearly_mean <= float(mean_threshold)):
+                    return False
+
+                pass_col = f'__pass_yearly__{indicator}'
+                yearly_pass = bool(df_group.loc[df_group['__is_yearly__'], pass_col].all())
+                if not yearly_pass:
+                    return False
+
+            return True
+
+        ins_pass_records = []
+        # e.g.
+        # group_cols = ['Factor Name', 'Instrument ID']
+        # group_key = ('fc_001', 'C0')
+        for group_key, group_df in summary_df.groupby(group_cols, sort=False):  # 对每个因子，都对每个品种进行判断
+            # group_key can be a scalar (single group column) or tuple (multi group columns)
+            if not isinstance(group_key, tuple):
+                group_key = (group_key,)
+            record = {k: v for k, v in zip(group_cols, group_key)}
+            record['__ins_pass__'] = _eval_group(group_df)  # 返回的是当前因子在当前品种下，是否满足筛选条件
+            ins_pass_records.append(record)
+        ins_pass_df = pd.DataFrame(ins_pass_records)
+
+        if 'Instrument ID' in ins_pass_df.columns:
+            fc_pass_series = ins_pass_df.groupby('Factor Name', sort=False)['__ins_pass__'].all() \
+                if require_all_instruments else \
+                ins_pass_df.groupby('Factor Name', sort=False)['__ins_pass__'].any()
+        else:
+            fc_pass_series = ins_pass_df.set_index('Factor Name')['__ins_pass__']
+
+        selected_fc_name_list = fc_pass_series[fc_pass_series].index.tolist()
         return selected_fc_name_list
 
+    @classmethod
+    def validate_filter_indicator_dict(cls,
+                                       filter_indicator_dict: Dict[str, Tuple[float, float, int]]) -> None:
+        """Validate indicator filter config before expensive generation starts."""
+        if not filter_indicator_dict:
+            raise ValueError('filter_indicator_dict is required and cannot be empty.')
+        available_indicator_list = list(SUPPORTED_FILTER_INDICATORS)
+        invalid_indicator_list = [k for k in filter_indicator_dict.keys() if k not in available_indicator_list]
+        if invalid_indicator_list:
+            log.error(f'Unsupported filter indicators: {invalid_indicator_list}')
+            log.error(f'Available filter indicators: {available_indicator_list}')
+            raise ValueError(
+                f'Unsupported filter indicators: {invalid_indicator_list}. '
+                f'Available indicators: {available_indicator_list}'
+            )
+
+        for indicator, conf in filter_indicator_dict.items():
+            if not isinstance(conf, tuple) or len(conf) != 3:
+                raise ValueError(
+                    f'Invalid filter config for `{indicator}`: {conf}. '
+                    'Expected tuple(mean_threshold, yearly_threshold, direction).'
+                )
+            _, _, direction = conf
+            if direction not in [1, -1]:
+                raise ValueError(
+                    f'Invalid direction for `{indicator}`: {direction}. Use 1 (>=) or -1 (<=).'
+                )
+
     def auto_mine_select_and_save_fc(self,
-                                     net_ret_threshold: float,
-                                     sharpe_threshold: float,
+                                     filter_indicator_dict: Dict[str, Tuple[float, float, int]],
                                      save_dir: Optional[Union[str, Path]] = None,
                                      n_jobs: Optional[int] = None,
                                      require_all_row: bool = True,
@@ -534,21 +633,21 @@ class FactorGenerator:
         One-step automation:
         generate factors -> backtest -> threshold filter -> save selected config.
         """
+        # Early validation is intentionally placed before self.generate(),
+        # so invalid indicator configs fail fast and do not waste mining time.
+        self.validate_filter_indicator_dict(filter_indicator_dict)
+
         generated_df = self.generate()
         bt = self.backtest(data=generated_df, fc_name_list=self.generated_fc_name_list, n_jobs=n_jobs)
         selected_fc_name_list = self.filter_fc_by_threshold(
             performance_summary=bt.performance_summary,
-            net_ret_threshold=net_ret_threshold,
-            sharpe_threshold=sharpe_threshold,
+            filter_indicator_dict=filter_indicator_dict,
             require_all_row=require_all_row,
             require_all_instruments=require_all_instruments,
         )
 
         if not selected_fc_name_list:
-            msg = (
-                f'No factors passed thresholds: net_ret_threshold={net_ret_threshold}, '
-                f'sharpe_threshold={sharpe_threshold}.'
-            )
+            msg = f'No factors passed thresholds: filter_indicator_dict={filter_indicator_dict}.'
             print(msg)
             log.warning(msg)
             return {
@@ -1293,7 +1392,7 @@ class GeneticFactorGenerator(FactorGenerator):
                  portfolio_adjust_method: str = '1D',
                  interest_method: str = 'compound',
                  risk_free_rate: bool = False,
-                 calculate_baseline: bool = False,
+                 calculate_baseline: bool = True,
                  n_jobs: int = 5,
                  base_col_list: Optional[Sequence[str]] = None,
                  min_window_size: int = 30,
@@ -1514,15 +1613,13 @@ class GeneticFactorGenerator(FactorGenerator):
         return self._finalize_generated_data(base_df, factor_df)
 
     def auto_mine_select_and_save_fc(self,
-                                     net_ret_threshold: float,
-                                     sharpe_threshold: float,
+                                     filter_indicator_dict: Dict[str, Tuple[float, float, int]],
                                      save_dir: Optional[Union[str, Path]] = None,
                                      n_jobs: Optional[int] = None,
                                      require_all_row: bool = True,
                                      require_all_instruments: bool = True) -> dict:
         result = super().auto_mine_select_and_save_fc(
-            net_ret_threshold=net_ret_threshold,
-            sharpe_threshold=sharpe_threshold,
+            filter_indicator_dict=filter_indicator_dict,
             save_dir=save_dir,
             n_jobs=n_jobs,
             require_all_row=require_all_row,

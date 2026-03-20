@@ -43,3 +43,15 @@ FEE = {"C0": "0.0002", "FG0": "0.0002"}
 DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
 DEEPSEEK_BASE_URL = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
 
+# Supported indicator names for factor filtering.
+SUPPORTED_FILTER_INDICATORS = [
+    'Gross Return', 'Net Return',
+    'Gross Volatility', 'Net Volatility',
+    'Gross Sharpe', 'Net Sharpe',
+    'Gross Sortino', 'Net Sortino',
+    'Gross MaxDD', 'Net MaxDD',
+    'Gross Calmar', 'Net Calmar',
+    'Gross Win Rate', 'Net Win Rate',
+    'Turnover', 'TS IC', 'TS RankIC', 'T-corr', 'count',
+]
+

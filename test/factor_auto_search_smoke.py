@@ -50,8 +50,10 @@ if __name__ == '__main__':
     print('one-step backtest summary rows:', len(bt2.performance_summary))
 
     auto_result = fg.auto_mine_select_and_save_fc(
-        net_ret_threshold=-1.0,
-        sharpe_threshold=-1.0,
+        filter_indicator_dict={
+            'Net Return': (-1.0, -1.0, 1),
+            'Net Sharpe': (-1.0, -1.0, 1),
+        },
         n_jobs=1,
         require_all_instruments=False,
     )

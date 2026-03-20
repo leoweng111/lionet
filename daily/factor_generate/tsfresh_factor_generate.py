@@ -64,8 +64,10 @@ def run_tsfresh_factor_generate(
         version=version,
     )
     result = fg.auto_mine_select_and_save_fc(
-        net_ret_threshold=net_ret_threshold,
-        sharpe_threshold=sharpe_threshold,
+        filter_indicator_dict={
+            'Net Return': (net_ret_threshold, net_ret_threshold, 1),
+            'Net Sharpe': (sharpe_threshold, sharpe_threshold, 1),
+        },
         n_jobs=n_jobs,
         require_all_row=require_all_row,
         require_all_instruments=require_all_instruments,
