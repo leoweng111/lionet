@@ -797,6 +797,7 @@ def run_gp_evolution(
     const_prob: float,
     leaf_prob: float,
     random_seed: Optional[int] = None,
+    early_stopping_generation_count: int = 8,
     log_interval: int = 5,
     depth_penalty_coef: float = 0.0,
     depth_penalty_start_depth: int = 0,
@@ -813,10 +814,13 @@ def run_gp_evolution(
     if log_interval <= 0:
         log_interval = 1
 
+    early_stopping_generation_count = int(early_stopping_generation_count)
+
     log.info(
         'GP start: '
         f'fitness_metric={fitness_metric}, generations={generations}, population_size={population_size}, '
         f'max_depth={max_depth}, elite_size={elite_size}, max_factor_count={max_factor_count}, '
+        f'early_stopping_generation_count={early_stopping_generation_count}, '
         f'depth_penalty_coef={depth_penalty_coef}, '
         f'depth_penalty_start_depth={depth_penalty_start_depth}, '
         f'depth_penalty_linear_coef={depth_penalty_linear_coef}, '
@@ -830,13 +834,15 @@ def run_gp_evolution(
     ]
 
     global_best: Dict[str, GPCandidate] = {}
+    best_round_fitness = -np.inf
+    no_improve_generations = 0
 
     for gen_idx in range(generations):
         log.info(f'GP generation {gen_idx + 1}/{generations} scoring started.')
         scored_pop: List[Tuple[FactorNode, float]] = []
         round_best = -np.inf
         tree_log_interval = max(1, int(population_size / 10))
-        for tree_idx, tree in enumerate(population, start=1):
+        for tree_idx, tree in enumerate(population, start=1):  # 每棵树代表了一个因子
             fitness, sign = calc_fitness_and_sign(
                 tree,
                 df,
@@ -904,6 +910,20 @@ def run_gp_evolution(
                 f'current_best={best_fitness_current:.6f}, current_avg={avg_fitness_current:.6f}, '
                 f'global_best={global_best_fitness:.6f}, unique_formulas={len(global_best)}'
             )
+
+        if best_fitness_current > best_round_fitness:
+            best_round_fitness = best_fitness_current
+            no_improve_generations = 0
+        else:
+            no_improve_generations += 1
+
+        if 0 < early_stopping_generation_count <= no_improve_generations:
+            log.info(
+                f'GP early stopping triggered at generation {gen_idx + 1}/{generations}: '
+                f'no improvement in round_best for {no_improve_generations} consecutive generations. '
+                f'best_round_fitness={best_round_fitness:.6f}'
+            )
+            break
         # scored_pop：当前代全部个体和 fitness（已排序）
         # next_gen先放入精英保留（elite_size 个，直接复制）
         next_gen: List[FactorNode] = [copy.deepcopy(x[0]) for x in scored_pop[:min(elite_size, len(scored_pop))]]

@@ -1316,6 +1316,7 @@ class GeneticFactorGenerator(FactorGenerator):
                  gp_window_choices: Optional[Sequence[int]] = None,
                  fitness_metric: str = 'ic',
                  random_seed: Optional[int] = None,
+                 gp_early_stopping_generation_count: int = 8,
                  gp_depth_penalty_coef: float = 0.0,
                  gp_depth_penalty_start_depth: int = 3,
                  gp_depth_penalty_linear_coef: float = 0.0,
@@ -1336,6 +1337,8 @@ class GeneticFactorGenerator(FactorGenerator):
         - `gp_window_choices`: allowed rolling windows for time-series operators.
         - `fitness_metric`: objective for evolution, currently `ic` or `sharpe`.
         - `random_seed`: random seed for reproducible evolution.
+        - `gp_early_stopping_generation_count`: stop evolution early when round_best
+          has not improved for this many consecutive generations. <=0 disables early stop.
         - `gp_depth_penalty_coef`: base depth regularization coefficient.
           base_penalty = gp_depth_penalty_coef * tree_depth.
         - `gp_depth_penalty_start_depth`: dynamic penalty starts after this depth.
@@ -1387,6 +1390,7 @@ class GeneticFactorGenerator(FactorGenerator):
         # Objective and reproducibility controls
         self.fitness_metric = fitness_metric
         self.random_seed = random_seed
+        self.gp_early_stopping_generation_count = int(gp_early_stopping_generation_count)
         self.gp_depth_penalty_coef = float(gp_depth_penalty_coef)
         self.gp_depth_penalty_start_depth = int(gp_depth_penalty_start_depth)
         self.gp_depth_penalty_linear_coef = float(gp_depth_penalty_linear_coef)
@@ -1462,6 +1466,7 @@ class GeneticFactorGenerator(FactorGenerator):
             f'start_time={self.start_time}, end_time={self.end_time}, max_factor_count={limit}, '
             f'fitness_metric={self.fitness_metric}, gp_generations={self.gp_generations}, '
             f'gp_population_size={self.gp_population_size}, '
+            f'gp_early_stopping_generation_count={self.gp_early_stopping_generation_count}, '
             f'gp_depth_penalty_coef={self.gp_depth_penalty_coef}, '
             f'gp_depth_penalty_start_depth={self.gp_depth_penalty_start_depth}, '
             f'gp_depth_penalty_linear_coef={self.gp_depth_penalty_linear_coef}, '
@@ -1484,6 +1489,7 @@ class GeneticFactorGenerator(FactorGenerator):
             const_prob=self.gp_const_prob,
             leaf_prob=self.gp_leaf_prob,
             random_seed=self.random_seed,
+            early_stopping_generation_count=self.gp_early_stopping_generation_count,
             log_interval=self.gp_log_interval,
             depth_penalty_coef=self.gp_depth_penalty_coef,
             depth_penalty_start_depth=self.gp_depth_penalty_start_depth,
