@@ -490,6 +490,10 @@ class FactorGenerator:
         For multi-instrument backtest summary:
         - require_all_instruments=True: all instruments must pass
         - require_all_instruments=False: at least one instrument must pass
+
+        比如{'Net Return': (0.05, 0.03, 1), 'Net Volatility': (0.02, 0.03, -1)}，
+        表示筛选年化Net Return的平均值大于等于0.05，且每年的Net Return都要大于等于0.03，
+        年化Net Volatility的平均值小于等于0.02，且每年的Net Volatility都要小于0.03的因子。
         """
         if performance_summary is None:
             if self.bt is None or self.bt.performance_summary is None:
