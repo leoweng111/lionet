@@ -72,6 +72,22 @@ def _group_apply_series(df: pd.DataFrame, series: pd.Series, fn) -> pd.Series:
     return out
 
 
+def _rolling_argext_distance(arr: np.ndarray, mode: str) -> float:
+    """Return distance from current point to latest max/min location within a rolling window."""
+    values = np.asarray(arr, dtype=float)
+    valid_mask = ~np.isnan(values)
+    if not valid_mask.any():
+        return np.nan
+
+    target = np.nanmax(values) if mode == 'max' else np.nanmin(values)
+    hit_idx = np.flatnonzero(values == target)
+    if len(hit_idx) == 0:
+        return np.nan
+
+    # Use latest occurrence when ties exist to keep the offset minimal and stable.
+    return float((len(values) - 1) - int(hit_idx[-1]))
+
+
 class OpAdd(FactorNode):
     def __init__(self, left: FactorNode, right: FactorNode):
         self.left = left
@@ -355,6 +371,38 @@ class OpTsMin(FactorNode):
         return f"TsMin({self.child}, {self.window})"
 
 
+class OpTsArgmax(FactorNode):
+    def __init__(self, child: FactorNode, window: int):
+        self.child = child
+        self.window = int(window)
+
+    def calc(self, df: pd.DataFrame) -> pd.Series:
+        return _group_apply_series(
+            df,
+            self.child.calc(df),
+            lambda x: x.rolling(self.window).apply(lambda a: _rolling_argext_distance(np.asarray(a), mode='max'), raw=True),
+        )
+
+    def to_formula(self) -> str:
+        return f"TsArgmax({self.child}, {self.window})"
+
+
+class OpTsArgmin(FactorNode):
+    def __init__(self, child: FactorNode, window: int):
+        self.child = child
+        self.window = int(window)
+
+    def calc(self, df: pd.DataFrame) -> pd.Series:
+        return _group_apply_series(
+            df,
+            self.child.calc(df),
+            lambda x: x.rolling(self.window).apply(lambda a: _rolling_argext_distance(np.asarray(a), mode='min'), raw=True),
+        )
+
+    def to_formula(self) -> str:
+        return f"TsArgmin({self.child}, {self.window})"
+
+
 class OpTsTimeWeightedMean(FactorNode):
     def __init__(self, child: FactorNode, window: int):
         self.child = child
@@ -476,6 +524,8 @@ UNARY_TS_OPS = [
     OpTsSum,
     OpTsMax,
     OpTsMin,
+    OpTsArgmax,
+    OpTsArgmin,
     OpTsTimeWeightedMean,
     OpTsRank,
 ]
