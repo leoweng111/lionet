@@ -620,6 +620,8 @@ class GPCandidate:
     node: FactorNode
     formula: str
     fitness: float
+    original_fitness: float
+    penalized_fitness: float
 
 
 def _collect_yearly_metric_values(metric_df: pd.DataFrame,
@@ -713,7 +715,7 @@ def calc_fitness_and_sign(tree: FactorNode,
                           rolling_norm_window: int = 30,
                           rolling_norm_min_periods: int = 20,
                           rolling_norm_eps: float = 1e-8,
-                          rolling_norm_clip: float = 10.0) -> Tuple[float, int]:
+                          rolling_norm_clip: float = 10.0) -> Tuple[float, float, int]:
     try:
         factor_series = pd.to_numeric(tree.calc(df), errors='coerce')
         if apply_rolling_norm:
@@ -741,7 +743,7 @@ def calc_fitness_and_sign(tree: FactorNode,
             'factor': pd.to_numeric(factor_series, errors='coerce'),
         }).dropna(subset=['future_ret', 'factor'])
         if eval_df.empty:
-            return 0.0, 1
+            return 0.0, 0.0, 1
 
         fit_pos = _metric_score(eval_df, fitness_metric)
         eval_df_neg = eval_df.copy()
@@ -750,6 +752,7 @@ def calc_fitness_and_sign(tree: FactorNode,
 
         best_fit = fit_neg if fit_neg > fit_pos else fit_pos
         sign = -1 if fit_neg > fit_pos else 1
+        original_best_fit = float(best_fit)
 
         depth_penalty = _calc_depth_penalty(
             depth=get_tree_depth(tree),
@@ -761,9 +764,9 @@ def calc_fitness_and_sign(tree: FactorNode,
         if depth_penalty > 0:
             best_fit = best_fit - depth_penalty
 
-        return float(best_fit), sign
+        return float(best_fit), original_best_fit, sign
     except Exception:
-        return 0.0, 1
+        return 0.0, 0.0, 1
 
 
 def _tournament_select(scored_pop: List[Tuple[FactorNode, float]],
@@ -840,10 +843,13 @@ def run_gp_evolution(
     for gen_idx in range(generations):
         log.info(f'GP generation {gen_idx + 1}/{generations} scoring started.')
         scored_pop: List[Tuple[FactorNode, float]] = []
+        penalized_fitness_values: List[float] = []
+        original_fitness_values: List[float] = []
         round_best = -np.inf
+        round_best_original = -np.inf
         tree_log_interval = max(1, int(population_size / 10))
         for tree_idx, tree in enumerate(population, start=1):  # 每棵树代表了一个因子
-            fitness, sign = calc_fitness_and_sign(
+            penalized_fitness, original_fitness, sign = calc_fitness_and_sign(
                 tree,
                 df,
                 fitness_metric=fitness_metric,
@@ -857,9 +863,13 @@ def run_gp_evolution(
                 rolling_norm_eps=rolling_norm_eps,
                 rolling_norm_clip=rolling_norm_clip,
             )
-            scored_pop.append((tree, fitness))
-            if fitness > round_best:
-                round_best = fitness
+            scored_pop.append((tree, penalized_fitness))
+            penalized_fitness_values.append(float(penalized_fitness))
+            original_fitness_values.append(float(original_fitness))
+            if penalized_fitness > round_best:
+                round_best = penalized_fitness
+            if original_fitness > round_best_original:
+                round_best_original = original_fitness
             """
             global_best是一个历史档案字典：
             键：formula（因子公式字符串）
@@ -876,8 +886,14 @@ def run_gp_evolution(
             oriented_node = copy.deepcopy(tree) if sign > 0 else OpNeg(copy.deepcopy(tree))
             formula = oriented_node.to_formula()
             old = global_best.get(formula)
-            if old is None or fitness > old.fitness:  # 对每个公式，只保留历史上 fitness 最高的一次
-                global_best[formula] = GPCandidate(node=oriented_node, formula=formula, fitness=fitness)
+            if old is None or penalized_fitness > old.fitness:  # 对每个公式，只保留历史上 penalized fitness 最高的一次
+                global_best[formula] = GPCandidate(
+                    node=oriented_node,
+                    formula=formula,
+                    fitness=penalized_fitness,
+                    original_fitness=original_fitness,
+                    penalized_fitness=penalized_fitness,
+                )
 
             """
             当前树进度：tree i/population_size
@@ -888,7 +904,8 @@ def run_gp_evolution(
             if tree_idx == 1 or tree_idx % tree_log_interval == 0 or tree_idx == population_size:
                 log.info(
                     f'GP generation {gen_idx + 1}/{generations} tree {tree_idx}/{population_size}: '
-                    f'fitness={fitness:.6f}, round_best={round_best:.6f}, '
+                    f'penalized_fitness={penalized_fitness:.6f}, original_fitness={original_fitness:.6f}, '
+                    f'round_best_penalized={round_best:.6f}, round_best_original={round_best_original:.6f}, '
                     f'unique_formulas={len(global_best)}'
                 )
 
@@ -896,19 +913,29 @@ def run_gp_evolution(
 
         if scored_pop:
             best_fitness_current = float(scored_pop[0][1])
-            avg_fitness_current = float(np.mean([x[1] for x in scored_pop]))
+            avg_fitness_current = float(np.mean(penalized_fitness_values))
+            best_original_fitness_current = float(max(original_fitness_values))
+            avg_original_fitness_current = float(np.mean(original_fitness_values))
             global_best_fitness = float(max(x.fitness for x in global_best.values())) if global_best else 0.0
+            global_best_original_fitness = float(max(x.original_fitness for x in global_best.values())) if global_best else 0.0
         else:
             best_fitness_current = 0.0
             avg_fitness_current = 0.0
+            best_original_fitness_current = 0.0
+            avg_original_fitness_current = 0.0
             global_best_fitness = 0.0
+            global_best_original_fitness = 0.0
 
         should_log = ((gen_idx + 1) % log_interval == 0) or (gen_idx == 0) or (gen_idx == generations - 1)
         if should_log:
             log.info(
                 f'GP generation {gen_idx + 1}/{generations}: '
-                f'current_best={best_fitness_current:.6f}, current_avg={avg_fitness_current:.6f}, '
-                f'global_best={global_best_fitness:.6f}, unique_formulas={len(global_best)}'
+                f'current_best_penalized={best_fitness_current:.6f}, current_avg_penalized={avg_fitness_current:.6f}, '
+                f'current_best_original={best_original_fitness_current:.6f}, '
+                f'current_avg_original={avg_original_fitness_current:.6f}, '
+                f'global_best_penalized={global_best_fitness:.6f}, '
+                f'global_best_original={global_best_original_fitness:.6f}, '
+                f'unique_formulas={len(global_best)}'
             )
 
         if best_fitness_current > best_round_fitness:

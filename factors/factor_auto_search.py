@@ -1498,7 +1498,7 @@ class GeneticFactorGenerator(FactorGenerator):
 
         self.factor_tree_map: Dict[str, Any] = {}
         self.factor_formula_map: Dict[str, str] = {}
-        self.factor_fitness_map: Dict[str, Dict[str, float]] = {}
+        self.factor_fitness_map: Dict[str, Dict[str, Dict[str, float]]] = {}
 
         assert self.fitness_metric in ['ic', 'sharpe'], \
             f'Unsupported fitness_metric={self.fitness_metric}, use ic/sharpe.'
@@ -1533,7 +1533,12 @@ class GeneticFactorGenerator(FactorGenerator):
             factor_df[fc_name] = signal.values
             self.factor_tree_map[fc_name] = cand.node
             self.factor_formula_map[fc_name] = cand.formula
-            self.factor_fitness_map[fc_name] = {self.fitness_metric: float(cand.fitness)}
+            self.factor_fitness_map[fc_name] = {
+                self.fitness_metric: {
+                    'original': float(cand.original_fitness),
+                    'penalized': float(cand.penalized_fitness),
+                }
+            }
 
         return factor_df
 

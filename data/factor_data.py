@@ -1,7 +1,7 @@
 """Utilities for factor-related database operations."""
 
 from datetime import datetime
-from typing import Dict, List, Optional, Sequence
+from typing import Dict, Optional, Sequence
 
 import pandas as pd
 
@@ -11,7 +11,7 @@ from mongo.mongify import update_one_data
 def update_factor_info(selected_fc_name_list: Sequence[str],
                        performance_summary: Optional[pd.DataFrame],
                        factor_formula_map: Dict[str, str],
-                       factor_fitness_map: Dict[str, Dict[str, float]],
+                       factor_fitness_map: Dict[str, Dict[str, Dict[str, float]]],
                        instrument_id_list: Sequence[str],
                        method: str,
                        version: str,
@@ -47,11 +47,30 @@ def update_factor_info(selected_fc_name_list: Sequence[str],
         if not instrument_ids:
             instrument_ids = list(default_instruments)
 
-        cleaned_fitness = {
-            k: float(v)
-            for k, v in fitness_dict.items()
-            if v is not None and not pd.isna(v)
-        }
+        cleaned_fitness: Dict[str, Dict[str, float]] = {}
+        for metric_name, metric_payload in fitness_dict.items():
+            # Backward compatibility: legacy payload used flat numeric fitness.
+            if not isinstance(metric_payload, dict):
+                if metric_payload is None or pd.isna(metric_payload):
+                    continue
+                metric_value = float(metric_payload)
+                cleaned_fitness[metric_name] = {
+                    'original': metric_value,
+                    'penalized': metric_value,
+                }
+                continue
+
+            metric_cleaned: Dict[str, float] = {}
+            original_val = metric_payload.get('original')
+            penalized_val = metric_payload.get('penalized')
+
+            if original_val is not None and not pd.isna(original_val):
+                metric_cleaned['original'] = float(original_val)
+            if penalized_val is not None and not pd.isna(penalized_val):
+                metric_cleaned['penalized'] = float(penalized_val)
+
+            if metric_cleaned:
+                cleaned_fitness[metric_name] = metric_cleaned
 
         for ins_id in instrument_ids:
             record = {
