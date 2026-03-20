@@ -6,6 +6,7 @@ from typing import Dict, Optional, Sequence
 import pandas as pd
 
 from mongo.mongify import update_one_data
+from utils.logging import log
 
 
 def update_factor_info(selected_fc_name_list: Sequence[str],
@@ -32,11 +33,15 @@ def update_factor_info(selected_fc_name_list: Sequence[str],
 
     default_instruments = list(instrument_id_list)
     now_text = datetime.now().isoformat(timespec='seconds')
+    persisted_formula_map: Dict[str, str] = {}
+    persisted_record_count = 0
+    skipped_fc_name_list = []
 
     for fc_name in selected_fc_name_list:
         formula = factor_formula_map.get(fc_name)
         fitness_dict = factor_fitness_map.get(fc_name)
         if formula is None or fitness_dict is None:
+            skipped_fc_name_list.append(fc_name)
             continue
 
         df_fc = summary_df.loc[summary_df['Factor Name'] == fc_name].copy()
@@ -98,4 +103,20 @@ def update_factor_info(selected_fc_name_list: Sequence[str],
                 data=record,
                 upsert=True,
             )
+            persisted_record_count += 1
+
+        persisted_formula_map[fc_name] = formula
+
+    persisted_fc_name_list = list(persisted_formula_map.keys())
+    log.info(
+        'DB factor upsert finished: '
+        f'selected_factor_count={len(selected_fc_name_list)}, '
+        f'persisted_factor_count={len(persisted_fc_name_list)}, '
+        f'persisted_record_count={persisted_record_count}, '
+        f'skipped_factor_count={len(skipped_fc_name_list)}'
+    )
+    if skipped_fc_name_list:
+        log.warning(f'Skipped factors due to missing formula/fitness: {skipped_fc_name_list}')
+    if persisted_formula_map:
+        log.info(f'Persisted factors and formulas: {persisted_formula_map}')
 

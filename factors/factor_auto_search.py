@@ -1525,10 +1525,19 @@ class GeneticFactorGenerator(FactorGenerator):
     def _build_factor_df_from_candidates(self,
                                          df_eval: pd.DataFrame,
                                          candidates: List[GPCandidate]) -> pd.DataFrame:
+        start_at = datetime.now()
+        candidate_count = len(candidates)
+        log.info(
+            'Build factor dataframe from GP candidates started: '
+            f'candidate_count={candidate_count}, df_rows={len(df_eval)}, fitness_metric={self.fitness_metric}'
+        )
+
         factor_df = df_eval[['time', 'instrument_id']].copy()
         self.factor_tree_map = {}
         self.factor_formula_map = {}
         self.factor_fitness_map = {}
+
+        progress_interval = max(1, int(candidate_count / 10)) if candidate_count > 0 else 1
 
         for idx, cand in enumerate(candidates, start=1):
             fc_name = f'fac_gp_{idx:04d}'
@@ -1543,6 +1552,19 @@ class GeneticFactorGenerator(FactorGenerator):
                     'penalized': float(cand.penalized_fitness),
                 }
             }
+
+            if idx == 1 or idx % progress_interval == 0 or idx == candidate_count:
+                log.info(
+                    'Build factor dataframe progress: '
+                    f'{idx}/{candidate_count}, latest_fc_name={fc_name}'
+                )
+
+        elapsed_sec = (datetime.now() - start_at).total_seconds()
+        log.info(
+            'Build factor dataframe from GP candidates finished: '
+            f'built_factor_count={candidate_count}, output_columns={len(factor_df.columns)}, '
+            f'elapsed_sec={elapsed_sec:.2f}'
+        )
 
         return factor_df
 
