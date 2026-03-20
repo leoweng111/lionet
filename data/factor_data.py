@@ -118,5 +118,5 @@ def update_factor_info(selected_fc_name_list: Sequence[str],
     if skipped_fc_name_list:
         log.warning(f'Skipped factors due to missing formula/fitness: {skipped_fc_name_list}')
     if persisted_formula_map:
-        log.info(f'Persisted factors and formulas: {persisted_formula_map}')
+        log.info(f'Persisted factors: {persisted_formula_map.keys()}')
 
