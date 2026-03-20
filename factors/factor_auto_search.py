@@ -13,14 +13,13 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple, Union, cast
 import numpy as np
 import pandas as pd
 
-from data import get_futures_continuous_contract_price
+from data import get_futures_continuous_contract_price, update_factor_info
 from utils.logging import log
 
 from .backtest import BackTester
 from .factor_utils import get_future_ret, join_fc_name_and_parameter, rolling_normalize_features
 from .gp_factor_engine import run_gp_evolution, GPCandidate
 from stats import iterdict
-from mongo.mongify import update_one_data
 
 
 class FactorGenerator:
@@ -1303,7 +1302,7 @@ class GeneticFactorGenerator(FactorGenerator):
                  rolling_norm_window: int = 30,
                  rolling_norm_min_periods: int = 20,
                  rolling_norm_eps: float = 1e-8,
-                 rolling_norm_clip: float = 10.0,
+                 rolling_norm_clip: float = 5.0,
                  version: Optional[str] = None,
                  gp_generations: int = 50,
                  gp_population_size: int = 200,
@@ -1323,8 +1322,8 @@ class GeneticFactorGenerator(FactorGenerator):
                  gp_depth_penalty_quadratic_coef: float = 0.0,
                  gp_log_interval: int = 5):
         """
+        - `rolling_norm_clip`: limit the max weighted position
         Genetic programming key controls:
-
         - `max_factor_count`: keep top-N candidates after full evolution.
         - `gp_generations`: number of evolution iterations.
         - `gp_population_size`: number of individuals per generation.
@@ -1508,59 +1507,6 @@ class GeneticFactorGenerator(FactorGenerator):
         factor_df = self.generate_factor_df(base_df, selected_fc_names=selected_fc_name_list)
         return self._finalize_generated_data(base_df, factor_df)
 
-    def _save_selected_factors_to_database(self,
-                                           selected_fc_name_list: List[str],
-                                           performance_summary: Optional[pd.DataFrame]) -> None:
-        if not selected_fc_name_list:
-            return
-        if performance_summary is None:
-            return
-
-        summary_df = performance_summary.copy()
-        if 'year' not in summary_df.columns:
-            summary_df = summary_df.reset_index()
-
-        for fc_name in selected_fc_name_list:
-            formula = self.factor_formula_map.get(fc_name)
-            fitness_dict = self.factor_fitness_map.get(fc_name)
-            if formula is None or fitness_dict is None:
-                continue
-
-            df_fc = summary_df.loc[summary_df['Factor Name'] == fc_name].copy()
-            if 'Instrument ID' in df_fc.columns:
-                instrument_ids = [x for x in df_fc['Instrument ID'].dropna().unique().tolist()]
-            else:
-                instrument_ids = list(self.instrument_id_list)
-            if not instrument_ids:
-                instrument_ids = list(self.instrument_id_list)
-
-            for ins_id in instrument_ids:
-                record = {
-                    'method': self.method,
-                    'version': self.version,
-                    'factor_name': fc_name,
-                    'instrument_id': ins_id,
-                    'start_date': self.start_time,
-                    'end_date': self.end_time,
-                    'fitness': {k: float(v) for k, v in fitness_dict.items() if v is not None and not pd.isna(v)},
-                    'formula': formula,
-                    'created_at': datetime.now().isoformat(timespec='seconds'),
-                }
-                mongo_operator = {
-                    'version': self.version,
-                    'factor_name': fc_name,
-                    'instrument_id': ins_id,
-                    'start_date': self.start_time,
-                    'end_date': self.end_time,
-                }
-                update_one_data(
-                    database='factors',
-                    collection='genetic_programming',
-                    mongo_operator=mongo_operator,
-                    data=record,
-                    upsert=True,
-                )
-
     def auto_mine_select_and_save_fc(self,
                                      net_ret_threshold: float,
                                      sharpe_threshold: float,
@@ -1576,9 +1522,16 @@ class GeneticFactorGenerator(FactorGenerator):
             require_all_row=require_all_row,
             require_all_instruments=require_all_instruments,
         )
-        self._save_selected_factors_to_database(
+        update_factor_info(
             selected_fc_name_list=result.get('selected_fc_name_list', []),
             performance_summary=result.get('bt').performance_summary if result.get('bt') is not None else None,
+            factor_formula_map=self.factor_formula_map,
+            factor_fitness_map=self.factor_fitness_map,
+            instrument_id_list=self.instrument_id_list,
+            method=self.method,
+            version=self.version,
+            start_date=self.start_time,
+            end_date=self.end_time,
         )
         return result
 

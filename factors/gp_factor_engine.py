@@ -57,6 +57,21 @@ class ConstNode(FactorNode):
         return f"{self.value:.6g}"
 
 
+def _safe_series(s: pd.Series) -> pd.Series:
+    return pd.to_numeric(s, errors='coerce').replace([np.inf, -np.inf], np.nan)
+
+
+def _group_apply_series(df: pd.DataFrame, series: pd.Series, fn) -> pd.Series:
+    if 'instrument_id' not in df.columns:
+        return fn(_safe_series(series))
+    out = pd.Series(np.nan, index=df.index, dtype=float)
+    grouped = df.groupby('instrument_id', sort=False).groups
+    for _, idx in grouped.items():
+        idx_list = list(idx)
+        out.loc[idx_list] = fn(_safe_series(series.loc[idx_list])).values
+    return out
+
+
 class OpAdd(FactorNode):
     def __init__(self, left: FactorNode, right: FactorNode):
         self.left = left
@@ -106,6 +121,30 @@ class OpDiv(FactorNode):
         return f"Div({self.left}, {self.right})"
 
 
+class OpMax(FactorNode):
+    def __init__(self, left: FactorNode, right: FactorNode):
+        self.left = left
+        self.right = right
+
+    def calc(self, df: pd.DataFrame) -> pd.Series:
+        return np.maximum(self.left.calc(df), self.right.calc(df))
+
+    def to_formula(self) -> str:
+        return f"Max({self.left}, {self.right})"
+
+
+class OpMin(FactorNode):
+    def __init__(self, left: FactorNode, right: FactorNode):
+        self.left = left
+        self.right = right
+
+    def calc(self, df: pd.DataFrame) -> pd.Series:
+        return np.minimum(self.left.calc(df), self.right.calc(df))
+
+    def to_formula(self) -> str:
+        return f"Min({self.left}, {self.right})"
+
+
 class OpNeg(FactorNode):
     # 取负算子不会出现在原子算子列表中，因为这里会人工确认方向，保证了更快的收敛速度。
     def __init__(self, child: FactorNode):
@@ -116,6 +155,101 @@ class OpNeg(FactorNode):
 
     def to_formula(self) -> str:
         return f"Neg({self.child})"
+
+
+class OpSqrtAbs(FactorNode):
+    def __init__(self, child: FactorNode):
+        self.child = child
+
+    def calc(self, df: pd.DataFrame) -> pd.Series:
+        x = _safe_series(self.child.calc(df)).abs()
+        return np.sqrt(x)
+
+    def to_formula(self) -> str:
+        return f"SqrtAbs({self.child})"
+
+
+class OpAbs(FactorNode):
+    def __init__(self, child: FactorNode):
+        self.child = child
+
+    def calc(self, df: pd.DataFrame) -> pd.Series:
+        return _safe_series(self.child.calc(df)).abs()
+
+    def to_formula(self) -> str:
+        return f"Abs({self.child})"
+
+
+class OpInv(FactorNode):
+    def __init__(self, child: FactorNode):
+        self.child = child
+
+    def calc(self, df: pd.DataFrame) -> pd.Series:
+        x = _safe_series(self.child.calc(df)).replace(0, np.nan)
+        return 1.0 / x
+
+    def to_formula(self) -> str:
+        return f"Inv({self.child})"
+
+
+class OpSig(FactorNode):
+    def __init__(self, child: FactorNode):
+        self.child = child
+
+    def calc(self, df: pd.DataFrame) -> pd.Series:
+        x = _safe_series(self.child.calc(df)).clip(-50, 50)
+        return 1.0 / (1.0 + np.exp(-x))
+
+    def to_formula(self) -> str:
+        return f"Sig({self.child})"
+
+
+class OpSign(FactorNode):
+    def __init__(self, child: FactorNode):
+        self.child = child
+
+    def calc(self, df: pd.DataFrame) -> pd.Series:
+        return np.sign(_safe_series(self.child.calc(df)))
+
+    def to_formula(self) -> str:
+        return f"Sign({self.child})"
+
+
+class OpLt(FactorNode):
+    # As requested: lt(X, Y) => 1 if X > Y else 0
+    def __init__(self, left: FactorNode, right: FactorNode):
+        self.left = left
+        self.right = right
+
+    def calc(self, df: pd.DataFrame) -> pd.Series:
+        return (_safe_series(self.left.calc(df)) > _safe_series(self.right.calc(df))).astype(float)
+
+    def to_formula(self) -> str:
+        return f"Lt({self.left}, {self.right})"
+
+
+class OpGt(FactorNode):
+    # As requested: gt(X, Y) => 1 if X < Y else 0
+    def __init__(self, left: FactorNode, right: FactorNode):
+        self.left = left
+        self.right = right
+
+    def calc(self, df: pd.DataFrame) -> pd.Series:
+        return (_safe_series(self.left.calc(df)) < _safe_series(self.right.calc(df))).astype(float)
+
+    def to_formula(self) -> str:
+        return f"Gt({self.left}, {self.right})"
+
+
+class OpDelta(FactorNode):
+    def __init__(self, child: FactorNode):
+        self.child = child
+
+    def calc(self, df: pd.DataFrame) -> pd.Series:
+        return _group_apply_series(df, self.child.calc(df), lambda x: x.diff(1))
+
+    def to_formula(self) -> str:
+        return f"Delta({self.child})"
 
 
 class OpTsMean(FactorNode):
@@ -148,8 +282,213 @@ class OpTsStd(FactorNode):
         return f"TsStd({self.child}, {self.window})"
 
 
-BINARY_OPS = [OpAdd, OpSub, OpMul, OpDiv]
-UNARY_TS_OPS = [OpTsMean, OpTsStd]
+class OpTsDelta(FactorNode):
+    def __init__(self, child: FactorNode, window: int):
+        self.child = child
+        self.window = int(window)
+
+    def calc(self, df: pd.DataFrame) -> pd.Series:
+        return _group_apply_series(df, self.child.calc(df), lambda x: x.diff(self.window))
+
+    def to_formula(self) -> str:
+        return f"TsDelta({self.child}, {self.window})"
+
+
+class OpTsPctDelta(FactorNode):
+    def __init__(self, child: FactorNode, window: int):
+        self.child = child
+        self.window = int(window)
+
+    def calc(self, df: pd.DataFrame) -> pd.Series:
+        return _group_apply_series(df, self.child.calc(df), lambda x: x.pct_change(self.window))
+
+    def to_formula(self) -> str:
+        return f"TsPctDelta({self.child}, {self.window})"
+
+
+class OpTsDelay(FactorNode):
+    def __init__(self, child: FactorNode, window: int):
+        self.child = child
+        self.window = int(window)
+
+    def calc(self, df: pd.DataFrame) -> pd.Series:
+        # Anti-leakage: use historical lag (t-N), not future value (t+N).
+        return _group_apply_series(df, self.child.calc(df), lambda x: x.shift(self.window))
+
+    def to_formula(self) -> str:
+        return f"TsDelay({self.child}, {self.window})"
+
+
+class OpTsSum(FactorNode):
+    def __init__(self, child: FactorNode, window: int):
+        self.child = child
+        self.window = int(window)
+
+    def calc(self, df: pd.DataFrame) -> pd.Series:
+        return _group_apply_series(df, self.child.calc(df), lambda x: x.rolling(self.window).sum())
+
+    def to_formula(self) -> str:
+        return f"TsSum({self.child}, {self.window})"
+
+
+class OpTsMax(FactorNode):
+    def __init__(self, child: FactorNode, window: int):
+        self.child = child
+        self.window = int(window)
+
+    def calc(self, df: pd.DataFrame) -> pd.Series:
+        return _group_apply_series(df, self.child.calc(df), lambda x: x.rolling(self.window).max())
+
+    def to_formula(self) -> str:
+        return f"TsMax({self.child}, {self.window})"
+
+
+class OpTsMin(FactorNode):
+    def __init__(self, child: FactorNode, window: int):
+        self.child = child
+        self.window = int(window)
+
+    def calc(self, df: pd.DataFrame) -> pd.Series:
+        return _group_apply_series(df, self.child.calc(df), lambda x: x.rolling(self.window).min())
+
+    def to_formula(self) -> str:
+        return f"TsMin({self.child}, {self.window})"
+
+
+class OpTsTimeWeightedMean(FactorNode):
+    def __init__(self, child: FactorNode, window: int):
+        self.child = child
+        self.window = int(window)
+
+    @staticmethod
+    def _weighted_mean(arr: np.ndarray) -> float:
+        weights = np.arange(1, len(arr) + 1, dtype=float)
+        return float(np.dot(arr, weights) / weights.sum())
+
+    def calc(self, df: pd.DataFrame) -> pd.Series:
+        return _group_apply_series(
+            df,
+            self.child.calc(df),
+            lambda x: x.rolling(self.window).apply(lambda a: self._weighted_mean(np.asarray(a)), raw=True),
+        )
+
+    def to_formula(self) -> str:
+        return f"TsTimeWeightedMean({self.child}, {self.window})"
+
+
+class OpTsRank(FactorNode):
+    # 当前值在窗口内排名的归一化
+    def __init__(self, child: FactorNode, window: int):
+        self.child = child
+        self.window = int(window)
+
+    @staticmethod
+    def _last_rank(arr: np.ndarray) -> float:
+        s = pd.Series(arr)
+        return float(s.rank(method='average').iloc[-1] / len(s))
+
+    def calc(self, df: pd.DataFrame) -> pd.Series:
+        return _group_apply_series(
+            df,
+            self.child.calc(df),
+            lambda x: x.rolling(self.window).apply(lambda a: self._last_rank(np.asarray(a)), raw=True),
+        )
+
+    def to_formula(self) -> str:
+        return f"TsRank({self.child}, {self.window})"
+
+
+class OpTsCorr(FactorNode):
+    def __init__(self, left: FactorNode, right: FactorNode, window: int):
+        self.left = left
+        self.right = right
+        self.window = int(window)
+
+    def _calc_one(self, x: pd.Series, y: pd.Series) -> pd.Series:
+        return x.rolling(self.window).corr(y)
+
+    def calc(self, df: pd.DataFrame) -> pd.Series:
+        x = _safe_series(self.left.calc(df))
+        y = _safe_series(self.right.calc(df))
+        if 'instrument_id' not in df.columns:
+            return self._calc_one(x, y)
+        out = pd.Series(np.nan, index=df.index, dtype=float)
+        grouped = df.groupby('instrument_id', sort=False).groups
+        for _, idx in grouped.items():
+            idx_list = list(idx)
+            out.loc[idx_list] = self._calc_one(x.loc[idx_list], y.loc[idx_list]).values
+        return out
+
+    def to_formula(self) -> str:
+        return f"TsCorr({self.left}, {self.right}, {self.window})"
+
+
+class OpTsRankCorr(FactorNode):
+    def __init__(self, left: FactorNode, right: FactorNode, window: int):
+        self.left = left
+        self.right = right
+        self.window = int(window)
+
+    def _calc_one(self, x: pd.Series, y: pd.Series) -> pd.Series:
+        x = _safe_series(x)
+        y = _safe_series(y)
+        out = np.full(len(x), np.nan, dtype=float)
+        for i in range(self.window - 1, len(x)):
+            xr = x.iloc[i - self.window + 1:i + 1]
+            yr = y.iloc[i - self.window + 1:i + 1]
+            tmp = pd.DataFrame({'x': xr, 'y': yr}).dropna()
+            if len(tmp) < 2:
+                continue
+            if tmp['x'].nunique(dropna=True) <= 1 or tmp['y'].nunique(dropna=True) <= 1:
+                continue
+            out[i] = tmp['x'].corr(tmp['y'], method='spearman')
+        return pd.Series(out, index=x.index)
+
+    def calc(self, df: pd.DataFrame) -> pd.Series:
+        x = _safe_series(self.left.calc(df))
+        y = _safe_series(self.right.calc(df))
+        if 'instrument_id' not in df.columns:
+            return self._calc_one(x, y)
+        out = pd.Series(np.nan, index=df.index, dtype=float)
+        grouped = df.groupby('instrument_id', sort=False).groups
+        for _, idx in grouped.items():
+            idx_list = list(idx)
+            out.loc[idx_list] = self._calc_one(x.loc[idx_list], y.loc[idx_list]).values
+        return out
+
+    def to_formula(self) -> str:
+        return f"TsRankCorr({self.left}, {self.right}, {self.window})"
+
+"""
+BINARY_OPS：二元、无窗口参数算子
+UNARY_OPS：一元、无窗口参数算子
+UNARY_TS_OPS：一元、有时间窗口参数 N 的时序算子
+BINARY_TS_OPS：二元、有时间窗口参数 N 的时序算子
+"""
+BINARY_OPS = [OpAdd, OpSub, OpMul, OpDiv, OpMax, OpMin, OpLt, OpGt]
+UNARY_OPS = [OpSqrtAbs, OpAbs, OpInv, OpSig, OpSign, OpDelta]
+UNARY_TS_OPS = [
+    OpTsMean,
+    OpTsStd,
+    OpTsDelta,
+    OpTsPctDelta,
+    OpTsDelay,
+    OpTsSum,
+    OpTsMax,
+    OpTsMin,
+    OpTsTimeWeightedMean,
+    OpTsRank,
+]
+BINARY_TS_OPS = [OpTsCorr, OpTsRankCorr]
+
+"""
+UNARY_CHILD_OPS：只有一个子树指针 child 的节点类型集合
+    例如：OpAbs, OpSig, OpTsMean, OpTsRank, OpNeg …
+BINARY_CHILD_OPS：有两个子树指针 left/right 的节点类型集合
+    例如：OpAdd, OpDiv, OpMax, OpTsCorr, OpTsRankCorr …
+"""
+UNARY_CHILD_OPS = tuple(UNARY_OPS + UNARY_TS_OPS + [OpNeg])
+BINARY_CHILD_OPS = tuple(BINARY_OPS + BINARY_TS_OPS)
 
 
 def generate_random_tree(
@@ -171,25 +510,35 @@ def generate_random_tree(
             return ConstNode(rng.uniform(-2.0, 2.0))
         return DataNode(rng.choice(list(data_fields)))
 
-    if rng.random() < 0.65:
+    op_pick = rng.random()
+    if op_pick < 0.5:
         op_cls = rng.choice(BINARY_OPS)
         left = generate_random_tree(data_fields, max_depth, current_depth + 1, window_choices, const_prob, leaf_prob, rng)
         right = generate_random_tree(data_fields, max_depth, current_depth + 1, window_choices, const_prob, leaf_prob, rng)
         return op_cls(left, right)
 
-    op_cls = rng.choice(UNARY_TS_OPS)
-    child = generate_random_tree(data_fields, max_depth, current_depth + 1, window_choices, const_prob, leaf_prob, rng)
-    return op_cls(child, int(rng.choice(list(window_choices))))
+    if op_pick < 0.75:
+        op_cls = rng.choice(UNARY_OPS)
+        child = generate_random_tree(data_fields, max_depth, current_depth + 1, window_choices, const_prob, leaf_prob, rng)
+        return op_cls(child)
+
+    if op_pick < 0.9:
+        op_cls = rng.choice(UNARY_TS_OPS)
+        child = generate_random_tree(data_fields, max_depth, current_depth + 1, window_choices, const_prob, leaf_prob, rng)
+        return op_cls(child, int(rng.choice(list(window_choices))))
+
+    op_cls = rng.choice(BINARY_TS_OPS)
+    left = generate_random_tree(data_fields, max_depth, current_depth + 1, window_choices, const_prob, leaf_prob, rng)
+    right = generate_random_tree(data_fields, max_depth, current_depth + 1, window_choices, const_prob, leaf_prob, rng)
+    return op_cls(left, right, int(rng.choice(list(window_choices))))
 
 
 def get_all_nodes_with_parents(node: FactorNode, parent=None, direction: Optional[str] = None):
     nodes = [(node, parent, direction)]
-    if isinstance(node, (OpAdd, OpSub, OpMul, OpDiv)):
+    if isinstance(node, BINARY_CHILD_OPS):
         nodes.extend(get_all_nodes_with_parents(node.left, node, 'left'))
         nodes.extend(get_all_nodes_with_parents(node.right, node, 'right'))
-    elif isinstance(node, (OpTsMean, OpTsStd)):
-        nodes.extend(get_all_nodes_with_parents(node.child, node, 'child'))
-    elif isinstance(node, OpNeg):
+    elif isinstance(node, UNARY_CHILD_OPS):
         nodes.extend(get_all_nodes_with_parents(node.child, node, 'child'))
     return nodes
 
@@ -198,9 +547,9 @@ def get_tree_depth(node: FactorNode) -> int:
     """Return max depth of AST, where leaf depth is 1."""
     if isinstance(node, (DataNode, ConstNode)):
         return 1
-    if isinstance(node, (OpAdd, OpSub, OpMul, OpDiv)):
+    if isinstance(node, BINARY_CHILD_OPS):
         return 1 + max(get_tree_depth(node.left), get_tree_depth(node.right))
-    if isinstance(node, (OpTsMean, OpTsStd, OpNeg)):
+    if isinstance(node, UNARY_CHILD_OPS):
         return 1 + get_tree_depth(node.child)
     return 1
 
@@ -420,6 +769,13 @@ def calc_fitness_and_sign(tree: FactorNode,
 def _tournament_select(scored_pop: List[Tuple[FactorNode, float]],
                        tournament_size: int,
                        rng: random.Random) -> FactorNode:
+    """
+    从 scored_pop 随机抽 k=min(tournament_size, len(scored_pop)) 个候选
+    按 fitness 从高到低排序
+    返回这批里最好的那个
+
+    tournament_size 越大，越偏向强者；越小，随机性越强。
+    """
     participants = rng.sample(scored_pop, k=min(tournament_size, len(scored_pop)))
     participants.sort(key=lambda x: x[1], reverse=True)
     return participants[0][0]
@@ -476,8 +832,11 @@ def run_gp_evolution(
     global_best: Dict[str, GPCandidate] = {}
 
     for gen_idx in range(generations):
+        log.info(f'GP generation {gen_idx + 1}/{generations} scoring started.')
         scored_pop: List[Tuple[FactorNode, float]] = []
-        for tree in population:
+        round_best = -np.inf
+        tree_log_interval = max(1, int(population_size / 10))
+        for tree_idx, tree in enumerate(population, start=1):
             fitness, sign = calc_fitness_and_sign(
                 tree,
                 df,
@@ -493,12 +852,39 @@ def run_gp_evolution(
                 rolling_norm_clip=rolling_norm_clip,
             )
             scored_pop.append((tree, fitness))
-
+            if fitness > round_best:
+                round_best = fitness
+            """
+            global_best是一个历史档案字典：
+            键：formula（因子公式字符串）
+            值：该公式历史上出现过的最佳 GPCandidate(node, formula, fitness)
+            
+            ConstNode.to_formula() 目前是：
+            f"{self.value:.6g}"（只保留 6 位有效数字）
+            这会导致不同常数值被打印成同一个字符串，例如：
+            0.12345671 和 0.12345674 都可能显示成 0.123457
+            于是会出现：
+            结构类似、常数略不同的两个树，formula 字符串相同
+            实际计算值不同 -> fitness 不同
+            """
             oriented_node = copy.deepcopy(tree) if sign > 0 else OpNeg(copy.deepcopy(tree))
             formula = oriented_node.to_formula()
             old = global_best.get(formula)
-            if old is None or fitness > old.fitness:
+            if old is None or fitness > old.fitness:  # 对每个公式，只保留历史上 fitness 最高的一次
                 global_best[formula] = GPCandidate(node=oriented_node, formula=formula, fitness=fitness)
+
+            """
+            当前树进度：tree i/population_size
+            当前树 fitness：fitness=...
+            本代已见最好值：round_best=...
+            累积唯一公式数：unique_formulas=...
+            """
+            if tree_idx == 1 or tree_idx % tree_log_interval == 0 or tree_idx == population_size:
+                log.info(
+                    f'GP generation {gen_idx + 1}/{generations} tree {tree_idx}/{population_size}: '
+                    f'fitness={fitness:.6f}, round_best={round_best:.6f}, '
+                    f'unique_formulas={len(global_best)}'
+                )
 
         scored_pop.sort(key=lambda x: x[1], reverse=True)
 
@@ -518,25 +904,39 @@ def run_gp_evolution(
                 f'current_best={best_fitness_current:.6f}, current_avg={avg_fitness_current:.6f}, '
                 f'global_best={global_best_fitness:.6f}, unique_formulas={len(global_best)}'
             )
-
+        # scored_pop：当前代全部个体和 fitness（已排序）
+        # next_gen先放入精英保留（elite_size 个，直接复制）
         next_gen: List[FactorNode] = [copy.deepcopy(x[0]) for x in scored_pop[:min(elite_size, len(scored_pop))]]
+        next_gen_log_interval = max(1, int(population_size / 5))
+        if next_gen:
+            log.info(
+                f'GP generation {gen_idx + 1}/{generations} next_gen initialized with elites: '
+                f'{len(next_gen)}/{population_size}'
+            )
 
-        while len(next_gen) < population_size:
+        while len(next_gen) < population_size:  # 把 next_gen 补满到 population_size。
             r = rng.random()
-            if r < crossover_prob and len(scored_pop) >= 2:
+            if r < crossover_prob and len(scored_pop) >= 2:  # 交叉分支
+                # tournament_size 越大，越偏向强者；越小，随机性越强
                 p1 = _tournament_select(scored_pop, tournament_size, rng)
                 p2 = _tournament_select(scored_pop, tournament_size, rng)
                 c1, c2 = crossover_trees(p1, p2, rng)
                 next_gen.append(c1)
                 if len(next_gen) < population_size:
                     next_gen.append(c2)
-            elif r < crossover_prob + mutation_prob:
+            elif r < crossover_prob + mutation_prob:  # 变异分支
                 p = _tournament_select(scored_pop, tournament_size, rng)
                 m = mutate_tree(p, data_fields, max_depth, window_choices, const_prob, leaf_prob, rng)
                 next_gen.append(m)
-            else:
+            else:  # 复制分支
                 p = _tournament_select(scored_pop, tournament_size, rng)
                 next_gen.append(copy.deepcopy(p))
+
+            if len(next_gen) % next_gen_log_interval == 0 or len(next_gen) == population_size:
+                log.info(
+                    f'GP generation {gen_idx + 1}/{generations} next_gen building progress: '
+                    f'{len(next_gen)}/{population_size}'
+                )
 
         population = next_gen[:population_size]
 
