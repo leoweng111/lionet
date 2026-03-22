@@ -51,7 +51,7 @@ class FactorGenerator:
                  rolling_norm_min_periods: int = 20,
                  rolling_norm_eps: float = 1e-8,
                  rolling_norm_clip: float = 10.0,
-                 check_leakage_count: int = 30,
+                 check_leakage_count: int = 20,
                  version: Optional[str] = None):
         self.instrument_type = instrument_type
         self.instrument_id_list = [instrument_id_list] if isinstance(instrument_id_list, str) else list(instrument_id_list)
@@ -697,7 +697,7 @@ class LLMPromptFactorGenerator(FactorGenerator):
                  portfolio_adjust_method: str = '1D',
                  interest_method: str = 'compound',
                  risk_free_rate: bool = False,
-                 calculate_baseline: bool = False,
+                 calculate_baseline: bool = True,
                  n_jobs: int = 5,
                  base_col_list: Optional[Sequence[str]] = None,
                  min_window_size: int = 30,
@@ -706,8 +706,8 @@ class LLMPromptFactorGenerator(FactorGenerator):
                  rolling_norm_window: int = 30,
                  rolling_norm_min_periods: int = 20,
                  rolling_norm_eps: float = 1e-8,
-                 rolling_norm_clip: float = 10.0,
-                 check_leakage_count: int = 30,
+                 rolling_norm_clip: float = 5.0,
+                 check_leakage_count: int = 20,
                  model_name: str = 'deepseek',
                  llm_temperature: float = 0.7,
                  llm_factor_count: int = 5,
@@ -812,6 +812,15 @@ class LLMPromptFactorGenerator(FactorGenerator):
                            df: pd.DataFrame,
                            selected_fc_names: Optional[List[str]] = None) -> pd.DataFrame:
         if selected_fc_names is not None:
+            cached_formula_map = getattr(self, 'factor_formula_map', {}) or {}
+            missing_in_cache = [x for x in selected_fc_names if x not in cached_formula_map]
+            if not missing_in_cache:
+                return calc_formula_df(
+                    df=df,
+                    formula_map={k: cached_formula_map[k] for k in selected_fc_names},
+                    data_fields=self.base_col_list,
+                )
+
             formula_map = get_latest_factor_formula_map(
                 fc_name_list=selected_fc_names,
                 collections=['llm_prompt'],
@@ -820,7 +829,11 @@ class LLMPromptFactorGenerator(FactorGenerator):
             missing = [x for x in selected_fc_names if x not in formula_map]
             if missing:
                 raise ValueError(f'LLM formulas not found in DB for factors: {missing}')
-            return calc_formula_df(df=df, formula_map={k: formula_map[k] for k in selected_fc_names}, data_fields=self.base_col_list)
+            return calc_formula_df(
+                df=df,
+                formula_map={k: formula_map[k] for k in selected_fc_names},
+                data_fields=self.base_col_list,
+            )
 
         llm = self.get_llm(temperature=self.llm_temperature, model_name=self.model_name)
         target_factor_count = self.max_factor_count if self.max_factor_count is not None else self.llm_factor_count
@@ -839,7 +852,8 @@ class LLMPromptFactorGenerator(FactorGenerator):
             remaining = target_factor_count - len(valid_formula_list)
             this_round_count = min(max(1, self.llm_factor_count), remaining)
             prompt = self._build_llm_formula_prompt(this_round_count, existing_formulas=valid_formula_list)
-
+            log.info(f'LLM prompt round {round_idx + 1}/{max_rounds}, requesting {this_round_count} formulas, ',
+                     f'{len(valid_formula_list)}/{target_factor_count} valid formulas collected so far.')
             try:
                 response = llm.invoke(prompt)
                 content = getattr(response, 'content', '')
@@ -926,7 +940,7 @@ class GeneticFactorGenerator(FactorGenerator):
                  rolling_norm_min_periods: int = 20,
                  rolling_norm_eps: float = 1e-8,
                  rolling_norm_clip: float = 5.0,
-                 check_leakage_count: int = 30,
+                 check_leakage_count: int = 20,
                  version: Optional[str] = None,
                  gp_generations: int = 50,
                  gp_population_size: int = 200,
