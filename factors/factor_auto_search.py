@@ -1,11 +1,9 @@
-"""
-Automatic factor generation utilities.
-"""
-import json
-import re
-import ast
+"""Automatic factor generation utilities (formula-first, DB-first)."""
+
 import importlib
+import json
 import os
+import re
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple, Union, cast
@@ -13,25 +11,26 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple, Union, cast
 import numpy as np
 import pandas as pd
 
-from data import get_futures_continuous_contract_price, update_factor_info
-from utils.params import SUPPORTED_FILTER_INDICATORS
+from data import (
+    get_futures_continuous_contract_price,
+    get_latest_factor_formula_map,
+    update_factor_info,
+)
+from mongo.mongify import get_data
 from utils.logging import log
+from utils.params import SUPPORTED_FILTER_INDICATORS
 
 from .backtest import BackTester
-from .factor_utils import get_future_ret, join_fc_name_and_parameter, rolling_normalize_features
-from .gp_factor_engine import run_gp_evolution, GPCandidate
-from stats import iterdict
+from .factor_ops import available_operator_prompt_text, calc_formula_df, calc_formula_series
+from .factor_utils import get_future_ret, rolling_normalize_features
+from .gp_factor_engine import GPCandidate, run_gp_evolution
 
 
 class FactorGenerator:
-    """
-    Generate factor values automatically and run backtests.
-
-    The generated data is aligned with BackTester external-data format:
-    `time`, `instrument_id`, `future_ret`, and factor columns.
-    """
+    """Generate factors, backtest, filter and persist factor formulas into DB."""
 
     method: str = 'base'
+
     def __init__(self,
                  instrument_type: str = 'futures_continuous_contract',
                  instrument_id_list: Union[str, List[str]] = 'C0',
@@ -52,6 +51,7 @@ class FactorGenerator:
                  rolling_norm_min_periods: int = 20,
                  rolling_norm_eps: float = 1e-8,
                  rolling_norm_clip: float = 10.0,
+                 check_leakage_count: int = 30,
                  version: Optional[str] = None):
         self.instrument_type = instrument_type
         self.instrument_id_list = [instrument_id_list] if isinstance(instrument_id_list, str) else list(instrument_id_list)
@@ -73,18 +73,21 @@ class FactorGenerator:
         self.rolling_norm_min_periods = rolling_norm_min_periods
         self.rolling_norm_eps = rolling_norm_eps
         self.rolling_norm_clip = rolling_norm_clip
+        self.check_leakage_count = int(check_leakage_count)
 
         self.version = version or datetime.now().strftime('%Y%m%d_%H%M%S')
 
         self.generated_data: Optional[pd.DataFrame] = None
         self.generated_fc_name_list: List[str] = []
         self.bt: Optional[BackTester] = None
-        self.generated_factor_code_map: Dict[str, str] = {}
+
+        self.factor_formula_map: Dict[str, str] = {}
+        self.factor_fitness_map: Dict[str, Dict[str, Dict[str, float]]] = {}
 
         assert self.fc_freq in ['1m', '5m', '1d'], f'Only support 1m, 5m or 1d fc_freq, got {self.fc_freq}.'
         assert self.portfolio_adjust_method in ['min', '1D', '1M', '1Q'], \
             f'Only support min, 1D, 1M or 1Q portfolio_adjust_method, got {self.portfolio_adjust_method}.'
-        assert self.method in ['base', 'tsfresh', 'llm_prompt', 'genetic_programming'], \
+        assert self.method in ['base', 'llm_prompt', 'genetic_programming'], \
             f'Unsupported method: {self.method}.'
 
     def load_base_data(self) -> pd.DataFrame:
@@ -97,7 +100,7 @@ class FactorGenerator:
                 instrument_id=self.instrument_id_list,
                 start_date=self.start_time,
                 end_date=self.end_time,
-                from_database=True
+                from_database=True,
             )
 
         required_cols = ['time', 'instrument_id'] + self.base_col_list
@@ -115,17 +118,14 @@ class FactorGenerator:
             raise ValueError(
                 f'Invalid instrument_id_list: {invalid_instruments}. Available instruments: {available_instruments}'
             )
-
         return df
 
     @staticmethod
     def auto_load_project_env() -> bool:
-        """Best-effort load of .env from common project-root locations."""
         candidate_paths = [
             Path(__file__).resolve().parents[1] / '.env',
             Path(__file__).resolve().parents[2] / '.env',
         ]
-
         for env_path in candidate_paths:
             if not env_path.exists():
                 continue
@@ -134,7 +134,6 @@ class FactorGenerator:
                 load_dotenv(env_path, override=False)
                 return True
             except Exception:
-                # Fallback parser for simple KEY=VALUE lines.
                 try:
                     for raw_line in env_path.read_text(encoding='utf-8').splitlines():
                         line = raw_line.strip()
@@ -153,60 +152,15 @@ class FactorGenerator:
     def generate_factor_df(self,
                            df: pd.DataFrame,
                            selected_fc_names: Optional[List[str]] = None) -> pd.DataFrame:
-        """Subclass hook: build factor dataframe with columns [time, instrument_id, ...factors]."""
         raise NotImplementedError('Please implement generate_factor_df in subclasses.')
-
-    @staticmethod
-    def _expand_requested_factor_names(requested_names: Sequence[str],
-                                       available_names: Sequence[str],
-                                       separators: Sequence[str] = ('__', '_')) -> List[str]:
-        """
-        Expand base names to all parameterized columns.
-
-        Example:
-        - requested: ["fac_volatility_ratio"]
-        - available: ["fac_volatility_ratio_a_5", "fac_volatility_ratio_a_10"]
-        -> expanded to both parameterized names.
-        """
-        available_list = list(available_names)
-        available_set = set(available_list)
-
-        expanded: List[str] = []
-        for req in requested_names:
-            if req in available_set:
-                if req not in expanded:
-                    expanded.append(req)
-                continue
-
-            matches: List[str] = []
-            for name in available_list:
-                if any(name.startswith(f'{req}{sep}') for sep in separators):
-                    matches.append(name)
-
-            if not matches:
-                preview = available_list[:20]
-                raise ValueError(
-                    f'Factor `{req}` is not available and cannot be expanded from existing factors. '
-                    f'Available preview: {preview}'
-                )
-
-            for name in matches:
-                if name not in expanded:
-                    expanded.append(name)
-
-        return expanded
 
     def generate(self,
                  selected_fc_name_list: Optional[List[str]] = None) -> pd.DataFrame:
-        """
-        Generate factor values for subclass-specific method.
-        """
-        raise NotImplementedError('Please use a concrete subclass, e.g. TsfreshFactorGenerator or LLMPromptFactorGenerator.')
+        raise NotImplementedError('Please use a concrete subclass, e.g. LLMPromptFactorGenerator or GeneticFactorGenerator.')
 
     def _finalize_generated_data(self,
                                  base_df: pd.DataFrame,
                                  factor_df: pd.DataFrame) -> pd.DataFrame:
-        """Merge factor dataframe with return label and update object state."""
         if self.apply_rolling_norm:
             factor_cols = [c for c in factor_df.columns if c not in ['time', 'instrument_id']]
             factor_df = rolling_normalize_features(
@@ -231,32 +185,21 @@ class FactorGenerator:
 
         self.generated_fc_name_list = [c for c in generated_data.columns if c not in ['time', 'instrument_id', 'future_ret']]
         self.generated_data = generated_data
-
         log.info(f'Generated {len(self.generated_fc_name_list)} factors by method={self.method}.')
         return generated_data
 
     def generate_with_fc(self,
                          fc_name_list: Union[str, List[str]]) -> pd.DataFrame:
-        """
-        Generate factor values only for the given tsfresh feature names.
-
-        This supports reusing previously saved feature names without extracting
-        the full tsfresh feature set.
-        """
         if isinstance(fc_name_list, str):
             fc_name_list = [fc_name_list]
         if not fc_name_list:
             raise ValueError('fc_name_list is empty.')
-
         return self.generate(selected_fc_name_list=list(fc_name_list))
 
     def save_fc_value(self,
                       fc_name_list: Union[str, List[str]],
                       file_name: Optional[str] = None,
                       file_format: str = 'parquet') -> Path:
-        """
-        Save selected factor columns from latest generated data.
-        """
         if self.generated_data is None:
             raise ValueError('Please call generate() before save_fc_value().')
 
@@ -290,211 +233,34 @@ class FactorGenerator:
         log.info(f'Saved factor values to {save_path}.')
         return save_path
 
-    def save_fc(self,
-                fc_name_list: Union[str, List[str]],
-                save_dir: Optional[Union[str, Path]] = None) -> Path:
-        """
-        Save selected feature definitions for future reuse.
-
-        Notes:
-        - This method only writes one JSON config file.
-        - tsfresh reuse is achieved by storing feature names and converting them
-          back to tsfresh settings via `from_columns`.
-        """
-        if isinstance(fc_name_list, str):
-            fc_name_list = [fc_name_list]
-        if not fc_name_list:
-            raise ValueError('fc_name_list is empty.')
-
-        if self.generated_fc_name_list:
-            missing = [x for x in fc_name_list if x not in self.generated_fc_name_list]
-            if missing:
-                raise ValueError(f'fc_name_list contains unknown features: {missing}')
-
-        if save_dir is None:
-            if self.method == 'llm_prompt':
-                default_dir_name = 'fc_from_llm'
-            elif self.method == 'tsfresh':
-                default_dir_name = 'fc_from_tsfresh'
-            elif self.method == 'genetic_programming':
-                default_dir_name = 'fc_from_genetic_programming'
-            else:
-                raise ValueError(f'save_fc does not support method={self.method}.')
-            save_dir = Path(__file__).resolve().parent / default_dir_name
-        save_dir = Path(save_dir)
-        save_dir.mkdir(parents=True, exist_ok=True)
-
-        if self.method == 'llm_prompt':
-            package_prefix = 'llm_fc'
-        elif self.method == 'tsfresh':
-            package_prefix = 'tsfresh_fc'
-        elif self.method == 'genetic_programming':
-            package_prefix = 'gp_fc'
-        else:
-            raise ValueError(f'save_fc does not support method={self.method}.')
-        fc_package_name = f'{package_prefix}_{self.version}'
-
-        fc_name_list = list(fc_name_list)
-
-        if self.method not in ['tsfresh', 'llm_prompt', 'genetic_programming']:
-            raise ValueError(f'save_fc does not support method={self.method}.')
-
-        def _build_payload(selected_fc_name_list: List[str], created_at: Optional[str] = None) -> dict:
-            payload_i = {
-                'method': self.method,
-                'created_at': created_at or datetime.now().isoformat(timespec='seconds'),
-                'version': self.version,
-                'fc_name_list': list(selected_fc_name_list),
-                # Keep only strict_meta related fields and basic traceability fields.
-                'meta': {
-                    'instrument_type': self.instrument_type,
-                    'instrument_id_list': self.instrument_id_list,
-                    'fc_freq': self.fc_freq,
-                    'base_col_list': self.base_col_list,
-                }
-            }
-            if self.method == 'tsfresh':
-                from tsfresh.feature_extraction.settings import from_columns
-                payload_i['kind_to_fc_parameters'] = from_columns(selected_fc_name_list)
-            elif self.method == 'genetic_programming':
-                formula_map = getattr(self, 'factor_formula_map', {})
-                fitness_map = getattr(self, 'factor_fitness_map', {})
-                payload_i['formula_map'] = {
-                    k: formula_map[k] for k in selected_fc_name_list if isinstance(formula_map, dict) and k in formula_map
-                }
-                payload_i['fitness_map'] = {
-                    k: fitness_map[k] for k in selected_fc_name_list if isinstance(fitness_map, dict) and k in fitness_map
-                }
-            return payload_i
-
-        payload = _build_payload(fc_name_list)
-
-        config_path = save_dir / f'{fc_package_name}.json'
-        if config_path.exists():
-            with open(config_path, 'r', encoding='utf-8') as f:
-                existing_payload = json.load(f)
-
-            existing_method = existing_payload.get('method')
-            if existing_method and existing_method != self.method:
-                raise ValueError(
-                    f'Existing config method={existing_method} mismatches current method={self.method}: {config_path}'
-                )
-
-            existing_fc_name_list = existing_payload.get('fc_name_list', [])
-            if not isinstance(existing_fc_name_list, list):
-                existing_fc_name_list = []
-
-            merged_fc_name_list = list(existing_fc_name_list)
-            for fc_name in fc_name_list:
-                if fc_name not in merged_fc_name_list:
-                    merged_fc_name_list.append(fc_name)
-
-            payload = _build_payload(
-                merged_fc_name_list,
-                created_at=existing_payload.get('created_at') if isinstance(existing_payload, dict) else None,
-            )
-            payload['updated_at'] = datetime.now().isoformat(timespec='seconds')
-
-            added_count = len(merged_fc_name_list) - len(existing_fc_name_list)
-            log.info(f'Existing config found, merged {added_count} new factors into {config_path}.')
-
-        with open(config_path, 'w', encoding='utf-8') as f:
-            json.dump(payload, f, ensure_ascii=True, indent=2)
-
-        log.info(f'Saved {self.method} feature config to {config_path}.')
-        return config_path
-
-    @staticmethod
-    def load_fc(config_path: Union[str, Path]) -> List[str]:
-        """
-        Load saved tsfresh feature names from `save_fc` config.
-        """
-        config_path = Path(config_path)
-        with open(config_path, 'r', encoding='utf-8') as f:
-            payload = json.load(f)
-        fc_name_list = payload.get('fc_name_list', [])
-        if not isinstance(fc_name_list, list) or not fc_name_list:
-            raise ValueError(f'Invalid config file: {config_path}.')
-        return fc_name_list
-
-    def backtest_from_fc_config(self,
-                                config_path: Union[str, Path],
-                                n_jobs: Optional[int] = None,
-                                strict_meta: bool = False) -> BackTester:
-        """
-        One-step workflow:
-        load saved feature config -> generate selected factors -> run backtest.
-        """
-        config_path = Path(config_path)
-        if not config_path.exists():
-            raise FileNotFoundError(f'Config file not found: {config_path}')
-
-        with open(config_path, 'r', encoding='utf-8') as f:
-            payload = json.load(f)
-
-        config_method = payload.get('method')
-        if config_method and config_method != self.method:
+    @classmethod
+    def validate_filter_indicator_dict(cls,
+                                       filter_indicator_dict: Dict[str, Tuple[float, float, int]]) -> None:
+        if not filter_indicator_dict:
+            raise ValueError('filter_indicator_dict is required and cannot be empty.')
+        available_indicator_list = list(SUPPORTED_FILTER_INDICATORS)
+        invalid_indicator_list = [k for k in filter_indicator_dict.keys() if k not in available_indicator_list]
+        if invalid_indicator_list:
             raise ValueError(
-                f'Config method={config_method} does not match current generator method={self.method}. '
-                'Please use the matching subclass.'
+                f'Unsupported filter indicators: {invalid_indicator_list}. '
+                f'Available indicators: {available_indicator_list}'
             )
 
-        fc_name_list = payload.get('fc_name_list', [])
-        if not isinstance(fc_name_list, list) or not fc_name_list:
-            raise ValueError(f'Invalid config file: {config_path}. Missing non-empty fc_name_list.')
-
-        if strict_meta:
-            meta = payload.get('meta', {})
-            if meta.get('fc_freq') and meta.get('fc_freq') != self.fc_freq:
+        for indicator, conf in filter_indicator_dict.items():
+            if not isinstance(conf, tuple) or len(conf) != 3:
                 raise ValueError(
-                    f'Config fc_freq={meta.get("fc_freq")} does not match current fc_freq={self.fc_freq}.'
+                    f'Invalid filter config for `{indicator}`: {conf}. '
+                    'Expected tuple(mean_threshold, yearly_threshold, direction).'
                 )
-            if meta.get('instrument_type') and meta.get('instrument_type') != self.instrument_type:
-                raise ValueError(
-                    f'Config instrument_type={meta.get("instrument_type")} '
-                    f'does not match current instrument_type={self.instrument_type}.'
-                )
-            if meta.get('base_col_list') and list(meta.get('base_col_list')) != list(self.base_col_list):
-                raise ValueError(
-                    'Config base_col_list does not match current base_col_list when strict_meta=True.'
-                )
-
-        self.generate_with_fc(fc_name_list)
-        return self.backtest(fc_name_list=fc_name_list, n_jobs=n_jobs)
+            _, _, direction = conf
+            if direction not in [1, -1]:
+                raise ValueError(f'Invalid direction for `{indicator}`: {direction}. Use 1 (>=) or -1 (<=).')
 
     def filter_fc_by_threshold(self,
                                performance_summary: Optional[pd.DataFrame] = None,
                                filter_indicator_dict: Dict[str, Tuple[float, float, int]] = None,
                                require_all_row: bool = True,
                                require_all_instruments: bool = True) -> List[str]:
-        """
-        Filter factors by indicator thresholds.
-
-        `filter_indicator_dict` format:
-            {
-                'Net Return': (0.05, 0.03, 1),
-                'Net Volatility': (0.02, 0.03, -1),
-            }
-        value tuple means:
-            (annual_mean_threshold, each_year_threshold, direction)
-        direction:
-            1  -> metric >= threshold
-            -1 -> metric <= threshold
-
-        For each indicator:
-        1) Compute the mean over yearly rows (year != 'all').
-        2) Check yearly mean against annual_mean_threshold.
-        3) Check every yearly value against each_year_threshold.
-        4) Indicator passes only if both 2) and 3) pass.
-
-        For multi-instrument backtest summary:
-        - require_all_instruments=True: all instruments must pass
-        - require_all_instruments=False: at least one instrument must pass
-
-        比如{'Net Return': (0.05, 0.03, 1), 'Net Volatility': (0.02, 0.03, -1)}，
-        表示筛选年化Net Return的平均值大于等于0.05，且每年的Net Return都要大于等于0.03，
-        年化Net Volatility的平均值小于等于0.02，且每年的Net Volatility都要小于0.03的因子。
-        """
         if performance_summary is None:
             if self.bt is None or self.bt.performance_summary is None:
                 raise ValueError('No performance summary available. Please run backtest() first.')
@@ -518,28 +284,15 @@ class FactorGenerator:
             if indicator not in summary_df.columns:
                 raise ValueError(f'performance_summary does not contain required indicator: {indicator}')
 
-        # Build pass columns indicator by indicator.
         summary_df = summary_df.copy()
         summary_df['__year_str__'] = summary_df['year'].astype(str)
         summary_df['__is_yearly__'] = summary_df['__year_str__'] != 'all'
 
-        # Per-row yearly threshold checks.
         for indicator, conf in filter_indicator_dict.items():
-            if not isinstance(conf, tuple) or len(conf) != 3:
-                raise ValueError(
-                    f'Invalid filter config for `{indicator}`: {conf}. '
-                    'Expected tuple(mean_threshold, yearly_threshold, direction).'
-                )
-
             _, yearly_threshold, direction = conf
-            if direction not in [1, -1]:
-                raise ValueError(
-                    f'Invalid direction for `{indicator}`: {direction}. Use 1 (>=) or -1 (<=).'
-                )
-
             numeric_series = pd.to_numeric(summary_df[indicator], errors='coerce')
             pass_col = f'__pass_yearly__{indicator}'
-            if direction == 1:  # 非年度行直接通过；年度行必须满足 indicator >= yearly_threshold 才通过。
+            if direction == 1:
                 summary_df[pass_col] = (~summary_df['__is_yearly__']) | (numeric_series >= float(yearly_threshold))
             else:
                 summary_df[pass_col] = (~summary_df['__is_yearly__']) | (numeric_series <= float(yearly_threshold))
@@ -547,19 +300,15 @@ class FactorGenerator:
         group_cols = ['Factor Name'] + (['Instrument ID'] if 'Instrument ID' in summary_df.columns else [])
 
         def _eval_group(df_group: pd.DataFrame) -> bool:
-            # Optional strictness: require an `all` row to exist in each factor/instrument slice.
             if require_all_row and 'all' not in df_group['__year_str__'].values:
                 return False
-
             df_year = df_group.loc[df_group['__is_yearly__']].copy()
-            # Need at least one yearly row; otherwise annual mean is undefined.
             if df_year.empty:
                 return False
 
             for indicator, conf in filter_indicator_dict.items():
                 mean_threshold, _, direction = conf
                 yearly_values = pd.to_numeric(df_year[indicator], errors='coerce').dropna()
-                # If all yearly values are non-numeric/missing, this indicator fails.
                 if yearly_values.empty:
                     return False
 
@@ -570,22 +319,16 @@ class FactorGenerator:
                     return False
 
                 pass_col = f'__pass_yearly__{indicator}'
-                yearly_pass = bool(df_group.loc[df_group['__is_yearly__'], pass_col].all())
-                if not yearly_pass:
+                if not bool(df_group.loc[df_group['__is_yearly__'], pass_col].all()):
                     return False
-
             return True
 
         ins_pass_records = []
-        # e.g.
-        # group_cols = ['Factor Name', 'Instrument ID']
-        # group_key = ('fc_001', 'C0')
-        for group_key, group_df in summary_df.groupby(group_cols, sort=False):  # 对每个因子，都对每个品种进行判断
-            # group_key can be a scalar (single group column) or tuple (multi group columns)
+        for group_key, group_df in summary_df.groupby(group_cols, sort=False):
             if not isinstance(group_key, tuple):
                 group_key = (group_key,)
             record = {k: v for k, v in zip(group_cols, group_key)}
-            record['__ins_pass__'] = _eval_group(group_df)  # 返回的是当前因子在当前品种下，是否满足筛选条件
+            record['__ins_pass__'] = _eval_group(group_df)
             ins_pass_records.append(record)
         ins_pass_df = pd.DataFrame(ins_pass_records)
 
@@ -596,49 +339,266 @@ class FactorGenerator:
         else:
             fc_pass_series = ins_pass_df.set_index('Factor Name')['__ins_pass__']
 
-        selected_fc_name_list = fc_pass_series[fc_pass_series].index.tolist()
-        return selected_fc_name_list
+        return fc_pass_series[fc_pass_series].index.tolist()
+
+    def _build_metric_fitness_map(self,
+                                  performance_summary: pd.DataFrame,
+                                  selected_fc_name_list: Sequence[str]) -> Dict[str, Dict[str, Dict[str, float]]]:
+        summary_df = performance_summary.copy()
+        if 'year' not in summary_df.columns:
+            summary_df = summary_df.reset_index()
+
+        metric_cols = [
+            c for c in SUPPORTED_FILTER_INDICATORS
+            if c in summary_df.columns
+        ]
+
+        out: Dict[str, Dict[str, Dict[str, float]]] = {}
+        for fc_name in selected_fc_name_list:
+            df_fc = summary_df.loc[summary_df['Factor Name'] == fc_name].copy()
+            df_year = df_fc.loc[df_fc['year'].astype(str) != 'all'].copy()
+            metric_map: Dict[str, Dict[str, float]] = {}
+            for m in metric_cols:
+                vals = pd.to_numeric(df_year[m], errors='coerce').dropna()
+                if vals.empty:
+                    continue
+                metric_map[m] = {'value': float(vals.mean())}
+            out[fc_name] = metric_map
+        return out
+
+    def _db_collection(self) -> str:
+        if self.method == 'genetic_programming':
+            return 'genetic_programming'
+        if self.method == 'llm_prompt':
+            return 'llm_prompt'
+        raise ValueError(f'Unsupported method for DB persistence: {self.method}')
+
+    def save_fc(self,
+                fc_name_list: Union[str, List[str]],
+                performance_summary: Optional[pd.DataFrame] = None) -> str:
+        if isinstance(fc_name_list, str):
+            fc_name_list = [fc_name_list]
+        if not fc_name_list:
+            raise ValueError('fc_name_list is empty.')
+
+        formula_map = getattr(self, 'factor_formula_map', {}) or {}
+        missing_formula = [x for x in fc_name_list if x not in formula_map]
+        if missing_formula:
+            raise ValueError(f'Missing formula for factors: {missing_formula}')
+
+        if performance_summary is None:
+            if self.bt is None or self.bt.performance_summary is None:
+                raise ValueError('performance_summary is required to save factor metadata.')
+            performance_summary = self.bt.performance_summary
+
+        fitness_map = getattr(self, 'factor_fitness_map', {}) or {}
+        if not fitness_map:
+            fitness_map = self._build_metric_fitness_map(performance_summary, fc_name_list)
+
+        update_factor_info(
+            selected_fc_name_list=fc_name_list,
+            performance_summary=performance_summary,
+            factor_formula_map=formula_map,
+            factor_fitness_map=fitness_map,
+            instrument_id_list=self.instrument_id_list,
+            method=self.method,
+            version=self.version,
+            start_date=self.start_time,
+            end_date=self.end_time,
+            database='factors',
+            collection=self._db_collection(),
+        )
+
+        db_ref = f'factors.{self._db_collection()}@{self.version}'
+        log.info(f'Saved selected factors into DB: {db_ref}, factor_count={len(fc_name_list)}')
+        return db_ref
+
+    @staticmethod
+    def _parse_db_ref(config_ref: str) -> Tuple[str, str, str]:
+        if not isinstance(config_ref, str) or '@' not in config_ref or '.' not in config_ref.split('@', 1)[0]:
+            raise ValueError(
+                'Invalid config_ref format. Expected `database.collection@version`, '
+                f'got: {config_ref}'
+            )
+        left, version = config_ref.split('@', 1)
+        database, collection = left.split('.', 1)
+        database = database.strip()
+        collection = collection.strip()
+        version = version.strip()
+        if not database or not collection or not version:
+            raise ValueError(
+                'Invalid config_ref format. Expected non-empty `database.collection@version`, '
+                f'got: {config_ref}'
+            )
+        return database, collection, version
 
     @classmethod
-    def validate_filter_indicator_dict(cls,
-                                       filter_indicator_dict: Dict[str, Tuple[float, float, int]]) -> None:
-        """Validate indicator filter config before expensive generation starts."""
-        if not filter_indicator_dict:
-            raise ValueError('filter_indicator_dict is required and cannot be empty.')
-        available_indicator_list = list(SUPPORTED_FILTER_INDICATORS)
-        invalid_indicator_list = [k for k in filter_indicator_dict.keys() if k not in available_indicator_list]
-        if invalid_indicator_list:
-            log.error(f'Unsupported filter indicators: {invalid_indicator_list}')
-            log.error(f'Available filter indicators: {available_indicator_list}')
-            raise ValueError(
-                f'Unsupported filter indicators: {invalid_indicator_list}. '
-                f'Available indicators: {available_indicator_list}'
+    def load_fc(cls,
+                config_ref: str,
+                instrument_id_list: Optional[Sequence[str]] = None) -> List[str]:
+        database, collection, version = cls._parse_db_ref(config_ref)
+        mongo_operator: Dict[str, Any] = {'version': version}
+        if instrument_id_list:
+            mongo_operator['instrument_id'] = {'$in': list(instrument_id_list)}
+
+        df = get_data(database=database, collection=collection, mongo_operator=mongo_operator)
+        if not isinstance(df, pd.DataFrame) or df.empty:
+            raise ValueError(f'No factors found in DB for config_ref={config_ref}.')
+        if 'factor_name' not in df.columns:
+            raise ValueError(f'Invalid DB record: `factor_name` not found for config_ref={config_ref}.')
+
+        fc_name_list = [str(x) for x in df['factor_name'].dropna().tolist()]
+        dedup_fc_name_list = list(dict.fromkeys(fc_name_list))
+        if not dedup_fc_name_list:
+            raise ValueError(f'No valid factor_name found in DB for config_ref={config_ref}.')
+        return dedup_fc_name_list
+
+    def backtest_from_fc_config(self,
+                                config_ref: str,
+                                n_jobs: Optional[int] = None) -> BackTester:
+        fc_name_list = self.load_fc(config_ref=config_ref, instrument_id_list=self.instrument_id_list)
+        generated_df = self.generate_with_fc(fc_name_list=fc_name_list)
+        return self.backtest(data=generated_df, fc_name_list=fc_name_list, n_jobs=n_jobs)
+
+    def check_if_leakage(self,
+                         fc_name_list: Optional[Union[str, List[str]]] = None,
+                         atol: float = 1e-10,
+                         rtol: float = 1e-8,
+                         raise_error: bool = True) -> dict:
+        if isinstance(fc_name_list, str):
+            fc_name_list = [fc_name_list]
+
+        base_df = self.load_base_data()
+        if fc_name_list:
+            selected_fc_name_list = list(fc_name_list)
+        else:
+            factor_df_for_names = self.generate_factor_df(base_df)
+            selected_fc_name_list = [
+                c for c in factor_df_for_names.columns if c not in ['time', 'instrument_id']
+            ]
+        if not selected_fc_name_list:
+            raise ValueError('No factor columns available for leakage check.')
+
+        full_factor_df = self.generate_factor_df(base_df, selected_fc_names=selected_fc_name_list)
+        if self.apply_rolling_norm:
+            full_factor_df = rolling_normalize_features(
+                df=full_factor_df,
+                factor_cols=list(selected_fc_name_list),
+                rolling_norm_window=self.rolling_norm_window,
+                rolling_norm_min_periods=self.rolling_norm_min_periods,
+                rolling_norm_eps=self.rolling_norm_eps,
+                rolling_norm_clip=self.rolling_norm_clip,
+                instrument_col='instrument_id',
             )
 
-        for indicator, conf in filter_indicator_dict.items():
-            if not isinstance(conf, tuple) or len(conf) != 3:
-                raise ValueError(
-                    f'Invalid filter config for `{indicator}`: {conf}. '
-                    'Expected tuple(mean_threshold, yearly_threshold, direction).'
+        all_time_list = sorted(full_factor_df['time'].dropna().unique().tolist())
+        if not all_time_list:
+            raise ValueError('No valid time points available for leakage check.')
+
+        sample_count = min(len(all_time_list), max(1, self.check_leakage_count))
+        if sample_count < len(all_time_list):
+            rng = np.random.default_rng()
+            sampled_time_list = sorted(rng.choice(all_time_list, size=sample_count, replace=False).tolist())
+        else:
+            sampled_time_list = all_time_list
+
+        slice_factor_list = []
+        for t in sampled_time_list:
+            log.info(f'Checking leakage for time slice <= {t}...')
+            df_slice = base_df.loc[base_df['time'] <= t].copy()
+            factor_df_slice = self.generate_factor_df(df_slice, selected_fc_names=selected_fc_name_list)
+            if self.apply_rolling_norm:
+                factor_df_slice = rolling_normalize_features(
+                    df=factor_df_slice,
+                    factor_cols=list(selected_fc_name_list),
+                    rolling_norm_window=self.rolling_norm_window,
+                    rolling_norm_min_periods=self.rolling_norm_min_periods,
+                    rolling_norm_eps=self.rolling_norm_eps,
+                    rolling_norm_clip=self.rolling_norm_clip,
+                    instrument_col='instrument_id',
                 )
-            _, _, direction = conf
-            if direction not in [1, -1]:
-                raise ValueError(
-                    f'Invalid direction for `{indicator}`: {direction}. Use 1 (>=) or -1 (<=).'
-                )
+            factor_df_slice = factor_df_slice.loc[
+                factor_df_slice['time'] == t,
+                ['time', 'instrument_id'] + selected_fc_name_list,
+            ].copy()
+            slice_factor_list.append(factor_df_slice)
+
+        slice_factor_df = pd.concat(slice_factor_list, ignore_index=True)
+
+        left = full_factor_df[['time', 'instrument_id'] + selected_fc_name_list].copy()
+        left = left[left['time'].isin(sampled_time_list)]
+        right = slice_factor_df[['time', 'instrument_id'] + selected_fc_name_list].copy()
+
+        merged = left.merge(
+            right,
+            on=['time', 'instrument_id'],
+            how='outer',
+            suffixes=('_full', '_slice'),
+            indicator=True,
+        )
+
+        missing_row_df = merged.loc[merged['_merge'] != 'both', ['time', 'instrument_id', '_merge']].copy()
+        mismatch_detail: Dict[str, int] = {}
+        mismatch_examples: Dict[str, List[dict]] = {}
+
+        both_df = merged.loc[merged['_merge'] == 'both'].copy()
+        for fc_name in selected_fc_name_list:
+            col_full = f'{fc_name}_full'
+            col_slice = f'{fc_name}_slice'
+            is_equal = np.isclose(
+                pd.to_numeric(both_df[col_full], errors='coerce').astype(float),
+                pd.to_numeric(both_df[col_slice], errors='coerce').astype(float),
+                rtol=rtol,
+                atol=atol,
+                equal_nan=True,
+            )
+            mismatch_mask = ~is_equal
+            mismatch_count = int(mismatch_mask.sum())
+            if mismatch_count > 0:
+                mismatch_detail[fc_name] = mismatch_count
+                mismatch_examples[fc_name] = both_df.loc[
+                    mismatch_mask,
+                    ['time', 'instrument_id', col_full, col_slice],
+                ].head(5).to_dict(orient='records')
+
+        failed_factor_set = set(mismatch_detail.keys())
+        if len(missing_row_df) > 0:
+            failed_factor_set.update(selected_fc_name_list)
+
+        passed = len(failed_factor_set) == 0
+        result = {
+            'passed': passed,
+            'checked_factor_count': len(selected_fc_name_list),
+            'checked_time_count': len(sampled_time_list),
+            'missing_row_count': int(len(missing_row_df)),
+            'mismatch_factor_count': int(len(mismatch_detail)),
+            'mismatch_detail': mismatch_detail,
+            'mismatch_examples': mismatch_examples,
+            'failed_factor_list': sorted(list(failed_factor_set)),
+        }
+
+        if not passed:
+            log.error('Leakage check failed with details:')
+            log.error(f'  checked_time_count={result["checked_time_count"]}')
+            log.error(f'  missing_row_count={result["missing_row_count"]}')
+            if len(missing_row_df) > 0:
+                log.error(f'  missing_row_samples={missing_row_df.head(10).to_dict(orient="records")}')
+            for fc_name in result['failed_factor_list']:
+                if fc_name in mismatch_detail:
+                    log.error(
+                        f'  factor={fc_name}, mismatch_count={mismatch_detail[fc_name]}, '
+                        f'samples={mismatch_examples.get(fc_name, [])}'
+                    )
+
+        if raise_error and not passed:
+            raise ValueError(f'Leakage check failed: {result}')
+        return result
 
     def auto_mine_select_and_save_fc(self,
                                      filter_indicator_dict: Dict[str, Tuple[float, float, int]],
-                                     save_dir: Optional[Union[str, Path]] = None,
                                      n_jobs: Optional[int] = None,
                                      require_all_row: bool = True,
                                      require_all_instruments: bool = True) -> dict:
-        """
-        One-step automation:
-        generate factors -> backtest -> threshold filter -> save selected config.
-        """
-        # Early validation is intentionally placed before self.generate(),
-        # so invalid indicator configs fail fast and do not waste mining time.
         self.validate_filter_indicator_dict(filter_indicator_dict)
 
         generated_df = self.generate()
@@ -652,148 +612,49 @@ class FactorGenerator:
 
         if not selected_fc_name_list:
             msg = f'No factors passed thresholds: filter_indicator_dict={filter_indicator_dict}.'
-            print(msg)
             log.warning(msg)
             return {
+                'config_ref': None,
                 'config_path': None,
                 'selected_fc_name_list': [],
                 'bt': bt,
                 'message': msg,
             }
 
-        config_path = self.save_fc(
-            fc_name_list=selected_fc_name_list,
-            save_dir=save_dir,
+        leakage_result = self.check_if_leakage(fc_name_list=selected_fc_name_list, raise_error=False)
+        selected_after_leakage = [
+            x for x in selected_fc_name_list
+            if x not in leakage_result.get('failed_factor_list', [])
+        ]
+        if not selected_after_leakage:
+            msg = 'No factors passed leakage check after threshold filtering.'
+            log.warning(msg)
+            return {
+                'config_ref': None,
+                'config_path': None,
+                'selected_fc_name_list': [],
+                'bt': bt,
+                'leakage_check': leakage_result,
+                'message': msg,
+            }
+
+        config_ref = self.save_fc(
+            fc_name_list=selected_after_leakage,
+            performance_summary=bt.performance_summary,
         )
 
         return {
-            'config_path': config_path,
-            'selected_fc_name_list': selected_fc_name_list,
+            'config_ref': config_ref,
+            'config_path': config_ref,
+            'selected_fc_name_list': selected_after_leakage,
             'bt': bt,
+            'leakage_check': leakage_result,
         }
-
-    def check_if_leakage(self,
-                         fc_name_list: Optional[Union[str, List[str]]] = None,
-                         atol: float = 1e-10,
-                         rtol: float = 1e-8,
-                         raise_error: bool = True) -> dict:
-        """
-        Strict leakage check by expanding-time-slice recomputation.
-
-        Procedure:
-        1) Compute full-sample factor series.
-        2) For each day t, recompute factors using only data <= t, and take factor values at t.
-        3) Compare the two series day-by-day for each factor.
-        """
-        if isinstance(fc_name_list, str):
-            fc_name_list = [fc_name_list]
-
-        base_df = self.load_base_data()
-
-        # Resolve feature list to check.
-        if fc_name_list:
-            selected_fc_name_list = list(fc_name_list)
-        else:
-            factor_df_for_names = self.generate_factor_df(base_df)
-            selected_fc_name_list = [
-                c for c in factor_df_for_names.columns if c not in ['time', 'instrument_id']
-            ]
-
-        if not selected_fc_name_list:
-            raise ValueError('No factor columns available for leakage check.')
-
-        # Full-sample factor series.
-        full_factor_df = self.generate_factor_df(base_df, selected_fc_names=selected_fc_name_list)
-        if self.apply_rolling_norm:
-            full_factor_df = rolling_normalize_features(
-                df=full_factor_df,
-                factor_cols=list(selected_fc_name_list),
-                rolling_norm_window=self.rolling_norm_window,
-                rolling_norm_min_periods=self.rolling_norm_min_periods,
-                rolling_norm_eps=self.rolling_norm_eps,
-                rolling_norm_clip=self.rolling_norm_clip,
-                instrument_col='instrument_id',
-            )
-
-        check_time_list = sorted(full_factor_df['time'].dropna().unique().tolist())
-        if not check_time_list:
-            raise ValueError('No valid time points available for leakage check.')
-
-        # Expanding-slice factor series: for each day, only use data up to that day.
-        slice_factor_list = []
-        for t in check_time_list:
-            df_slice = base_df.loc[base_df['time'] <= t].copy()
-            factor_df_slice = self.generate_factor_df(df_slice, selected_fc_names=selected_fc_name_list)
-            if self.apply_rolling_norm:
-                factor_df_slice = rolling_normalize_features(
-                    df=factor_df_slice,
-                    factor_cols=list(selected_fc_name_list),
-                    rolling_norm_window=self.rolling_norm_window,
-                    rolling_norm_min_periods=self.rolling_norm_min_periods,
-                    rolling_norm_eps=self.rolling_norm_eps,
-                    rolling_norm_clip=self.rolling_norm_clip,
-                    instrument_col='instrument_id',
-                )
-
-            factor_df_slice = factor_df_slice.loc[
-                factor_df_slice['time'] == t,
-                ['time', 'instrument_id'] + selected_fc_name_list
-            ].copy()
-            slice_factor_list.append(factor_df_slice)
-
-        slice_factor_df = pd.concat(slice_factor_list, ignore_index=True)
-
-        left = full_factor_df[['time', 'instrument_id'] + selected_fc_name_list].copy()
-        right = slice_factor_df[['time', 'instrument_id'] + selected_fc_name_list].copy()
-
-        merged = left.merge(
-            right,
-            on=['time', 'instrument_id'],
-            how='outer',
-            suffixes=('_full', '_slice'),
-            indicator=True,
-        )
-
-        missing_row_df = merged.loc[merged['_merge'] != 'both', ['time', 'instrument_id', '_merge']].copy()
-        mismatch_detail = {}
-
-        both_df = merged.loc[merged['_merge'] == 'both'].copy()
-        for fc_name in selected_fc_name_list:
-            col_full = f'{fc_name}_full'
-            col_slice = f'{fc_name}_slice'
-            is_equal = np.isclose(
-                both_df[col_full].astype(float),
-                both_df[col_slice].astype(float),
-                rtol=rtol,
-                atol=atol,
-                equal_nan=True,
-            )
-            mismatch_count = int((~is_equal).sum())
-            if mismatch_count > 0:
-                mismatch_detail[fc_name] = mismatch_count
-
-        passed = (len(missing_row_df) == 0) and (len(mismatch_detail) == 0)
-        result = {
-            'passed': passed,
-            'checked_factor_count': len(selected_fc_name_list),
-            'checked_time_count': len(check_time_list),
-            'missing_row_count': int(len(missing_row_df)),
-            'mismatch_factor_count': int(len(mismatch_detail)),
-            'mismatch_detail': mismatch_detail,
-        }
-
-        if raise_error and not passed:
-            raise ValueError(f'Leakage check failed: {result}')
-
-        return result
 
     def backtest(self,
                  data: Optional[pd.DataFrame] = None,
                  fc_name_list: Optional[Union[str, List[str]]] = None,
                  n_jobs: Optional[int] = None) -> BackTester:
-        """
-        Run backtest with generated or external factor dataframe.
-        """
         if data is None:
             if self.generated_data is None:
                 raise ValueError('Please call generate() first, or pass `data` explicitly.')
@@ -821,220 +682,8 @@ class FactorGenerator:
         bt.backtest()
         self.bt = bt
         return bt
-
-
-class TsfreshFactorGenerator(FactorGenerator):
-    """Factor generator using tsfresh feature extraction."""
-
-    method: str = 'tsfresh'
-
-    def __init__(self,
-                 instrument_type: str = 'futures_continuous_contract',
-                 instrument_id_list: Union[str, List[str]] = 'C0',
-                 fc_freq: str = '1d',
-                 data: Optional[pd.DataFrame] = None,
-                 start_time: Optional[str] = None,
-                 end_time: Optional[str] = None,
-                 portfolio_adjust_method: str = '1D',
-                 interest_method: str = 'compound',
-                 risk_free_rate: bool = False,
-                 calculate_baseline: bool = False,
-                 n_jobs: int = 5,
-                 base_col_list: Optional[Sequence[str]] = None,
-                 min_window_size: int = 30,
-                 max_factor_count: Optional[int] = 200,
-                 tsfresh_profile: str = 'minimal',
-                 apply_rolling_norm: bool = True,
-                 rolling_norm_window: int = 30,
-                 rolling_norm_min_periods: int = 20,
-                 rolling_norm_eps: float = 1e-8,
-                 rolling_norm_clip: float = 10.0,
-                 version: Optional[str] = None):
-        super().__init__(
-            instrument_type=instrument_type,
-            instrument_id_list=instrument_id_list,
-            fc_freq=fc_freq,
-            data=data,
-            start_time=start_time,
-            end_time=end_time,
-            portfolio_adjust_method=portfolio_adjust_method,
-            interest_method=interest_method,
-            risk_free_rate=risk_free_rate,
-            calculate_baseline=calculate_baseline,
-            n_jobs=n_jobs,
-            base_col_list=base_col_list,
-            min_window_size=min_window_size,
-            max_factor_count=max_factor_count,
-            apply_rolling_norm=apply_rolling_norm,
-            rolling_norm_window=rolling_norm_window,
-            rolling_norm_min_periods=rolling_norm_min_periods,
-            rolling_norm_eps=rolling_norm_eps,
-            rolling_norm_clip=rolling_norm_clip,
-            version=version,
-        )
-        self.tsfresh_profile = tsfresh_profile
-
-    @staticmethod
-    def _get_tsfresh_fc_parameters(profile: str):
-        from tsfresh.feature_extraction import (
-            ComprehensiveFCParameters,
-            EfficientFCParameters,
-            MinimalFCParameters,
-        )
-
-        profile = profile.lower()
-        if profile == 'minimal':
-            return MinimalFCParameters()
-        if profile == 'efficient':
-            return EfficientFCParameters()
-        if profile == 'comprehensive':
-            return ComprehensiveFCParameters()
-        raise ValueError(f'Unsupported tsfresh_profile: {profile}. Use minimal/efficient/comprehensive.')
-
-    def generate_factor_df(self,
-                           df: pd.DataFrame,
-                           selected_fc_names: Optional[List[str]] = None) -> pd.DataFrame:
-        from tsfresh import extract_features
-        from tsfresh.feature_extraction.settings import from_columns
-
-        fc_parameters = self._get_tsfresh_fc_parameters(self.tsfresh_profile)
-
-        window_meta_list = []
-        long_df_list = []
-
-        for instrument_id, df_i in df.groupby('instrument_id', sort=False):
-            df_i = df_i.sort_values('time').reset_index(drop=True)
-            if len(df_i) < self.min_window_size:
-                log.warning(f'Skip instrument {instrument_id}: insufficient rows ({len(df_i)} < {self.min_window_size}).')
-                continue
-
-            for end_idx in range(self.min_window_size - 1, len(df_i)):
-                window_id = f'{instrument_id}__{int(df_i.loc[end_idx, "time"].value)}'
-                window_df = df_i.iloc[end_idx - self.min_window_size + 1: end_idx + 1]
-                window_meta_list.append({
-                    'window_id': window_id,
-                    'time': df_i.loc[end_idx, 'time'],
-                    'instrument_id': instrument_id,
-                })
-
-                for col in self.base_col_list:
-                    long_df = pd.DataFrame({
-                        'id': window_id,
-                        'time': range(self.min_window_size),
-                        'kind': col,
-                        'value': window_df[col].values,
-                    })
-                    long_df_list.append(long_df)
-
-        if not long_df_list:
-            raise ValueError('No rolling windows generated for tsfresh extraction. Please check input size.')
-
-        def _normalize_extracted_df(extracted_df: pd.DataFrame) -> pd.DataFrame:
-            extracted_df = extracted_df.reset_index()
-            if 'id' in extracted_df.columns:
-                extracted_df = extracted_df.rename(columns={'id': 'window_id'})
-            elif 'index' in extracted_df.columns:
-                extracted_df = extracted_df.rename(columns={'index': 'window_id'})
-            else:
-                extracted_df = extracted_df.rename(columns={extracted_df.columns[0]: 'window_id'})
-            return extracted_df
-
-        tsfresh_input = pd.concat(long_df_list, ignore_index=True)
-        selected_extraction_failed = False
-        if selected_fc_names:
-            try:
-                extracted = extract_features(
-                    tsfresh_input,
-                    column_id='id',
-                    column_sort='time',
-                    column_kind='kind',
-                    column_value='value',
-                    kind_to_fc_parameters=from_columns(selected_fc_names),
-                    disable_progressbar=True,
-                    n_jobs=self.n_jobs,
-                )
-            except Exception:
-                selected_extraction_failed = True
-                extracted = pd.DataFrame(columns=['window_id'])
-        else:
-            extracted = extract_features(
-                tsfresh_input,
-                column_id='id',
-                column_sort='time',
-                column_kind='kind',
-                column_value='value',
-                default_fc_parameters=dict(fc_parameters),
-                disable_progressbar=True,
-                n_jobs=self.n_jobs,
-            )
-        extracted = _normalize_extracted_df(extracted)
-
-        df_meta = pd.DataFrame(window_meta_list)
-        df_feature = df_meta.merge(extracted, on='window_id', how='left', validate='1:1')
-
-        factor_cols = [c for c in df_feature.columns if c not in ['window_id', 'time', 'instrument_id']]
-        if not factor_cols:
-            raise ValueError('No factor columns were generated by tsfresh.')
-
-        if selected_fc_names is not None:
-            requested_fc_names = list(selected_fc_names)
-            unresolved = selected_extraction_failed or any(col not in df_feature.columns for col in requested_fc_names)
-            if unresolved:
-                # Fallback to full extraction so base names (without explicit params)
-                # can be expanded into all matching parameter combinations.
-                extracted_full = extract_features(
-                    tsfresh_input,
-                    column_id='id',
-                    column_sort='time',
-                    column_kind='kind',
-                    column_value='value',
-                    default_fc_parameters=dict(fc_parameters),
-                    disable_progressbar=True,
-                    n_jobs=self.n_jobs,
-                )
-                extracted_full = _normalize_extracted_df(extracted_full)
-                df_feature = df_meta.merge(extracted_full, on='window_id', how='left', validate='1:1')
-
-            available_cols = [c for c in df_feature.columns if c not in ['window_id', 'time', 'instrument_id']]
-            resolved_fc_names = self._expand_requested_factor_names(
-                requested_fc_names,
-                available_cols,
-                separators=('__', '_'),
-            )
-
-            df_feature = df_feature[['time', 'instrument_id'] + resolved_fc_names].copy()
-            df_feature = df_feature.sort_values(['instrument_id', 'time']).reset_index(drop=True)
-            return df_feature
-
-        valid_cols = []
-        for col in factor_cols:
-            series = df_feature[col]
-            if series.isna().all():
-                continue
-            if series.nunique(dropna=True) <= 1:
-                continue
-            valid_cols.append(col)
-
-        if not valid_cols:
-            raise ValueError('All generated tsfresh features are empty/constant after filtering.')
-
-        if self.max_factor_count is not None and len(valid_cols) > self.max_factor_count:
-            valid_cols = valid_cols[:self.max_factor_count]
-
-        df_feature = df_feature[['time', 'instrument_id'] + valid_cols].copy()
-        df_feature = df_feature.sort_values(['instrument_id', 'time']).reset_index(drop=True)
-
-        return df_feature
-
-    def generate(self,
-                 selected_fc_name_list: Optional[List[str]] = None) -> pd.DataFrame:
-        base_df = self.load_base_data()
-        factor_df = self.generate_factor_df(base_df, selected_fc_names=selected_fc_name_list)
-        return self._finalize_generated_data(base_df, factor_df)
-
-
 class LLMPromptFactorGenerator(FactorGenerator):
-    """Factor generator using LLM prompt-based factor synthesis."""
+    """LLM-based formula generator. LLM outputs formulas, not class code."""
 
     method: str = 'llm_prompt'
 
@@ -1058,6 +707,7 @@ class LLMPromptFactorGenerator(FactorGenerator):
                  rolling_norm_min_periods: int = 20,
                  rolling_norm_eps: float = 1e-8,
                  rolling_norm_clip: float = 10.0,
+                 check_leakage_count: int = 30,
                  model_name: str = 'deepseek',
                  llm_temperature: float = 0.7,
                  llm_factor_count: int = 5,
@@ -1084,6 +734,7 @@ class LLMPromptFactorGenerator(FactorGenerator):
             rolling_norm_min_periods=rolling_norm_min_periods,
             rolling_norm_eps=rolling_norm_eps,
             rolling_norm_clip=rolling_norm_clip,
+            check_leakage_count=check_leakage_count,
             version=version,
         )
         self.model_name = model_name
@@ -1094,7 +745,6 @@ class LLMPromptFactorGenerator(FactorGenerator):
 
     @staticmethod
     def get_llm(temperature: float = 0.7, model_name: Optional[str] = None):
-        """Load chat LLM instance for prompt-based factor generation."""
         model_name = model_name or 'deepseek'
         if model_name != 'deepseek':
             raise ValueError(f'Unsupported model_name: {model_name}.')
@@ -1116,36 +766,33 @@ class LLMPromptFactorGenerator(FactorGenerator):
             base_url=deepseek_base_url,
         )
 
-    def _build_llm_few_shot_prompt(self, factor_count: int) -> str:
-        example_code = (
-            "class fac_winrate:\n"
-            "    param_range = {'a': [10, 20, 30]}\n\n"
-            "    @staticmethod\n"
-            "    def operate(Data: pd.DataFrame, **kwargs):\n"
-            "        hash_tb = {chr(i): 0 for i in range(97, 123)}\n"
-            "        for key, value in kwargs.items():\n"
-            "            hash_tb[key] = value\n"
-            "        a = int(hash_tb['a'])\n\n"
-            "        df = Data.copy()\n"
-            "        df['ret'] = df['close'].pct_change()\n"
-            "        df['win_ratio'] = (df['ret'] > 0) * 1\n"
-            "        df['win_ratio'] = df['win_ratio'].rolling(a).mean()\n\n"
-            "        return df['win_ratio']\n"
+    def _build_llm_formula_prompt(self, factor_count: int, existing_formulas: Optional[List[str]] = None) -> str:
+        ops_text = available_operator_prompt_text()
+        few_shot = (
+            '示例1:\n'
+            '{"formula": "TsRank(Div(Sub(close, open), open), 10)", "logic": "价格强弱滚动分位"}\n'
+            '示例2:\n'
+            '{"formula": "TsCorr(TsPctDelta(close, 1), TsPctDelta(volume, 1), 20)", "logic": "量价共振相关"}\n'
+            '示例3:\n'
+            '{"formula": "Sub(TsMean(Div(close, open), 5), TsMean(Div(close, open), 20))", "logic": "短长窗口价差"}'
         )
+        existing_text = ''
+        if existing_formulas:
+            existing_text = f"\n已生成公式（请勿重复）：{existing_formulas}"
+
         return (
-            '你是量化研究助理。'
-            '请用 Python 生成简单的期货日频因子类。'
-            '输出必须是严格 JSON，格式如下：'
-            '{"factors": [{"fc_name": "fac_xxx", "code": "class fac_xxx: ..."}, ...]}。'
-            '规则：'
-            '1）fc_name 必须以 fac_ 开头。'
-            '2）class 代码必须包含 param_range(dict) 和 @staticmethod operate(Data: pd.DataFrame, **kwargs)。'
-            '3）operate 只能使用历史/当前行，禁止未来函数（例如 shift(-k)）。'
-            '4）因子逻辑基于 open/high/low/close/volume/position这些量价字段。'
-            f'5）必须返回且仅返回 {factor_count} 个因子。'
-            '6）不要输出 markdown 代码块或额外解释。'
-            f'Few-shot 示例：\n{example_code}\n'
-            f'额外需求：{self.llm_user_requirement}'
+            '你是期货量化研究助理。请只输出可执行的因子公式。\n'
+            f'{ops_text}\n'
+            '输出必须为严格 JSON，格式：'
+            '{"factors": [{"formula": "...", "logic": "..."}, ...]}\n'
+            '规则：\n'
+            '1) 只能使用上述算子和字段 open/high/low/close/volume/position。\n'
+            '2) 禁止未来函数，不要构造任何使用未来数据的表达式。\n'
+            '3) 窗口参数必须是正整数常量。\n'
+            f'4) 必须返回且仅返回 {factor_count} 条公式。\n'
+            '5) 不要输出 markdown 代码块，不要输出 JSON 以外文本。\n'
+            f'6) 用户需求：{self.llm_user_requirement}\n'
+            f'Few-shot:\n{few_shot}{existing_text}'
         )
 
     @staticmethod
@@ -1158,117 +805,22 @@ class LLMPromptFactorGenerator(FactorGenerator):
             raise ValueError('Failed to parse JSON from LLM output.')
         return match.group(0)
 
-    @staticmethod
-    def _first_parameter(param_range: dict) -> dict:
-        if not param_range:
-            return {}
-        first_param = {}
-        for k, v in param_range.items():
-            if isinstance(v, list) and len(v) > 0:
-                first_param[k] = v[0]
-            else:
-                raise ValueError(f'Invalid param_range for key `{k}`: {v}')
-        return first_param
-
-    def _validate_llm_factor_class(self, fc_name: str, code: str, sample_df: pd.DataFrame):
-        ast.parse(code)
-        local_ns: Dict[str, object] = {}
-        exec(code, {'pd': pd, 'np': np}, local_ns)
-        fc_class = cast(Any, local_ns.get(fc_name))
-        if fc_class is None or not isinstance(fc_class, type):
-            raise ValueError(f'LLM code does not define class `{fc_name}`.')
-        if not hasattr(fc_class, 'param_range'):
-            raise ValueError(f'Factor class `{fc_name}` missing param_range.')
-        if not hasattr(fc_class, 'operate'):
-            raise ValueError(f'Factor class `{fc_name}` missing operate method.')
-
-        first_param = self._first_parameter(fc_class.param_range)
-        output = fc_class.operate(sample_df.copy(), **first_param)
-        if output is None:
-            raise ValueError(f'Factor class `{fc_name}` returned None.')
-        output_series = pd.Series(output)
-        if len(output_series) != len(sample_df):
-            raise ValueError(
-                f'Factor class `{fc_name}` output length mismatch: {len(output_series)} vs {len(sample_df)}'
-            )
-        return fc_class
-
-    @staticmethod
-    def _save_valid_llm_factor_code(valid_factor_items: List[Tuple[str, str]]):
-        file_path = Path(__file__).resolve().parent / 'factor_from_llm.py'
-        if file_path.exists():
-            existing = file_path.read_text(encoding='utf-8')
-        else:
-            existing = '"""LLM-generated factors."""\nimport pandas as pd\nimport numpy as np\n\n'
-
-        append_blocks = []
-        for fc_name, code in valid_factor_items:
-            if f'class {fc_name}' in existing:
-                continue
-            append_blocks.append(f'\n\n{code.strip()}\n')
-
-        if append_blocks:
-            file_path.write_text(existing + ''.join(append_blocks), encoding='utf-8')
-        return file_path
-
-    @staticmethod
-    def _load_all_llm_factor_classes() -> Dict[str, Any]:
-        module = importlib.import_module('factors.factor_from_llm')
-        module = importlib.reload(module)
-        fc_class_map = {}
-        for name, obj in vars(module).items():
-            if name.startswith('fac_') and isinstance(obj, type) and hasattr(obj, 'param_range') and hasattr(obj, 'operate'):
-                fc_class_map[name] = obj
-        if not fc_class_map:
-            raise ValueError('No valid factor classes found in factors/factor_from_llm.py.')
-        return fc_class_map
-
-    def _compute_factor_df_from_classes(self,
-                                        df: pd.DataFrame,
-                                        fc_class_map: Dict[str, Any],
-                                        selected_fc_names: Optional[List[str]] = None) -> pd.DataFrame:
-        out_df = df[['time', 'instrument_id']].copy().reset_index(drop=True)
-
-        column_mapping: Dict[str, Tuple[str, dict]] = {}
-        for fc_name, fc_class in fc_class_map.items():
-            for parameter in iterdict(fc_class.param_range):
-                col_name = join_fc_name_and_parameter(fc_name, parameter)
-                column_mapping[col_name] = (fc_name, parameter)
-
-        if selected_fc_names is not None:
-            target_columns = self._expand_requested_factor_names(
-                selected_fc_names,
-                list(column_mapping.keys()),
-                separators=('_',),
-            )
-        else:
-            target_columns = list(column_mapping.keys())
-
-        grouped_indices = df.groupby('instrument_id', sort=False).groups
-        for col_name in target_columns:
-            if col_name not in column_mapping:
-                raise ValueError(f'Factor column `{col_name}` is not defined by available LLM factors.')
-            fc_name, parameter = column_mapping[col_name]
-            fc_class = fc_class_map[fc_name]
-            col_values = pd.Series(np.nan, index=df.index, dtype=float)
-            for _, idx in grouped_indices.items():
-                idx_list = list(idx)
-                df_i = df.loc[idx_list].copy().reset_index(drop=True)
-                signal = fc_class.operate(df_i, **parameter)
-                signal = pd.Series(signal).reset_index(drop=True)
-                if len(signal) != len(df_i):
-                    raise ValueError(f'Factor `{fc_name}` generated invalid length for parameter {parameter}.')
-                col_values.loc[idx_list] = signal.values
-            out_df[col_name] = col_values.values
-
-        return out_df.sort_values(['instrument_id', 'time']).reset_index(drop=True)
+    def _validate_llm_formula(self, formula: str, sample_df: pd.DataFrame) -> None:
+        _ = calc_formula_series(sample_df, formula=formula, data_fields=self.base_col_list)
 
     def generate_factor_df(self,
                            df: pd.DataFrame,
                            selected_fc_names: Optional[List[str]] = None) -> pd.DataFrame:
         if selected_fc_names is not None:
-            fc_class_map = self._load_all_llm_factor_classes()
-            return self._compute_factor_df_from_classes(df, fc_class_map, selected_fc_names=selected_fc_names)
+            formula_map = get_latest_factor_formula_map(
+                fc_name_list=selected_fc_names,
+                collections=['llm_prompt'],
+                database='factors',
+            )
+            missing = [x for x in selected_fc_names if x not in formula_map]
+            if missing:
+                raise ValueError(f'LLM formulas not found in DB for factors: {missing}')
+            return calc_formula_df(df=df, formula_map={k: formula_map[k] for k in selected_fc_names}, data_fields=self.base_col_list)
 
         llm = self.get_llm(temperature=self.llm_temperature, model_name=self.model_name)
         target_factor_count = self.max_factor_count if self.max_factor_count is not None else self.llm_factor_count
@@ -1277,21 +829,16 @@ class LLMPromptFactorGenerator(FactorGenerator):
 
         max_rounds = max(3, int(np.ceil(target_factor_count / max(1, self.llm_factor_count))) * 3)
         sample_df = df.groupby('instrument_id', sort=False).head(max(30, self.min_window_size)).copy()
-        valid_code_map: Dict[str, str] = {}
-        fc_class_map: Dict[str, Any] = {}
+        valid_formula_list: List[str] = []
         no_growth_rounds = 0
-        early_stopped = False
 
         for round_idx in range(max_rounds):
-            if len(fc_class_map) >= target_factor_count:
+            if len(valid_formula_list) >= target_factor_count:
                 break
 
-            remaining = target_factor_count - len(fc_class_map)
+            remaining = target_factor_count - len(valid_formula_list)
             this_round_count = min(max(1, self.llm_factor_count), remaining)
-            prompt = self._build_llm_few_shot_prompt(this_round_count)
-            if valid_code_map:
-                existing_names = ', '.join(valid_code_map.keys())
-                prompt += f'\n已生成的因子名（请勿重复）：{existing_names}'
+            prompt = self._build_llm_formula_prompt(this_round_count, existing_formulas=valid_formula_list)
 
             try:
                 response = llm.invoke(prompt)
@@ -1303,76 +850,49 @@ class LLMPromptFactorGenerator(FactorGenerator):
 
             factors = payload.get('factors', [])
             if not isinstance(factors, list) or not factors:
-                log.warning(f'Round {round_idx + 1}/{max_rounds}: empty factors in LLM output.')
+                no_growth_rounds += 1
                 continue
 
-            prev_valid_count = len(fc_class_map)
+            prev_count = len(valid_formula_list)
             for item in factors:
                 if not isinstance(item, dict):
-                    log.warning(
-                        f'Round {round_idx + 1}/{max_rounds}: skip factor item because it is not a dict: {type(item).__name__}'
-                    )
                     continue
-
-                fc_name = item.get('fc_name')
-                code = item.get('code')
-                if not isinstance(fc_name, str) or not fc_name.startswith('fac_'):
-                    log.warning(
-                        f'Round {round_idx + 1}/{max_rounds}: skip factor due to invalid fc_name={fc_name!r}. '
-                        'Expected string starting with `fac_`.'
-                    )
+                formula = item.get('formula')
+                if not isinstance(formula, str):
                     continue
-                if fc_name in valid_code_map:
-                    log.warning(
-                        f'Round {round_idx + 1}/{max_rounds}: skip duplicated factor name `{fc_name}`.'
-                    )
-                    continue
-                if not isinstance(code, str) or f'class {fc_name}' not in code:
-                    log.warning(
-                        f'Round {round_idx + 1}/{max_rounds}: skip `{fc_name}` due to invalid code content. '
-                        f'Need string containing `class {fc_name}`.'
-                    )
+                formula = formula.strip()
+                if not formula or formula in valid_formula_list:
                     continue
                 try:
-                    fc_class = self._validate_llm_factor_class(fc_name, code, sample_df)
+                    self._validate_llm_formula(formula, sample_df)
                 except Exception as e:
-                    log.warning(f'Skip invalid LLM factor `{fc_name}`: {e}')
+                    log.warning(f'Skip invalid LLM formula `{formula}`: {e}')
                     continue
-                valid_code_map[fc_name] = code
-                fc_class_map[fc_name] = fc_class
-                if len(fc_class_map) >= target_factor_count:
+                valid_formula_list.append(formula)
+                if len(valid_formula_list) >= target_factor_count:
                     break
 
-            added_count_this_round = len(fc_class_map) - prev_valid_count
-            if added_count_this_round <= 0:
+            if len(valid_formula_list) == prev_count:
                 no_growth_rounds += 1
             else:
                 no_growth_rounds = 0
 
-            log.info(f'Round {round_idx + 1}/{max_rounds}: got {len(factors)} factors, {len(fc_class_map)} valid so far.')
-
             if 0 < self.llm_early_stopping_round <= no_growth_rounds:
-                early_stopped = True
                 log.warning(
-                    f'LLM early stop triggered: no valid-factor growth for {no_growth_rounds} consecutive rounds. '
-                    f'Current valid factors: {len(fc_class_map)} / target {target_factor_count}.'
+                    f'LLM early stop triggered after {no_growth_rounds} non-growth rounds. '
+                    f'valid_formula_count={len(valid_formula_list)} / target={target_factor_count}'
                 )
                 break
 
-        if not fc_class_map:
-            raise ValueError('No valid factors generated by LLM prompt.')
-        if len(fc_class_map) < target_factor_count:
-            stop_reason = 'early_stop' if early_stopped else 'max_rounds_reached'
-            log.warning(
-                f'LLM generation ended early: got {len(fc_class_map)} valid factors, '
-                f'less than target {target_factor_count} after {max_rounds} rounds. '
-                f'stop_reason={stop_reason}.'
-            )
+        if not valid_formula_list:
+            raise ValueError('No valid formulas generated by LLM prompt.')
 
-        valid_items = [(name, valid_code_map[name]) for name in fc_class_map.keys()]
-        self.generated_factor_code_map = {name: code for name, code in valid_items}
-        self._save_valid_llm_factor_code(valid_items)
-        return self._compute_factor_df_from_classes(df, fc_class_map)
+        self.factor_formula_map = {
+            f'fac_llm_prompt_{idx + 1:04d}': formula
+            for idx, formula in enumerate(valid_formula_list)
+        }
+        self.factor_fitness_map = {}
+        return calc_formula_df(df=df, formula_map=self.factor_formula_map, data_fields=self.base_col_list)
 
     def generate(self,
                  selected_fc_name_list: Optional[List[str]] = None) -> pd.DataFrame:
@@ -1406,6 +926,7 @@ class GeneticFactorGenerator(FactorGenerator):
                  rolling_norm_min_periods: int = 20,
                  rolling_norm_eps: float = 1e-8,
                  rolling_norm_clip: float = 5.0,
+                 check_leakage_count: int = 30,
                  version: Optional[str] = None,
                  gp_generations: int = 50,
                  gp_population_size: int = 200,
@@ -1425,32 +946,6 @@ class GeneticFactorGenerator(FactorGenerator):
                  gp_depth_penalty_linear_coef: float = 0.0,
                  gp_depth_penalty_quadratic_coef: float = 0.0,
                  gp_log_interval: int = 5):
-        """
-        - `rolling_norm_clip`: limit the max weighted position
-        Genetic programming key controls:
-        - `max_factor_count`: keep top-N candidates after full evolution.
-        - `gp_generations`: number of evolution iterations.
-        - `gp_population_size`: number of individuals per generation.
-        - `gp_max_depth`: max AST depth to limit formula complexity.
-        - `gp_elite_size`: top-K individuals copied directly to next generation.
-        - `gp_tournament_size`: candidate pool size in tournament selection.
-        - `gp_crossover_prob` / `gp_mutation_prob`: probabilities for genetic operators.
-        - `gp_leaf_prob`: probability to stop expanding and create a leaf node.
-        - `gp_const_prob`: probability of using constant leaves vs data-field leaves.
-        - `gp_window_choices`: allowed rolling windows for time-series operators.
-        - `fitness_metric`: objective for evolution, currently `ic` or `sharpe`.
-        - `random_seed`: random seed for reproducible evolution.
-        - `gp_early_stopping_generation_count`: stop evolution early when round_best
-          has not improved for this many consecutive generations. <=0 disables early stop.
-        - `gp_depth_penalty_coef`: base depth regularization coefficient.
-          base_penalty = gp_depth_penalty_coef * tree_depth.
-        - `gp_depth_penalty_start_depth`: dynamic penalty starts after this depth.
-        - `gp_depth_penalty_linear_coef`: linear dynamic penalty slope.
-        - `gp_depth_penalty_quadratic_coef`: quadratic dynamic penalty slope.
-          total_penalty = base_penalty + linear_coef * extra_depth + quadratic_coef * extra_depth^2,
-          where extra_depth = max(tree_depth - start_depth, 0).
-        - `gp_log_interval`: log progress every N generations.
-        """
         super().__init__(
             instrument_type=instrument_type,
             instrument_id_list=instrument_id_list,
@@ -1471,26 +966,20 @@ class GeneticFactorGenerator(FactorGenerator):
             rolling_norm_min_periods=rolling_norm_min_periods,
             rolling_norm_eps=rolling_norm_eps,
             rolling_norm_clip=rolling_norm_clip,
+            check_leakage_count=check_leakage_count,
             version=version,
         )
 
-        # Evolution loop controls
         self.gp_generations = gp_generations
         self.gp_population_size = gp_population_size
         self.gp_max_depth = gp_max_depth
-
-        # Selection and reproduction controls
         self.gp_elite_size = gp_elite_size
         self.gp_tournament_size = gp_tournament_size
         self.gp_crossover_prob = gp_crossover_prob
         self.gp_mutation_prob = gp_mutation_prob
-
-        # Tree-shape / primitive sampling controls
         self.gp_leaf_prob = gp_leaf_prob
         self.gp_const_prob = gp_const_prob
         self.gp_window_choices = list(gp_window_choices) if gp_window_choices else [5, 10, 20]
-
-        # Objective and reproducibility controls
         self.fitness_metric = fitness_metric
         self.random_seed = random_seed
         self.gp_early_stopping_generation_count = int(gp_early_stopping_generation_count)
@@ -1501,8 +990,6 @@ class GeneticFactorGenerator(FactorGenerator):
         self.gp_log_interval = gp_log_interval
 
         self.factor_tree_map: Dict[str, Any] = {}
-        self.factor_formula_map: Dict[str, str] = {}
-        self.factor_fitness_map: Dict[str, Dict[str, Dict[str, float]]] = {}
 
         assert self.fitness_metric in ['ic', 'sharpe'], \
             f'Unsupported fitness_metric={self.fitness_metric}, use ic/sharpe.'
@@ -1525,19 +1012,10 @@ class GeneticFactorGenerator(FactorGenerator):
     def _build_factor_df_from_candidates(self,
                                          df_eval: pd.DataFrame,
                                          candidates: List[GPCandidate]) -> pd.DataFrame:
-        start_at = datetime.now()
-        candidate_count = len(candidates)
-        log.info(
-            'Build factor dataframe from GP candidates started: '
-            f'candidate_count={candidate_count}, df_rows={len(df_eval)}, fitness_metric={self.fitness_metric}'
-        )
-
         factor_df = df_eval[['time', 'instrument_id']].copy()
         self.factor_tree_map = {}
         self.factor_formula_map = {}
         self.factor_fitness_map = {}
-
-        progress_interval = max(1, int(candidate_count / 10)) if candidate_count > 0 else 1
 
         for idx, cand in enumerate(candidates, start=1):
             fc_name = f'fac_gp_{idx:04d}'
@@ -1552,20 +1030,6 @@ class GeneticFactorGenerator(FactorGenerator):
                     'penalized': float(cand.penalized_fitness),
                 }
             }
-
-            if idx == 1 or idx % progress_interval == 0 or idx == candidate_count:
-                log.info(
-                    'Build factor dataframe progress: '
-                    f'{idx}/{candidate_count}, latest_fc_name={fc_name}'
-                )
-
-        elapsed_sec = (datetime.now() - start_at).total_seconds()
-        log.info(
-            'Build factor dataframe from GP candidates finished: '
-            f'built_factor_count={candidate_count}, output_columns={len(factor_df.columns)}, '
-            f'elapsed_sec={elapsed_sec:.2f}'
-        )
-
         return factor_df
 
     def generate_factor_df(self,
@@ -1574,34 +1038,28 @@ class GeneticFactorGenerator(FactorGenerator):
         df_eval = self._prepare_df_for_gp(df)
 
         if selected_fc_names is not None:
-            if not self.factor_tree_map:
-                raise ValueError('No GP factor tree cache found. Please run generate() first for this object.')
-            resolved_names = self._expand_requested_factor_names(
-                selected_fc_names,
-                list(self.factor_tree_map.keys()),
-                separators=('_',),
+            if self.factor_tree_map:
+                factor_df = df_eval[['time', 'instrument_id']].copy()
+                for fc_name in selected_fc_names:
+                    if fc_name not in self.factor_tree_map:
+                        raise ValueError(f'Factor `{fc_name}` is not available in current GP cache.')
+                    signal = self.factor_tree_map[fc_name].calc(df_eval)
+                    factor_df[fc_name] = pd.to_numeric(signal, errors='coerce').values
+                return factor_df
+
+            formula_map = get_latest_factor_formula_map(
+                fc_name_list=selected_fc_names,
+                collections=['genetic_programming'],
+                database='factors',
             )
-            factor_df = df_eval[['time', 'instrument_id']].copy()
-            for fc_name in resolved_names:
-                signal = self.factor_tree_map[fc_name].calc(df_eval)
-                factor_df[fc_name] = pd.to_numeric(signal, errors='coerce').values
-            return factor_df
+            missing = [x for x in selected_fc_names if x not in formula_map]
+            if missing:
+                raise ValueError(f'GP formulas not found in DB for factors: {missing}')
+            return calc_formula_df(df=df_eval, formula_map={k: formula_map[k] for k in selected_fc_names}, data_fields=self.base_col_list)
 
         limit = int(self.max_factor_count or 0)
         if limit <= 0:
             raise ValueError('max_factor_count must be positive for genetic programming.')
-
-        log.info(
-            f'GeneticFactorGenerator generate start: instrument_id_list={self.instrument_id_list}, '
-            f'start_time={self.start_time}, end_time={self.end_time}, max_factor_count={limit}, '
-            f'fitness_metric={self.fitness_metric}, gp_generations={self.gp_generations}, '
-            f'gp_population_size={self.gp_population_size}, '
-            f'gp_early_stopping_generation_count={self.gp_early_stopping_generation_count}, '
-            f'gp_depth_penalty_coef={self.gp_depth_penalty_coef}, '
-            f'gp_depth_penalty_start_depth={self.gp_depth_penalty_start_depth}, '
-            f'gp_depth_penalty_linear_coef={self.gp_depth_penalty_linear_coef}, '
-            f'gp_depth_penalty_quadratic_coef={self.gp_depth_penalty_quadratic_coef}'
-        )
 
         candidates = run_gp_evolution(
             df=df_eval,
@@ -1634,7 +1092,6 @@ class GeneticFactorGenerator(FactorGenerator):
 
         if not candidates:
             raise ValueError('Genetic programming produced no valid candidates.')
-        log.info(f'GeneticFactorGenerator generate finished: candidate_count={len(candidates)}')
         return self._build_factor_df_from_candidates(df_eval, candidates)
 
     def generate(self,
@@ -1643,324 +1100,4 @@ class GeneticFactorGenerator(FactorGenerator):
         factor_df = self.generate_factor_df(base_df, selected_fc_names=selected_fc_name_list)
         return self._finalize_generated_data(base_df, factor_df)
 
-    def auto_mine_select_and_save_fc(self,
-                                     filter_indicator_dict: Dict[str, Tuple[float, float, int]],
-                                     save_dir: Optional[Union[str, Path]] = None,
-                                     n_jobs: Optional[int] = None,
-                                     require_all_row: bool = True,
-                                     require_all_instruments: bool = True) -> dict:
-        result = super().auto_mine_select_and_save_fc(
-            filter_indicator_dict=filter_indicator_dict,
-            save_dir=save_dir,
-            n_jobs=n_jobs,
-            require_all_row=require_all_row,
-            require_all_instruments=require_all_instruments,
-        )
-        update_factor_info(
-            selected_fc_name_list=result.get('selected_fc_name_list', []),
-            performance_summary=result.get('bt').performance_summary if result.get('bt') is not None else None,
-            factor_formula_map=self.factor_formula_map,
-            factor_fitness_map=self.factor_fitness_map,
-            instrument_id_list=self.instrument_id_list,
-            method=self.method,
-            version=self.version,
-            start_date=self.start_time,
-            end_date=self.end_time,
-        )
-        return result
-
-
-class FactorFusioner:
-    """
-    Fuse factors from saved configs (tsfresh + llm_prompt) by version.
-
-    Current supported fusion strategy:
-    - average_weight: equal-weight average of all loaded factor columns.
-    """
-
-    def __init__(self,
-                 version_list: Union[str, List[str]],
-                 fusion_strategy: str = 'average_weight',
-                 fused_fc_name_suffix: Optional[str] = None,
-                 instrument_type: str = 'futures_continuous_contract',
-                 instrument_id_list: Union[str, List[str]] = 'C0',
-                 fc_freq: str = '1d',
-                 data: Optional[pd.DataFrame] = None,
-                 start_time: Optional[str] = None,
-                 end_time: Optional[str] = None,
-                 portfolio_adjust_method: str = '1D',
-                 interest_method: str = 'compound',
-                 risk_free_rate: bool = False,
-                 calculate_baseline: bool = False,
-                 n_jobs: int = 5,
-                 base_col_list: Optional[Sequence[str]] = None,
-                 min_window_size: int = 30,
-                 apply_rolling_norm: bool = True,  # 融合前的每个因子是否进行rolling norm
-                 apply_rolling_norm_after_fusion: bool = False,  # 融合后的因子是否再次rolling norm
-                 rolling_norm_window: int = 30,
-                 rolling_norm_min_periods: int = 20,
-                 rolling_norm_eps: float = 1e-8,
-                 rolling_norm_clip: float = 10.0):
-        self.version_list = [version_list] if isinstance(version_list, str) else list(version_list)
-        self.fusion_strategy = fusion_strategy
-        self.instrument_type = instrument_type
-        self.instrument_id_list = [instrument_id_list] if isinstance(instrument_id_list, str) else list(instrument_id_list)
-        self.fc_freq = fc_freq
-        self.data = data
-        self.start_time = start_time
-        self.end_time = end_time
-        self.portfolio_adjust_method = portfolio_adjust_method
-        self.interest_method = interest_method
-        self.risk_free_rate = risk_free_rate
-        self.calculate_baseline = calculate_baseline
-        self.n_jobs = n_jobs
-
-        # Keep generator-related knobs so fused run stays consistent with source factor generation.
-        self.base_col_list = list(base_col_list) if base_col_list else ['open', 'high', 'low', 'close', 'volume', 'position']
-        self.min_window_size = min_window_size
-        self.apply_rolling_norm = apply_rolling_norm
-        self.apply_rolling_norm_after_fusion = apply_rolling_norm_after_fusion
-        self.rolling_norm_window = rolling_norm_window
-        self.rolling_norm_min_periods = rolling_norm_min_periods
-        self.rolling_norm_eps = rolling_norm_eps
-        self.rolling_norm_clip = rolling_norm_clip
-
-        self.generated_data: Optional[pd.DataFrame] = None
-        self.generated_fc_name_list: List[str] = []
-        self.bt: Optional[BackTester] = None
-        self.loaded_config_info_list: List[Dict[str, Any]] = []
-        self.fused_fc_name_suffix = fused_fc_name_suffix
-        self.raw_fc_value = None
-        if self.fused_fc_name_suffix:
-            self.fused_fc_name = f'fac_fusion_{self.fusion_strategy}_{self.fused_fc_name_suffix}'
-        else:
-            now_text = datetime.now().strftime('%Y%m%d_%H%M%S')
-            date_text, time_text = now_text.split('_')
-            self.fused_fc_name = f'fac_fusion_{self.fusion_strategy}_{date_text}_{time_text}'
-
-        if not self.version_list:
-            raise ValueError('version_list is empty.')
-        supported_fusion_strategy = {'average_weight'}
-        if self.fusion_strategy not in supported_fusion_strategy:
-            raise ValueError(
-                f'Unsupported fusion_strategy: {self.fusion_strategy}. '
-                f'Supported: {sorted(supported_fusion_strategy)}'
-            )
-
-    def _apply_fusion_strategy(self,
-                               merged_factor_df: pd.DataFrame,
-                               factor_cols: List[str]) -> pd.Series:
-        """Apply selected fusion strategy on source factor columns."""
-        if self.fusion_strategy == 'average_weight':
-            return merged_factor_df[factor_cols].mean(axis=1, skipna=True)
-
-        raise ValueError(f'Unsupported fusion_strategy: {self.fusion_strategy}.')
-
-    @staticmethod
-    def _config_dir_by_method(method: str) -> Path:
-        if method == 'tsfresh':
-            return Path(__file__).resolve().parent / 'fc_from_tsfresh'
-        if method == 'llm_prompt':
-            return Path(__file__).resolve().parent / 'fc_from_llm'
-        raise ValueError(f'Unsupported method: {method}')
-
-    @staticmethod
-    def _config_stem_by_method(method: str) -> str:
-        if method == 'tsfresh':
-            return 'tsfresh_fc'
-        if method == 'llm_prompt':
-            return 'llm_fc'
-        raise ValueError(f'Unsupported method: {method}')
-
-    def _load_config_payload(self, config_path: Path) -> Dict[str, Any]:
-        with open(config_path, 'r', encoding='utf-8') as f:
-            payload = json.load(f)
-        if not isinstance(payload, dict):
-            raise ValueError(f'Invalid config format: {config_path}')
-        fc_name_list = payload.get('fc_name_list', [])
-        if not isinstance(fc_name_list, list) or not fc_name_list:
-            raise ValueError(f'Invalid config file: {config_path}. Missing non-empty fc_name_list.')
-        return payload
-
-    def _load_configs_by_versions(self) -> List[Dict[str, Any]]:
-        config_info_list: List[Dict[str, Any]] = []
-        for version in self.version_list:
-            missing_methods = []
-            for method in ['tsfresh', 'llm_prompt']:
-                config_dir = self._config_dir_by_method(method)
-                config_stem = self._config_stem_by_method(method)
-                config_path = config_dir / f'{config_stem}_{version}.json'
-                if not config_path.exists():
-                    missing_methods.append(method)
-                    continue
-                payload = self._load_config_payload(config_path)
-                config_info_list.append({
-                    'version': version,
-                    'method': method,
-                    'config_path': config_path,
-                    'fc_name_list': list(payload['fc_name_list']),
-                })
-
-            if missing_methods:
-                expected_tsfresh_path = (
-                    self._config_dir_by_method('tsfresh') /
-                    f'{self._config_stem_by_method("tsfresh")}_{version}.json'
-                )
-                expected_llm_path = (
-                    self._config_dir_by_method('llm_prompt') /
-                    f'{self._config_stem_by_method("llm_prompt")}_{version}.json'
-                )
-                raise FileNotFoundError(
-                    f'Incomplete config set for version={version}. Missing methods: {missing_methods}. '
-                    f'Expected files: {expected_tsfresh_path} and {expected_llm_path}.'
-                )
-        return config_info_list
-
-    def _build_generator(self, method: str) -> FactorGenerator:
-        common_kwargs = {
-            'instrument_type': self.instrument_type,
-            'instrument_id_list': self.instrument_id_list,
-            'fc_freq': self.fc_freq,
-            'data': self.data,
-            'start_time': self.start_time,
-            'end_time': self.end_time,
-            'portfolio_adjust_method': self.portfolio_adjust_method,
-            'interest_method': self.interest_method,
-            'risk_free_rate': self.risk_free_rate,
-            'calculate_baseline': self.calculate_baseline,
-            'n_jobs': self.n_jobs,
-            'base_col_list': self.base_col_list,
-            'min_window_size': self.min_window_size,
-            'apply_rolling_norm': self.apply_rolling_norm,
-            'rolling_norm_window': self.rolling_norm_window,
-            'rolling_norm_min_periods': self.rolling_norm_min_periods,
-            'rolling_norm_eps': self.rolling_norm_eps,
-            'rolling_norm_clip': self.rolling_norm_clip,
-        }
-        if method == 'tsfresh':
-            return TsfreshFactorGenerator(**common_kwargs)
-        if method == 'llm_prompt':
-            return LLMPromptFactorGenerator(**common_kwargs)
-        raise ValueError(f'Unsupported method in fusion: {method}')
-
-    def generate(self) -> pd.DataFrame:
-        """
-        Generate fused factor values from all factors referenced by version_list.
-        """
-        config_info_list = self._load_configs_by_versions()
-        self.loaded_config_info_list = config_info_list
-
-        # 用于得到基准的base_df
-        data_generator = self._build_generator(method='tsfresh')
-        base_df = data_generator.load_base_data()
-        df_with_ret = get_future_ret(
-            base_df[['time', 'instrument_id', 'open', 'high', 'low', 'close', 'volume', 'position']].copy(),
-            portfolio_adjust_method=self.portfolio_adjust_method,
-            rfr=self.risk_free_rate,
-        )
-        df_with_ret = df_with_ret[['time', 'instrument_id', 'future_ret']].copy()
-
-        merged_factor_df = base_df[['time', 'instrument_id']].copy()
-        all_factor_cols: List[str] = []
-
-        for config_info in config_info_list:
-            method = cast(str, config_info['method'])
-            fc_name_list = cast(List[str], config_info['fc_name_list'])
-
-            generator = self._build_generator(method=method)
-            factor_df_i = generator.generate_factor_df(base_df, selected_fc_names=fc_name_list)
-
-            if generator.apply_rolling_norm:
-                factor_df_i = rolling_normalize_features(
-                    df=factor_df_i,
-                    factor_cols=list(fc_name_list),
-                    rolling_norm_window=generator.rolling_norm_window,
-                    rolling_norm_min_periods=generator.rolling_norm_min_periods,
-                    rolling_norm_eps=generator.rolling_norm_eps,
-                    rolling_norm_clip=generator.rolling_norm_clip,
-                    instrument_col='instrument_id',
-                )
-
-            # Avoid collisions across methods/versions by adding stable suffix.
-            version = cast(str, config_info['version'])
-            renamed_cols = {
-                c: f'{c}__{method}__{version}'
-                for c in fc_name_list
-                if c in factor_df_i.columns
-            }
-            factor_df_i = factor_df_i[['time', 'instrument_id'] + list(renamed_cols.keys())].rename(columns=renamed_cols)
-            all_factor_cols.extend(list(renamed_cols.values()))
-            merged_factor_df = merged_factor_df.merge(factor_df_i, on=['time', 'instrument_id'], how='left')
-
-        if not all_factor_cols:
-            raise ValueError('No factor columns loaded from version configs for fusion.')
-
-        # Fuse source factors according to selected strategy.
-        merged_factor_df[self.fused_fc_name] = self._apply_fusion_strategy(merged_factor_df, all_factor_cols)
-        merged_factor_df[self.fused_fc_name] = merged_factor_df[self.fused_fc_name].fillna(0.0)
-
-        if self.apply_rolling_norm_after_fusion:
-            # Reuse the same rolling normalization implementation for post-fusion processing.
-            norm_helper = self._build_generator(method='tsfresh')
-            merged_factor_df = rolling_normalize_features(
-                df=merged_factor_df,
-                factor_cols=[self.fused_fc_name],
-                rolling_norm_window=norm_helper.rolling_norm_window,
-                rolling_norm_min_periods=norm_helper.rolling_norm_min_periods,
-                rolling_norm_eps=norm_helper.rolling_norm_eps,
-                rolling_norm_clip=norm_helper.rolling_norm_clip,
-                instrument_col='instrument_id',
-            )
-
-        self.raw_fc_value = merged_factor_df
-        generated_data = df_with_ret.merge(
-            merged_factor_df[['time', 'instrument_id', self.fused_fc_name]],
-            on=['time', 'instrument_id'],
-            how='left',
-            validate='1:1',
-        )
-        generated_data = generated_data.sort_values(['instrument_id', 'time']).reset_index(drop=True)
-
-        self.generated_data = generated_data
-        self.generated_fc_name_list = [self.fused_fc_name]
-        log.info(
-            f'Generated fused factor `{self.fused_fc_name}` from {len(all_factor_cols)} source factors '
-            f'across {len(config_info_list)} configs.'
-        )
-        return generated_data
-
-    def backtest(self,
-                 data: Optional[pd.DataFrame] = None,
-                 fc_name_list: Optional[Union[str, List[str]]] = None,
-                 n_jobs: Optional[int] = None) -> BackTester:
-        """
-        Run backtest for fused factor result.
-        """
-        if data is None:
-            if self.generated_data is None:
-                raise ValueError('Please call generate() first, or pass `data` explicitly.')
-            data = self.generated_data
-
-        if fc_name_list is None:
-            fc_name_list = self.generated_fc_name_list
-        if not fc_name_list:
-            raise ValueError('fc_name_list is empty. Please specify factor columns for backtesting.')
-
-        bt = BackTester(
-            fc_name_list=fc_name_list,
-            instrument_type=self.instrument_type,
-            instrument_id_list=self.instrument_id_list,
-            fc_freq=self.fc_freq,
-            data=data,
-            start_time=self.start_time,
-            end_time=self.end_time,
-            portfolio_adjust_method=self.portfolio_adjust_method,
-            interest_method=self.interest_method,
-            risk_free_rate=self.risk_free_rate,
-            calculate_baseline=self.calculate_baseline,
-            n_jobs=n_jobs or self.n_jobs,
-        )
-        bt.backtest()
-        self.bt = bt
-        return bt
 

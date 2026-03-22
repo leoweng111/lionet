@@ -1,6 +1,12 @@
 import pandas as pd
+import sys
+from pathlib import Path
 
-from factors.factor_auto_search import FactorGenerator, TsfreshFactorGenerator
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from factors.factor_auto_search import GeneticFactorGenerator
 
 
 def build_mock_data(rows: int = 80) -> pd.DataFrame:
@@ -21,14 +27,17 @@ def build_mock_data(rows: int = 80) -> pd.DataFrame:
 
 if __name__ == '__main__':
     data = build_mock_data()
-    fg = TsfreshFactorGenerator(
+    fg = GeneticFactorGenerator(
         instrument_id_list='C0',
         data=data,
         fc_freq='1d',
         portfolio_adjust_method='1D',
         min_window_size=20,
-        max_factor_count=8,
-        tsfresh_profile='minimal',
+        max_factor_count=6,
+        gp_generations=3,
+        gp_population_size=16,
+        gp_elite_size=4,
+        gp_tournament_size=3,
         version='smoke_20260317_000000',
         n_jobs=1,
     )
@@ -37,28 +46,9 @@ if __name__ == '__main__':
     print('factor count:', len(fg.generated_fc_name_list))
 
     selected = fg.generated_fc_name_list[:2]
-    saved_path = fg.save_fc_value(selected, file_name='smoke_tsfresh_factor', file_format='csv')
+    saved_path = fg.save_fc_value(selected, file_name='smoke_gp_factor', file_format='csv')
     print('saved path:', saved_path)
 
-    fc_config_path = fg.save_fc(selected)
-    loaded_fc = FactorGenerator.load_fc(fc_config_path)
-    generated_subset = fg.generate_with_fc(loaded_fc)
-    print('saved fc config path:', fc_config_path)
-    print('generated subset shape:', generated_subset.shape)
-
-    bt2 = fg.backtest_from_fc_config(fc_config_path, n_jobs=1)
-    print('one-step backtest summary rows:', len(bt2.performance_summary))
-
-    auto_result = fg.auto_mine_select_and_save_fc(
-        filter_indicator_dict={
-            'Net Return': (-1.0, -1.0, 1),
-            'Net Sharpe': (-1.0, -1.0, 1),
-        },
-        n_jobs=1,
-        require_all_instruments=False,
-    )
-    print('auto selected factor count:', len(auto_result['selected_fc_name_list']))
-    print('auto config path:', auto_result['config_path'])
 
     leakage_check = fg.check_if_leakage(fc_name_list=selected, raise_error=True)
     print('leakage check:', leakage_check)

@@ -150,6 +150,7 @@ def main(argv: Optional[Sequence[str]] = None):
         require_all_row=args.require_all_row,
         require_all_instruments=args.require_all_instruments,
     )
+    print(f"[llm_prompt] config_ref={result.get('config_ref')}")
     print(f"[llm_prompt] config_path={result.get('config_path')}")
     print(f"[llm_prompt] selected_factor_count={len(result.get('selected_fc_name_list', []))}")
     return result

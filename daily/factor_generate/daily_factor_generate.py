@@ -1,4 +1,4 @@
-"""One-click daily factor generation for both tsfresh and llm_prompt.
+"""One-click daily factor generation for llm_prompt.
 
 Example:
     python daily/factor_generate/daily_factor_generate.py
@@ -15,7 +15,6 @@ if str(CURRENT_DIR) not in sys.path:
     sys.path.insert(0, str(CURRENT_DIR))
 
 from llm_prompt_factor_generate import run_llm_prompt_factor_generate
-from tsfresh_factor_generate import run_tsfresh_factor_generate
 
 
 def _parse_instrument_id(value: str):
@@ -24,13 +23,13 @@ def _parse_instrument_id(value: str):
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description='Run llm_prompt and tsfresh factor generation in one command.')
+    parser = argparse.ArgumentParser(description='Run llm_prompt factor generation in one command.')
     parser.add_argument('--instrument_id', type=str, default='C0',
                         help='One instrument id (C0) or comma-separated ids (C0,FG0).')
     parser.add_argument('--start_time', type=str, default='20200101', help='Backtest start time in YYYYMMDD.')
     parser.add_argument('--end_time', type=str, default='20241231', help='Backtest end time in YYYYMMDD.')
     parser.add_argument('--version', type=str, default=None,
-                        help='Config version suffix shared by both methods. Default: today YYYYMMDD.')
+                        help='Version suffix. Default: today YYYYMMDD.')
     parser.add_argument('--n_jobs', type=int, default=5)
 
     parser.add_argument('--portfolio_adjust_method', type=str, default='1D', choices=['min', '1D', '1M', '1Q'])
@@ -44,10 +43,6 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument('--rolling_norm_clip', type=float, default=10.0)
     parser.add_argument('--min_window_size', type=int, default=30)
 
-    parser.add_argument('--tsfresh_max_factor_count', type=int, default=20000)
-    parser.add_argument('--tsfresh_profile', type=str, default='minimal',
-                        choices=['minimal', 'efficient', 'comprehensive'])
-
     parser.add_argument('--llm_max_factor_count', type=int, default=50)
     parser.add_argument('--model_name', type=str, default='deepseek')
     parser.add_argument('--llm_temperature', type=float, default=0.7)
@@ -60,7 +55,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument('--require_all_row', action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument('--require_all_instruments', action=argparse.BooleanOptionalAction, default=True)
 
-    parser.add_argument('--only', type=str, default='all', choices=['all', 'tsfresh', 'llm_prompt'])
+    parser.add_argument('--only', type=str, default='llm_prompt', choices=['llm_prompt'])
     return parser
 
 
@@ -71,68 +66,38 @@ def main(argv: Optional[Sequence[str]] = None):
     args = build_parser().parse_args(argv)
     instrument_id = _parse_instrument_id(args.instrument_id)
     version = args.version or datetime.now().strftime('%Y%m%d')
-    ts_result = None
     llm_result = None
-
-    if args.only in ['all', 'tsfresh']:
-        ts_result = run_tsfresh_factor_generate(
-            instrument_id=instrument_id,
-            start_time=args.start_time,
-            end_time=args.end_time,
-            version=version,
-            fc_freq=args.fc_freq,
-            portfolio_adjust_method=args.portfolio_adjust_method,
-            interest_method=args.interest_method,
-            n_jobs=args.n_jobs,
-            min_window_size=args.min_window_size,
-            max_factor_count=args.tsfresh_max_factor_count,
-            tsfresh_profile=args.tsfresh_profile,
-            apply_rolling_norm=args.apply_rolling_norm,
-            rolling_norm_window=args.rolling_norm_window,
-            rolling_norm_min_periods=args.rolling_norm_min_periods,
-            rolling_norm_eps=args.rolling_norm_eps,
-            rolling_norm_clip=args.rolling_norm_clip,
-            net_ret_threshold=args.net_ret_threshold,
-            sharpe_threshold=args.sharpe_threshold,
-            require_all_row=args.require_all_row,
-            require_all_instruments=args.require_all_instruments,
-        )
-        print(f"[daily][tsfresh] config_path={ts_result.get('config_path')}")
-        print(f"[daily][tsfresh] selected_factor_count={len(ts_result.get('selected_fc_name_list', []))}")
-
-    if args.only in ['all', 'llm_prompt']:
-        llm_result = run_llm_prompt_factor_generate(
-            instrument_id=instrument_id,
-            start_time=args.start_time,
-            end_time=args.end_time,
-            version=version,
-            fc_freq=args.fc_freq,
-            portfolio_adjust_method=args.portfolio_adjust_method,
-            interest_method=args.interest_method,
-            n_jobs=args.n_jobs,
-            min_window_size=args.min_window_size,
-            max_factor_count=args.llm_max_factor_count,
-            apply_rolling_norm=args.apply_rolling_norm,
-            rolling_norm_window=args.rolling_norm_window,
-            rolling_norm_min_periods=args.rolling_norm_min_periods,
-            rolling_norm_eps=args.rolling_norm_eps,
-            rolling_norm_clip=args.rolling_norm_clip,
-            model_name=args.model_name,
-            llm_temperature=args.llm_temperature,
-            llm_factor_count=args.llm_factor_count,
-            llm_early_stopping_round=args.llm_early_stopping_round,
-            llm_user_requirement=args.llm_user_requirement,
-            net_ret_threshold=args.net_ret_threshold,
-            sharpe_threshold=args.sharpe_threshold,
-            require_all_row=args.require_all_row,
-            require_all_instruments=args.require_all_instruments,
-        )
-        print(f"[daily][llm_prompt] config_path={llm_result.get('config_path')}")
-        print(f"[daily][llm_prompt] selected_factor_count={len(llm_result.get('selected_fc_name_list', []))}")
+    llm_result = run_llm_prompt_factor_generate(
+        instrument_id=instrument_id,
+        start_time=args.start_time,
+        end_time=args.end_time,
+        version=version,
+        fc_freq=args.fc_freq,
+        portfolio_adjust_method=args.portfolio_adjust_method,
+        interest_method=args.interest_method,
+        n_jobs=args.n_jobs,
+        min_window_size=args.min_window_size,
+        max_factor_count=args.llm_max_factor_count,
+        apply_rolling_norm=args.apply_rolling_norm,
+        rolling_norm_window=args.rolling_norm_window,
+        rolling_norm_min_periods=args.rolling_norm_min_periods,
+        rolling_norm_eps=args.rolling_norm_eps,
+        rolling_norm_clip=args.rolling_norm_clip,
+        model_name=args.model_name,
+        llm_temperature=args.llm_temperature,
+        llm_factor_count=args.llm_factor_count,
+        llm_early_stopping_round=args.llm_early_stopping_round,
+        llm_user_requirement=args.llm_user_requirement,
+        net_ret_threshold=args.net_ret_threshold,
+        sharpe_threshold=args.sharpe_threshold,
+        require_all_row=args.require_all_row,
+        require_all_instruments=args.require_all_instruments,
+    )
+    print(f"[daily][llm_prompt] config_path={llm_result.get('config_path')}")
+    print(f"[daily][llm_prompt] selected_factor_count={len(llm_result.get('selected_fc_name_list', []))}")
 
     return {
         'version': version,
-        'tsfresh': ts_result,
         'llm_prompt': llm_result,
     }
 

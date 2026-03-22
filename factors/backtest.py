@@ -8,9 +8,8 @@ import pandas as pd
 from joblib import Parallel, delayed
 
 from .factor_indicators import get_performance
-from .factor_utils import get_factor_value, get_future_ret, join_fc_name_and_parameter, resolve_factor_class
+from .factor_utils import get_factor_value, get_future_ret
 from data import get_futures_continuous_contract_price
-from stats import iterdict
 from utils.logging import log
 from error.errors import NotBackTestingError
 
@@ -45,9 +44,7 @@ class BackTester:
 
         :param data: data should be a dataframe with high, open, low, close, volume, position columns 
             for one instrument in each bar.
-        :param fc_name_list: When not given data, fc_name_list is factor class names in factor.py;
-                             When given data, fc_name_list must be factor/signal columns in data.
-                             So fc_name_list must be provided.
+        :param fc_name_list: factor names persisted in factors DB, or existing columns when data is preprocessed.
         :param start_time: backtesting start time,
             default is the earliest price data that can be found on database
         :param end_time: backtesting end time,
@@ -124,16 +121,7 @@ class BackTester:
         if self.is_preprocessed:
             self.data = self.data[self.data['instrument_id'].isin(self.instrument_id_list)].copy()
 
-        self.fc_name_with_param_list = []
-        for fc_name in self.fc_name_list:
-            if self.is_preprocessed and fc_name in self.data.columns:
-                self.fc_name_with_param_list.append(fc_name)
-                continue
-
-            parameters = resolve_factor_class(fc_name).param_range
-            self.fc_name_with_param_list += [
-                join_fc_name_and_parameter(fc_name, parameter) for parameter in iterdict(parameters)
-            ]
+        self.fc_name_with_param_list = list(self.fc_name_list)
 
     def _preprocess_data(self):
         """
@@ -287,7 +275,7 @@ class BackTester:
                 if auto_layout:
                     # Reserve top margin for figure-level legend when shown.
                     top_margin = 0.90 if should_show_legend else 0.98
-                    fig.tight_layout(rect=[0, 0, 1, top_margin])
+                    fig.tight_layout(rect=(0, 0, 1, top_margin))
 
                 plt.show()
                 if close_fig:

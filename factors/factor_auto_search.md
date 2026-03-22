@@ -1,55 +1,17 @@
 # Factor Auto Search
 
-`factors/factor_auto_search.py` provides `FactorGenerator` for auto factor mining.
+`factors/factor_auto_search.py` adopts a formula-first and DB-first workflow:
+
+- Factor formulas are persisted directly to MongoDB (`factors` database).
+- No local factor JSON package is generated.
+- Supported mining methods: `llm_prompt` and `genetic_programming`.
 
 ## Quick Start
 
 ```python
-from factors.factor_auto_search import TsfreshFactorGenerator, LLMPromptFactorGenerator
-from factors.factor_auto_search import FactorFusioner
+from factors.factor_auto_search import FactorGenerator, LLMPromptFactorGenerator
 
-fg = TsfreshFactorGenerator(
-    instrument_id_list=['C0', 'FG0'],
-    fc_freq='1d',
-    start_time='20230101',
-    end_time='20260310',
-    min_window_size=30,
-    max_factor_count=200,
-    tsfresh_profile='minimal',
-    apply_rolling_norm=True,
-    rolling_norm_window=252,
-    rolling_norm_min_periods=20,
-    rolling_norm_clip=10.0,
-    version='20260317_201530',
-    n_jobs=5,
-)
-
-generated_df = fg.generate()
-fc_subset = fg.generated_fc_name_list[:20]
-fg.save_fc_value(fc_subset, file_name='tsfresh_fc_subset', file_format='parquet')
-bt = fg.backtest(fc_name_list=fc_subset)
-
-# save reusable feature package
-config_path = fg.save_fc(fc_subset)  # default dir: factors/fc_from_tsfresh/ (tsfresh)
-
-# later: reload and compute only this subset
-selected_fc = FactorGenerator.load_fc(config_path)
-generated_subset_df = fg.generate_with_fc(selected_fc)
-
-# one-step: load config + generate + backtest
-bt2 = fg.backtest_from_fc_config(config_path)
-
-# one-step: mine + filter + save high-quality config
-result = fg.auto_mine_select_and_save_fc(
-    net_ret_threshold=0.05,
-    sharpe_threshold=0.8,
-    require_all_instruments=False,
-)
-print(result['config_path'])
-print(result['selected_fc_name_list'])
-
-# llm prompt mode (DeepSeek)
-fg_llm = LLMPromptFactorGenerator(
+fg = LLMPromptFactorGenerator(
     instrument_id_list=['C0'],
     fc_freq='1d',
     start_time='20230101',
@@ -57,68 +19,43 @@ fg_llm = LLMPromptFactorGenerator(
     model_name='deepseek',
     llm_temperature=0.7,
     llm_factor_count=6,
-    llm_user_requirement='Generate simple momentum and volatility factors.'
+    llm_user_requirement='生成期货日频量价因子，偏向趋势和量价共振',
+    n_jobs=5,
 )
-result_llm = fg_llm.auto_mine_select_and_save_fc(
-    net_ret_threshold=0.03,
-    sharpe_threshold=0.6,
-)
-print(result_llm['config_path'])
 
-# factor fusion mode (average_weight)
-fusion = FactorFusioner(
-    version_list=['20260317_201530', '20260317_210000'],
-    fusion_strategy='average_weight',
-    instrument_id_list=['C0'],
-    fc_freq='1d',
-    start_time='20230101',
-    end_time='20260310',
+result = fg.auto_mine_select_and_save_fc(
+    filter_indicator_dict={
+        'Net Return': (0.03, 0.03, 1),
+        'Net Sharpe': (0.6, 0.6, 1),
+    },
+    require_all_instruments=False,
 )
-fusion_df = fusion.generate()
-bt_fusion = fusion.backtest()
-print(fusion.generated_fc_name_list)
+
+config_ref = result['config_ref']
+selected_fc = FactorGenerator.load_fc(config_ref)
+bt = fg.backtest_from_fc_config(config_ref)
+print(config_ref)
+print(selected_fc)
 ```
 
-## Output Data Format
+## DB Collections
 
-Generated data is compatible with `BackTester(data=..., fc_name_list=...)`:
+- `method='genetic_programming'` -> `factors.genetic_programming`
+- `method='llm_prompt'` -> `factors.llm_prompt`
 
-- `time`
-- `instrument_id`
-- `future_ret`
-- tsfresh factor columns
+The `save_fc()` return value is a DB reference:
 
-Saved factor files are written to `data/factor_value/`.
+- `database.collection@version`
+- Example: `factors.llm_prompt@20260322_143000`
 
-Selected feature definitions are saved under:
-- `factors/fc_from_tsfresh/` for `method='tsfresh'`
-- `factors/fc_from_llm/` for `method='llm_prompt'`
+## Leakage Check
 
-LLM-generated valid factor classes are persisted to `factors/factor_from_llm.py`.
+- Before DB persistence, selected factors go through leakage checking.
+- A random subset of time points is checked (`check_leakage_count`).
+- If failed, detailed mismatch rows/examples are logged and failed factors are excluded.
 
-`FactorFusioner(version_list=..., fusion_strategy='average_weight')` loads:
-- `factors/fc_from_tsfresh/tsfresh_fc_<version>.json`
-- `factors/fc_from_llm/llm_fc_<version>.json`
+## Notes
 
-It then equal-weights all loaded factors into one fused signal column: `fac_fusion_average_weight`.
-
-## Rolling Normalization (No Leakage)
-
-- Normalization is done per `instrument_id` and per factor column.
-- At time `t`, the normalization only uses history up to `t-1` via `shift(1)` + `rolling(...)`.
-- Default output is clipped to `[-10, 10]` (`rolling_norm_clip=10.0`) to avoid oversized position signals.
-- Early samples with insufficient history are set to `0.0` to keep strategy behavior stable.
-
-## Threshold Filter Rules
-
-- Filter uses backtest summary columns: `Net Return` and `Net Sharpe`.
-- A factor is kept only if all yearly rows pass thresholds.
-- By default, `year='all'` row must also pass (`require_all_row=True`).
-- For multi-instrument results, default is all instruments must pass (`require_all_instruments=True`).
-- Set `require_all_instruments=False` to keep factors when at least one instrument passes.
-
-## LLM Config
-
-- Set `DEEPSEEK_API_KEY` and `DEEPSEEK_BASE_URL` in `utils/params.py`.
-- `llm_prompt` mode expects strict JSON output from LLM and validates syntax/runtime before use.
+- `config_path` is kept in return payload for backward compatibility and equals `config_ref`.
+- `save_fc_value()` still supports exporting factor values (parquet/csv/pickle) for analysis only.
 

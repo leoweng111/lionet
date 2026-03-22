@@ -1,24 +1,19 @@
-from typing import Union
+from typing import Dict, Union
 from collections import Counter
 import numpy as np
 import pandas as pd
 from joblib import Parallel, delayed
-from .factor import *
-from . import factor as factor_module
-from data import get_risk_free_rate
-from stats import merge_dataframe, iterdict
+from data import get_latest_factor_formula_map, get_risk_free_rate
+from .factor_ops import calc_formula_series
 
 
-def resolve_factor_class(fc_name: str):
-    """Resolve factor class by name from factors.factor module."""
-    fc_class = getattr(factor_module, fc_name, None)
-    if fc_class is None or not isinstance(fc_class, type):
-        available = sorted(
-            name for name, obj in vars(factor_module).items()
-            if isinstance(obj, type) and hasattr(obj, 'param_range') and hasattr(obj, 'operate')
-        )
-        raise NameError(f'Factor class `{fc_name}` is not defined. Available factors: {available}')
-    return fc_class
+def resolve_factor_formula(fc_name: str,
+                           formula_map: Dict[str, str]) -> str:
+    formula = formula_map.get(fc_name)
+    if not isinstance(formula, str) or not formula.strip():
+        available = sorted(formula_map.keys())
+        raise NameError(f'Factor `{fc_name}` formula is not available in DB. Available factors: {available}')
+    return formula.strip()
 
 
 def get_factor_value(Data: pd.DataFrame,
@@ -40,36 +35,24 @@ def get_factor_value(Data: pd.DataFrame,
         raise ValueError(f'fc_name_list contains duplicated factor names: {duplicated_fc_names}')
     for col in ['time', 'instrument_id']:
         assert col in Data.columns, f'Data does not contain column {col}.'
-    df = Data.copy()
+    df = Data.copy().sort_values(['instrument_id', 'time']).reset_index(drop=True)
+    formula_map = get_latest_factor_formula_map(fc_name_list)
+    missing = [name for name in fc_name_list if name not in formula_map]
+    if missing:
+        raise ValueError(f'No formula found in DB for factors: {missing}')
 
-    df = df.sort_values(by='time', ascending=True)
-    df = df.set_index(['time', 'instrument_id'])
-
-    fc_class_list = [resolve_factor_class(fc_name) for fc_name in fc_name_list]
-    f = lambda x: get_factor_value_for_one_factor(df, x)
+    def _calc_one(fc_name: str) -> pd.DataFrame:
+        formula = resolve_factor_formula(fc_name, formula_map)
+        col = calc_formula_series(df=df, formula=formula)
+        return pd.DataFrame({'time': df['time'], 'instrument_id': df['instrument_id'], fc_name: col.values})
 
     with Parallel(n_jobs=n_jobs) as parallel:
-        mapper_list = parallel(delayed(f)(fc_class) for fc_class in fc_class_list)
-    df = merge_dataframe([df] + mapper_list, on=['time', 'instrument_id'])
-    df = df.reset_index()
+        mapper_list = parallel(delayed(_calc_one)(fc_name) for fc_name in fc_name_list)
 
-    return df
-
-
-def get_factor_value_for_one_factor(Data: pd.DataFrame,
-                                    fc_class):
-    parameters = iterdict(fc_class.param_range)
-    fc_func = fc_class.operate
-    mapper_list = []
-    for parameter in parameters:
-        fc_name_with_parameter = join_fc_name_and_parameter(fc_class.__name__, parameter)
-        mapper = Data.groupby('instrument_id', as_index=False, sort=False).apply(
-            lambda x: fc_func(x, **parameter).reset_index().set_index(
-                ['time', 'instrument_id']).iloc[:, -1].to_frame(fc_name_with_parameter)
-                             )
-        mapper_list.append(mapper)
-
-    return merge_dataframe(mapper_list, on=['time', 'instrument_id'])
+    out = df[['time', 'instrument_id']].copy()
+    for mapper in mapper_list:
+        out = out.merge(mapper, on=['time', 'instrument_id'], how='left', validate='1:1')
+    return out
 
 
 def join_fc_name_and_parameter(fc_name, parameter):
