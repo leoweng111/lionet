@@ -5,8 +5,13 @@ from typing import Dict, List, Optional, Sequence
 
 import pandas as pd
 
-from mongo.mongify import get_data, update_one_data
-from mongo.mongoconfig import client
+from mongo.mongify import (
+    delete_data,
+    get_data,
+    list_collection_names,
+    update_many_data,
+    update_one_data,
+)
 from utils.logging import log
 
 
@@ -178,7 +183,7 @@ def get_factor_formula_records(collections: Optional[Sequence[str]] = None,
     """
     if collections is None:
         try:
-            target_collections = client[database].list_collection_names()
+            target_collections = list_collection_names(database=database)
         except Exception:
             target_collections = ['genetic_programming', 'llm_prompt']
     else:
@@ -225,5 +230,129 @@ def get_factor_formula_records(collections: Optional[Sequence[str]] = None,
     if dedup_cols:
         out = out.drop_duplicates(subset=dedup_cols, keep='last').reset_index(drop=True)
     return out
+
+
+def delete_factor_data(database: Optional[str] = None,
+                       collection: Optional[str] = None,
+                       version_list: Optional[Sequence[str]] = None,
+                       version: Optional[str] = None) -> None:
+    """Delete factor records by one or many versions.
+
+    Cases:
+    1) database + collection + version_list: delete in one collection.
+    2) only version_list: delete from all collections in `factors` DB.
+
+    Note:
+    - `version` is kept for backward compatibility and will be merged into `version_list`.
+    """
+    merged_versions: List[str] = []
+    if version_list is not None:
+        merged_versions.extend([str(x).strip() for x in version_list if str(x).strip()])
+    if version is not None and str(version).strip():
+        merged_versions.append(str(version).strip())
+
+    normalized_version_list = list(dict.fromkeys(merged_versions))
+    if not normalized_version_list:
+        raise ValueError('`version_list` is required for delete_factor_data and cannot be empty.')
+
+    mongo_operator = {'version': {'$in': normalized_version_list}}
+
+    if database and collection:
+        delete_data(
+            database=database,
+            collection=collection,
+            mongo_operator=mongo_operator,
+        )
+        log.warning(
+            f'Deleted factor data: database={database}, collection={collection}, '
+            f'version_list={normalized_version_list}'
+        )
+        return
+
+    if database or collection:
+        raise ValueError(
+            'Please provide both `database` and `collection`, or provide only `version`.'
+        )
+
+    target_database = 'factors'
+    try:
+        target_collections = list_collection_names(database=target_database)
+    except Exception as e:
+        raise RuntimeError(f'Failed to list collections from `{target_database}`: {e}')
+
+    for col in target_collections:
+        delete_data(
+            database=target_database,
+            collection=col,
+            mongo_operator=mongo_operator,
+        )
+    log.warning(
+        f'Deleted factor data for version_list={normalized_version_list} '
+        f'from all collections in database={target_database}: {target_collections}'
+    )
+
+
+def change_factor_version(database: Optional[str] = None,
+                          collection: Optional[str] = None,
+                          old_version: Optional[str] = None,
+                          new_version: Optional[str] = None) -> None:
+    """Change version field from old_version to new_version.
+
+    Cases:
+    1) database + collection + old_version + new_version: update one collection.
+    2) only old_version + new_version: update all collections in `factors` DB.
+    """
+    if not old_version or not str(old_version).strip():
+        raise ValueError('`old_version` is required for change_factor_version.')
+    if not new_version or not str(new_version).strip():
+        raise ValueError('`new_version` is required for change_factor_version.')
+
+    old_version = str(old_version).strip()
+    new_version = str(new_version).strip()
+
+    if database and collection:
+        result = update_many_data(
+            database=database,
+            collection=collection,
+            mongo_operator={'version': old_version},
+            update_data={'version': new_version},
+        )
+        log.warning(
+            'Changed factor version: '
+            f'database={database}, collection={collection}, '
+            f'old_version={old_version}, new_version={new_version}, '
+            f"matched={result['matched_count']}, modified={result['modified_count']}"
+        )
+        return
+
+    if database or collection:
+        raise ValueError(
+            'Please provide both `database` and `collection`, or provide only old/new version.'
+        )
+
+    target_database = 'factors'
+    try:
+        target_collections = list_collection_names(database=target_database)
+    except Exception as e:
+        raise RuntimeError(f'Failed to list collections from `{target_database}`: {e}')
+
+    matched_total = 0
+    modified_total = 0
+    for col in target_collections:
+        result = update_many_data(
+            database=target_database,
+            collection=col,
+            mongo_operator={'version': old_version},
+            update_data={'version': new_version},
+        )
+        matched_total += int(result['matched_count'])
+        modified_total += int(result['modified_count'])
+
+    log.warning(
+        'Changed factor version across all collections: '
+        f'database={target_database}, old_version={old_version}, new_version={new_version}, '
+        f'collection_count={len(target_collections)}, matched_total={matched_total}, '
+        f'modified_total={modified_total}, collections={target_collections}'
+    )
 
 

@@ -814,6 +814,7 @@ class FactorGenerator:
                 }
             return chunk_result
 
+        # 每batch_size个因子为一组
         chunk_df_list = [
             raw_records.iloc[i:i + batch_size].copy()
             for i in range(0, len(raw_records), batch_size)

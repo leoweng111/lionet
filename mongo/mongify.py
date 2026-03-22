@@ -3,7 +3,7 @@ This script is for some basic operation on MongoDB.
 """
 import os
 import pandas as pd
-from typing import Union, List, Optional
+from typing import Dict, Union, List
 from pymongo import UpdateOne
 
 from .mongoconfig import client
@@ -190,6 +190,27 @@ def get_data(database: str,
         df = pd.DataFrame(col.find(mongo_operator))
 
     return df
+
+
+def list_collection_names(database: str,
+                          include_system: bool = True) -> List[str]:
+    """List collection names from one database."""
+    names = client[database].list_collection_names()
+    if include_system:
+        return names
+    return [x for x in names if not x.startswith('system.')]
+
+
+def update_many_data(database: str,
+                     collection: str,
+                     mongo_operator: dict,
+                     update_data: dict) -> Dict[str, int]:
+    """Update many records and return matched/modified counts."""
+    result = client[database][collection].update_many(mongo_operator, {'$set': update_data})
+    return {
+        'matched_count': int(result.matched_count),
+        'modified_count': int(result.modified_count),
+    }
 
 
 def delete_data(database: str,
