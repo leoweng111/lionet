@@ -38,6 +38,16 @@ print(config_ref)
 print(selected_fc)
 ```
 
+## Relative Correlation Filter (Optional)
+
+- Set `check_relative=True` to enable DB-relative factor filtering before `save_fc()`.
+- Correlation metric is absolute Spearman on factor values over the current backtest window.
+- Keep rule: a candidate factor is saved only when its max absolute correlation with DB factors is `< relative_threshold`.
+- `relative_threshold` default is `0.7`.
+- `relative_check_version_list=None` means checking all DB versions across all collections in `factors` DB.
+- If `relative_check_version_list=['v1', 'v2']`, only those versions are checked (cross-collection).
+- Implementation uses batched formula evaluation plus chunk-level parallelism (`n_jobs`) to reduce latency.
+
 ## DB Collections
 
 - `method='genetic_programming'` -> `factors.genetic_programming`

@@ -38,6 +38,9 @@ def run_llm_prompt_factor_generate(
     rolling_norm_min_periods: int = 20,
     rolling_norm_eps: float = 1e-8,
     rolling_norm_clip: float = 10.0,
+    check_relative: bool = False,
+    relative_threshold: float = 0.7,
+    relative_check_version_list: Optional[Sequence[str]] = None,
     model_name: str = 'deepseek',
     llm_temperature: float = 0.7,
     llm_factor_count: int = 5,
@@ -64,6 +67,9 @@ def run_llm_prompt_factor_generate(
         rolling_norm_min_periods=rolling_norm_min_periods,
         rolling_norm_eps=rolling_norm_eps,
         rolling_norm_clip=rolling_norm_clip,
+        check_relative=check_relative,
+        relative_threshold=relative_threshold,
+        relative_check_version_list=relative_check_version_list,
         model_name=model_name,
         llm_temperature=llm_temperature,
         llm_factor_count=llm_factor_count,
@@ -105,6 +111,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument('--rolling_norm_min_periods', type=int, default=20)
     parser.add_argument('--rolling_norm_eps', type=float, default=1e-8)
     parser.add_argument('--rolling_norm_clip', type=float, default=10.0)
+    parser.add_argument('--check_relative', action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument('--relative_threshold', type=float, default=0.7)
+    parser.add_argument('--relative_check_version_list', type=str, default=None,
+                        help='Comma-separated versions for relative check. Default None means all versions.')
 
     parser.add_argument('--model_name', type=str, default='deepseek')
     parser.add_argument('--llm_temperature', type=float, default=0.7)
@@ -140,6 +150,10 @@ def main(argv: Optional[Sequence[str]] = None):
         rolling_norm_min_periods=args.rolling_norm_min_periods,
         rolling_norm_eps=args.rolling_norm_eps,
         rolling_norm_clip=args.rolling_norm_clip,
+        check_relative=args.check_relative,
+        relative_threshold=args.relative_threshold,
+        relative_check_version_list=[x.strip() for x in args.relative_check_version_list.split(',') if x.strip()]
+        if args.relative_check_version_list else None,
         model_name=args.model_name,
         llm_temperature=args.llm_temperature,
         llm_factor_count=args.llm_factor_count,

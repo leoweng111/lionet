@@ -6,6 +6,7 @@ from typing import Dict, List, Optional, Sequence
 import pandas as pd
 
 from mongo.mongify import get_data, update_one_data
+from mongo.mongoconfig import client
 from utils.logging import log
 
 
@@ -166,5 +167,63 @@ def get_latest_factor_formula_map(fc_name_list: Sequence[str],
         if isinstance(formula, str) and formula.strip():
             formula_map[str(fc_name)] = formula.strip()
     return formula_map
+
+
+def get_factor_formula_records(collections: Optional[Sequence[str]] = None,
+                               versions: Optional[Sequence[str]] = None,
+                               database: str = 'factors') -> pd.DataFrame:
+    """Read factor formulas across collections with optional version filter.
+
+    Returns columns including: collection, version, factor_name, formula.
+    """
+    if collections is None:
+        try:
+            target_collections = client[database].list_collection_names()
+        except Exception:
+            target_collections = ['genetic_programming', 'llm_prompt']
+    else:
+        target_collections = list(collections)
+
+    if not target_collections:
+        return pd.DataFrame()
+
+    version_list = list(versions) if versions is not None else None
+    all_df: List[pd.DataFrame] = []
+    for col in target_collections:
+        operator: Dict[str, object] = {}
+        if version_list is not None:
+            if not version_list:
+                continue
+            operator['version'] = {'$in': version_list}
+
+        try:
+            df = get_data(database=database, collection=col, mongo_operator=operator)
+        except Exception:
+            continue
+
+        if not isinstance(df, pd.DataFrame) or df.empty:
+            continue
+
+        if 'formula' not in df.columns or 'factor_name' not in df.columns:
+            continue
+
+        df = df.copy()
+        df['collection'] = col
+        df['version'] = df['version'] if 'version' in df.columns else ''
+        df['formula'] = df['formula'].astype(str).str.strip()
+        df = df[df['formula'] != '']
+        if df.empty:
+            continue
+        keep_cols = [c for c in ['collection', 'version', 'factor_name', 'formula', 'created_at'] if c in df.columns]
+        all_df.append(df[keep_cols].copy())
+
+    if not all_df:
+        return pd.DataFrame()
+
+    out = pd.concat(all_df, ignore_index=True)
+    dedup_cols = [c for c in ['collection', 'version', 'factor_name'] if c in out.columns]
+    if dedup_cols:
+        out = out.drop_duplicates(subset=dedup_cols, keep='last').reset_index(drop=True)
+    return out
 
 

@@ -603,9 +603,13 @@ def calc_formula_series(df: pd.DataFrame,
 def calc_formula_df(df: pd.DataFrame,
                     formula_map: Dict[str, str],
                     data_fields: Optional[Sequence[str]] = None) -> pd.DataFrame:
-    out = df[['time', 'instrument_id']].copy()
+    base = df[['time', 'instrument_id']].copy()
+    value_map: Dict[str, pd.Series] = {}
     for fc_name, formula in formula_map.items():
-        out[fc_name] = calc_formula_series(df=df, formula=formula, data_fields=data_fields).values
-    return out
+        value_map[fc_name] = calc_formula_series(df=df, formula=formula, data_fields=data_fields)
+    if not value_map:
+        return base
+    value_df = pd.DataFrame(value_map, index=df.index)
+    return pd.concat([base, value_df], axis=1)
 
 

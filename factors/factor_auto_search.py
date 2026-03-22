@@ -10,8 +10,10 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple, Union, cast
 
 import numpy as np
 import pandas as pd
+from joblib import Parallel, delayed
 
 from data import (
+    get_factor_formula_records,
     get_futures_continuous_contract_price,
     get_latest_factor_formula_map,
     update_factor_info,
@@ -52,6 +54,9 @@ class FactorGenerator:
                  rolling_norm_eps: float = 1e-8,
                  rolling_norm_clip: float = 10.0,
                  check_leakage_count: int = 20,
+                 check_relative: bool = False,
+                 relative_threshold: float = 0.7,
+                 relative_check_version_list: Optional[Sequence[str]] = None,
                  version: Optional[str] = None):
         self.instrument_type = instrument_type
         self.instrument_id_list = [instrument_id_list] if isinstance(instrument_id_list, str) else list(instrument_id_list)
@@ -74,6 +79,9 @@ class FactorGenerator:
         self.rolling_norm_eps = rolling_norm_eps
         self.rolling_norm_clip = rolling_norm_clip
         self.check_leakage_count = int(check_leakage_count)
+        self.check_relative = bool(check_relative)
+        self.relative_threshold = float(relative_threshold)
+        self.relative_check_version_list = None if relative_check_version_list is None else list(relative_check_version_list)
 
         self.version = version or datetime.now().strftime('%Y%m%d_%H%M%S')
 
@@ -89,6 +97,8 @@ class FactorGenerator:
             f'Only support min, 1D, 1M or 1Q portfolio_adjust_method, got {self.portfolio_adjust_method}.'
         assert self.method in ['base', 'llm_prompt', 'genetic_programming'], \
             f'Unsupported method: {self.method}.'
+        assert 0.0 <= self.relative_threshold <= 1.0, \
+            f'relative_threshold should be in [0, 1], got {self.relative_threshold}.'
 
     def load_base_data(self) -> pd.DataFrame:
         if isinstance(self.data, pd.DataFrame):
@@ -638,17 +648,217 @@ class FactorGenerator:
                 'message': msg,
             }
 
+        relative_result: Optional[Dict[str, Any]] = None
+        selected_after_relative = list(selected_after_leakage)
+        if self.check_relative:
+            relative_result = self.filter_fc_by_db_relative_spearman(
+                selected_fc_name_list=selected_after_leakage,
+                generated_df=generated_df,
+                n_jobs=n_jobs,
+            )
+            selected_after_relative = relative_result.get('selected_fc_name_list', [])
+
+            if not selected_after_relative:
+                msg = (
+                    'No factors passed relative correlation check: '
+                    f'threshold={self.relative_threshold}, '
+                    f'versions={self.relative_check_version_list}.'
+                )
+                log.warning(msg)
+                return {
+                    'config_ref': None,
+                    'config_path': None,
+                    'selected_fc_name_list': [],
+                    'bt': bt,
+                    'leakage_check': leakage_result,
+                    'relative_check': relative_result,
+                    'message': msg,
+                }
+
         config_ref = self.save_fc(
-            fc_name_list=selected_after_leakage,
+            fc_name_list=selected_after_relative,
             performance_summary=bt.performance_summary,
         )
 
         return {
             'config_ref': config_ref,
             'config_path': config_ref,
-            'selected_fc_name_list': selected_after_leakage,
+            'selected_fc_name_list': selected_after_relative,
             'bt': bt,
             'leakage_check': leakage_result,
+            'relative_check': relative_result,
+        }
+
+    def filter_fc_by_db_relative_spearman(self,
+                                          selected_fc_name_list: Sequence[str],
+                                          generated_df: pd.DataFrame,
+                                          n_jobs: Optional[int] = None,
+                                          batch_size: int = 100) -> Dict[str, Any]:
+        """Filter factors by absolute Spearman correlation vs factors already in DB."""
+        if not selected_fc_name_list:
+            return {
+                'enabled': True,
+                'selected_fc_name_list': [],
+                'filtered_out_fc_name_list': [],
+                'checked_db_factor_count': 0,
+                'threshold': self.relative_threshold,
+                'versions': self.relative_check_version_list,
+                'detail': {},
+                'collection_count': 0,
+            }
+
+        candidate_df = generated_df[['time', 'instrument_id'] + list(selected_fc_name_list)].copy()
+        candidate_df = candidate_df.sort_values(['instrument_id', 'time']).reset_index(drop=True)
+
+        raw_records = get_factor_formula_records(
+            collections=None,
+            versions=self.relative_check_version_list,
+            database='factors',
+        )
+        if raw_records.empty:
+            log.info(f'Relative check skipped: no existing factors found in DB with version '
+                     f'{self.relative_check_version_list}.')
+            return {
+                'enabled': True,
+                'selected_fc_name_list': list(selected_fc_name_list),
+                'filtered_out_fc_name_list': [],
+                'checked_db_factor_count': 0,
+                'threshold': self.relative_threshold,
+                'versions': self.relative_check_version_list,
+                'detail': {fc: {'max_abs_spearman': 0.0} for fc in selected_fc_name_list},
+                'collection_count': 0,
+            }
+
+        raw_records = raw_records.copy()
+        raw_records['factor_name'] = raw_records['factor_name'].astype(str)
+        raw_records['version'] = raw_records['version'].astype(str)
+        raw_records['collection'] = raw_records['collection'].astype(str)
+
+        # Avoid self-comparison when current version already exists in target collection.
+        same_run_mask = (raw_records['version'] == str(self.version)) & (raw_records['collection'] == self._db_collection())
+        raw_records = raw_records.loc[~same_run_mask].copy()
+        if raw_records.empty:
+            return {
+                'enabled': True,
+                'selected_fc_name_list': list(selected_fc_name_list),
+                'filtered_out_fc_name_list': [],
+                'checked_db_factor_count': 0,
+                'threshold': self.relative_threshold,
+                'versions': self.relative_check_version_list,
+                'detail': {fc: {'max_abs_spearman': 0.0} for fc in selected_fc_name_list},
+                'collection_count': 0,
+            }
+
+        raw_records['db_factor_key'] = raw_records.apply(
+            lambda x: f"{x['collection']}::{x['version']}::{x['factor_name']}", axis=1
+        )
+        raw_records = raw_records.drop_duplicates(subset=['db_factor_key'], keep='last').reset_index(drop=True)
+
+        base_df = self.load_base_data()
+        base_df = base_df.sort_values(['instrument_id', 'time']).reset_index(drop=True)
+        key_df = candidate_df[['time', 'instrument_id']].copy()
+        candidate_col_list = list(selected_fc_name_list)
+        candidate_values_df = candidate_df[candidate_col_list].apply(pd.to_numeric, errors='coerce')
+
+        detail_map: Dict[str, Dict[str, Any]] = {
+            fc_name: {
+                'max_abs_spearman': 0.0,
+                'matched_db_factor': None,
+            }
+            for fc_name in candidate_col_list
+        }
+
+        def _eval_records_chunk(df_chunk: pd.DataFrame) -> Dict[str, Dict[str, Any]]:
+            formula_map = {
+                row['db_factor_key']: row['formula']
+                for _, row in df_chunk.iterrows()
+                if isinstance(row.get('formula'), str) and row.get('formula', '').strip()
+            }
+            if not formula_map:
+                return {}
+
+            try:
+                existing_df = calc_formula_df(df=base_df, formula_map=formula_map, data_fields=self.base_col_list)
+            except Exception as e:
+                log.warning(f'Relative check chunk skipped due to formula evaluation error: {e}')
+                return {}
+
+            if self.apply_rolling_norm:
+                existing_df = rolling_normalize_features(
+                    df=existing_df,
+                    factor_cols=list(formula_map.keys()),
+                    rolling_norm_window=self.rolling_norm_window,
+                    rolling_norm_min_periods=self.rolling_norm_min_periods,
+                    rolling_norm_eps=self.rolling_norm_eps,
+                    rolling_norm_clip=self.rolling_norm_clip,
+                    instrument_col='instrument_id',
+                )
+
+            aligned_existing = key_df.merge(existing_df, on=['time', 'instrument_id'], how='left', validate='1:1')
+            existing_cols = list(formula_map.keys())
+            existing_values_df = aligned_existing[existing_cols].apply(pd.to_numeric, errors='coerce')
+
+            corr_mat = pd.concat([candidate_values_df, existing_values_df], axis=1).corr(method='spearman').abs()
+            cross = corr_mat.loc[candidate_col_list, existing_cols].fillna(0.0)
+
+            chunk_result: Dict[str, Dict[str, Any]] = {}
+            for fc_name in candidate_col_list:
+                row = cross.loc[fc_name]
+                if row.empty:
+                    continue
+                max_key = row.idxmax()
+                max_corr = float(row.loc[max_key])
+                chunk_result[fc_name] = {
+                    'max_abs_spearman': max_corr,
+                    'matched_db_factor': max_key,
+                }
+            return chunk_result
+
+        chunk_df_list = [
+            raw_records.iloc[i:i + batch_size].copy()
+            for i in range(0, len(raw_records), batch_size)
+        ]
+        effective_jobs = max(1, min(len(chunk_df_list), (n_jobs or self.n_jobs or 1)))
+        if effective_jobs > 1 and len(chunk_df_list) > 1:
+            chunk_result_list = Parallel(n_jobs=effective_jobs, prefer='threads')(
+                delayed(_eval_records_chunk)(chunk_df)
+                for chunk_df in chunk_df_list
+            )
+        else:
+            chunk_result_list = [_eval_records_chunk(chunk_df) for chunk_df in chunk_df_list]
+
+        for chunk_result in chunk_result_list:
+            for fc_name, item in chunk_result.items():
+                if item.get('max_abs_spearman', 0.0) > detail_map[fc_name]['max_abs_spearman']:
+                    detail_map[fc_name] = item
+
+        selected_fc = []
+        filtered_out_fc = []
+        for fc_name in candidate_col_list:
+            max_corr = float(detail_map[fc_name].get('max_abs_spearman', 0.0))
+            if max_corr < self.relative_threshold:
+                selected_fc.append(fc_name)
+            else:
+                filtered_out_fc.append(fc_name)
+
+        if filtered_out_fc:
+            detail_text = {
+                x: detail_map[x] for x in filtered_out_fc
+            }
+            log.warning(
+                'Relative correlation filter removed factors: '
+                f'threshold={self.relative_threshold}, removed={detail_text}'
+            )
+
+        return {
+            'enabled': True,
+            'selected_fc_name_list': selected_fc,
+            'filtered_out_fc_name_list': filtered_out_fc,
+            'checked_db_factor_count': int(len(raw_records)),
+            'threshold': self.relative_threshold,
+            'versions': self.relative_check_version_list,
+            'detail': detail_map,
+            'collection_count': int(raw_records['collection'].nunique()),
         }
 
     def backtest(self,
@@ -708,6 +918,9 @@ class LLMPromptFactorGenerator(FactorGenerator):
                  rolling_norm_eps: float = 1e-8,
                  rolling_norm_clip: float = 5.0,
                  check_leakage_count: int = 20,
+                 check_relative: bool = False,
+                 relative_threshold: float = 0.7,
+                 relative_check_version_list: Optional[Sequence[str]] = None,
                  model_name: str = 'deepseek',
                  llm_temperature: float = 0.7,
                  llm_factor_count: int = 5,
@@ -735,6 +948,9 @@ class LLMPromptFactorGenerator(FactorGenerator):
             rolling_norm_eps=rolling_norm_eps,
             rolling_norm_clip=rolling_norm_clip,
             check_leakage_count=check_leakage_count,
+            check_relative=check_relative,
+            relative_threshold=relative_threshold,
+            relative_check_version_list=relative_check_version_list,
             version=version,
         )
         self.model_name = model_name
@@ -941,6 +1157,9 @@ class GeneticFactorGenerator(FactorGenerator):
                  rolling_norm_eps: float = 1e-8,
                  rolling_norm_clip: float = 5.0,
                  check_leakage_count: int = 20,
+                 check_relative: bool = False,
+                 relative_threshold: float = 0.7,
+                 relative_check_version_list: Optional[Sequence[str]] = None,
                  version: Optional[str] = None,
                  gp_generations: int = 50,
                  gp_population_size: int = 200,
@@ -981,6 +1200,9 @@ class GeneticFactorGenerator(FactorGenerator):
             rolling_norm_eps=rolling_norm_eps,
             rolling_norm_clip=rolling_norm_clip,
             check_leakage_count=check_leakage_count,
+            check_relative=check_relative,
+            relative_threshold=relative_threshold,
+            relative_check_version_list=relative_check_version_list,
             version=version,
         )
 
