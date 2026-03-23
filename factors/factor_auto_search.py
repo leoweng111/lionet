@@ -1216,8 +1216,8 @@ class GeneticFactorGenerator(FactorGenerator):
                  random_seed: Optional[int] = None,
                  gp_early_stopping_generation_count: int = 8,
                  gp_depth_penalty_coef: float = 0.0,
-                 gp_depth_penalty_start_depth: int = 3,
-                 gp_depth_penalty_linear_coef: float = 0.0,
+                 gp_depth_penalty_start_depth: int = 4,
+                 gp_depth_penalty_linear_coef: float = 0.05,
                  gp_depth_penalty_quadratic_coef: float = 0.0,
                  gp_log_interval: int = 5):
         super().__init__(

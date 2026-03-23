@@ -174,7 +174,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument('--gp_tournament_size', type=int, default=6)
     parser.add_argument('--gp_crossover_prob', type=float, default=0.7)
     parser.add_argument('--gp_mutation_prob', type=float, default=0.25)
-    parser.add_argument('--gp_leaf_prob', type=float, default=0.2)
+    parser.add_argument('--gp_leaf_prob', type=float, default=0.3)
     parser.add_argument('--gp_const_prob', type=float, default=0.02)
     parser.add_argument('--gp_window_choices', type=str, default=None,
                         help='Comma-separated integers, e.g. 5,10,20')
@@ -182,8 +182,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument('--random_seed', type=int, default=None)
     parser.add_argument('--gp_early_stopping_generation_count', type=int, default=8)
     parser.add_argument('--gp_depth_penalty_coef', type=float, default=0.0)
-    parser.add_argument('--gp_depth_penalty_start_depth', type=int, default=3)
-    parser.add_argument('--gp_depth_penalty_linear_coef', type=float, default=0.0)
+    parser.add_argument('--gp_depth_penalty_start_depth', type=int, default=4)
+    parser.add_argument('--gp_depth_penalty_linear_coef', type=float, default=0.05)
     parser.add_argument('--gp_depth_penalty_quadratic_coef', type=float, default=0.0)
     parser.add_argument('--gp_log_interval', type=int, default=5)
 
