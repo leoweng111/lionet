@@ -221,7 +221,7 @@ def main(argv: Optional[Sequence[str]] = None):
     print('[schedule] Started. Daily factor generation will run at 22:00.')
     while True:
         schedule.run_pending()
-        time.sleep(30)
+        time.sleep(60)
 
 
 if __name__ == '__main__':
