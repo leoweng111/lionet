@@ -8,7 +8,7 @@ import pandas as pd
 from joblib import Parallel, delayed
 
 from .factor_indicators import get_performance
-from .factor_utils import get_factor_value, get_future_ret
+from .factor_utils import get_factor_value, get_future_ret, rolling_normalize_features
 from data import get_futures_continuous_contract_price
 from utils.logging import log
 from error.errors import NotBackTestingError
@@ -32,6 +32,11 @@ class BackTester:
                  interest_method: str = 'compound',
                  risk_free_rate: bool = False,
                  calculate_baseline: bool = True,
+                 apply_rolling_norm: bool = True,
+                 rolling_norm_window: int = 30,
+                 rolling_norm_min_periods: int = 20,
+                 rolling_norm_eps: float = 1e-8,
+                 rolling_norm_clip: float = 5.0,
                  n_jobs: int = 5):
         # todo: 数据频率，调仓频率和收益率计算频率三者相关
         # 对数据频率1min，调仓频率为1day情况，计算IC需要先将一分钟的数据聚合成一天的，然后计算日频收益率，再计算日频因子值和日频收益率
@@ -70,6 +75,11 @@ class BackTester:
         self.interest_method = interest_method
         self.rfr = risk_free_rate
         self.calculate_baseline = calculate_baseline
+        self.apply_rolling_norm = apply_rolling_norm
+        self.rolling_norm_window = rolling_norm_window
+        self.rolling_norm_min_periods = rolling_norm_min_periods
+        self.rolling_norm_eps = rolling_norm_eps
+        self.rolling_norm_clip = rolling_norm_clip
         self.n_jobs = n_jobs
 
         self.fc_name_with_param_list = None
@@ -78,6 +88,7 @@ class BackTester:
         self.ts_performance_summary = None
         self.is_backtested = False
         self.is_preprocessed = isinstance(self.data, pd.DataFrame)
+        self._did_preprocess = False
 
         if not isinstance(self.version, str) or not self.version.strip():
             raise ValueError('BackTester requires a non-empty `version` to resolve factor formulas precisely.')
@@ -132,14 +143,40 @@ class BackTester:
         """
         Preprocess futures data for time-series backtesting.
         """
+        if self._did_preprocess:
+            return
+
         if self.is_preprocessed:
+            if self.apply_rolling_norm:
+                self.data = rolling_normalize_features(
+                    df=self.data,
+                    factor_cols=list(self.fc_name_list),
+                    rolling_norm_window=self.rolling_norm_window,
+                    rolling_norm_min_periods=self.rolling_norm_min_periods,
+                    rolling_norm_eps=self.rolling_norm_eps,
+                    rolling_norm_clip=self.rolling_norm_clip,
+                    instrument_col='instrument_id',
+                )
+            self._did_preprocess = True
             return
 
         # get factor value
         self.data = get_factor_value(self.data, self.fc_name_list, version=self.version, n_jobs=self.n_jobs)
 
+        if self.apply_rolling_norm:
+            self.data = rolling_normalize_features(
+                df=self.data,
+                factor_cols=list(self.fc_name_list),
+                rolling_norm_window=self.rolling_norm_window,
+                rolling_norm_min_periods=self.rolling_norm_min_periods,
+                rolling_norm_eps=self.rolling_norm_eps,
+                rolling_norm_clip=self.rolling_norm_clip,
+                instrument_col='instrument_id',
+            )
+
         # get return as label
         self.data = get_future_ret(self.data, self.portfolio_adjust_method, self.rfr)
+        self._did_preprocess = True
 
         # For single-instrument TS strategy we keep raw factor values.
 
@@ -296,8 +333,7 @@ class BackTester:
         For example. bt.ai[1] stores all indicators of factor1. Using bt.ai[1].turnover to get turnover.
         """
 
-        if not self.is_preprocessed:
-            self._preprocess_data()
+        self._preprocess_data()
 
         def _run_one_instrument(instrument_id: str, factor_n_jobs: int):
             df_one = self.data[self.data['instrument_id'] == instrument_id].copy()

@@ -171,18 +171,6 @@ class FactorGenerator:
     def _finalize_generated_data(self,
                                  base_df: pd.DataFrame,
                                  factor_df: pd.DataFrame) -> pd.DataFrame:
-        if self.apply_rolling_norm:
-            factor_cols = [c for c in factor_df.columns if c not in ['time', 'instrument_id']]
-            factor_df = rolling_normalize_features(
-                df=factor_df,
-                factor_cols=list(factor_cols),
-                rolling_norm_window=self.rolling_norm_window,
-                rolling_norm_min_periods=self.rolling_norm_min_periods,
-                rolling_norm_eps=self.rolling_norm_eps,
-                rolling_norm_clip=self.rolling_norm_clip,
-                instrument_col='instrument_id',
-            )
-
         df_with_ret = get_future_ret(
             base_df[['time', 'instrument_id', 'open', 'high', 'low', 'close', 'volume', 'position']].copy(),
             portfolio_adjust_method=self.portfolio_adjust_method,
@@ -1115,6 +1103,11 @@ class FactorGenerator:
             interest_method=self.interest_method,
             risk_free_rate=self.risk_free_rate,
             calculate_baseline=self.calculate_baseline,
+            apply_rolling_norm=self.apply_rolling_norm,
+            rolling_norm_window=self.rolling_norm_window,
+            rolling_norm_min_periods=self.rolling_norm_min_periods,
+            rolling_norm_eps=self.rolling_norm_eps,
+            rolling_norm_clip=self.rolling_norm_clip,
             n_jobs=n_jobs or self.n_jobs,
         )
         bt.backtest()
