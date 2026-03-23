@@ -129,6 +129,7 @@ def update_factor_info(selected_fc_name_list: Sequence[str],
 
 def get_factor_records_by_names(fc_name_list: Sequence[str],
                                 collections: Optional[Sequence[str]] = None,
+                                versions: Optional[Sequence[str]] = None,
                                 database: str = 'factors') -> pd.DataFrame:
     """Read factor metadata from factors DB across multiple collections."""
     if not fc_name_list:
@@ -136,6 +137,11 @@ def get_factor_records_by_names(fc_name_list: Sequence[str],
     target_collections = list(collections) if collections else ['genetic_programming', 'llm_prompt']
     all_df: List[pd.DataFrame] = []
     operator = {'factor_name': {'$in': list(fc_name_list)}}
+    if versions is not None:
+        version_list = [str(x).strip() for x in versions if str(x).strip()]
+        if not version_list:
+            return pd.DataFrame()
+        operator['version'] = {'$in': version_list}
     for col in target_collections:
         try:
             df = get_data(database=database, collection=col, mongo_operator=operator)
@@ -150,27 +156,38 @@ def get_factor_records_by_names(fc_name_list: Sequence[str],
     return pd.concat(all_df, ignore_index=True)
 
 
-def get_latest_factor_formula_map(fc_name_list: Sequence[str],
-                                  collections: Optional[Sequence[str]] = None,
-                                  database: str = 'factors') -> Dict[str, str]:
-    """Resolve latest available formula for each factor name from factors DB."""
-    df = get_factor_records_by_names(fc_name_list=fc_name_list, collections=collections, database=database)
+def get_factor_formula_map_by_version(fc_name_list: Sequence[str],
+                                      version: str,
+                                      collections: Optional[Sequence[str]] = None,
+                                      database: str = 'factors') -> Dict[str, str]:
+    """Resolve formula for each factor name by exact version from factors DB."""
+    version = str(version).strip()
+    if not version:
+        raise ValueError('`version` is required for get_factor_formula_map_by_version.')
+
+    df = get_factor_records_by_names(
+        fc_name_list=fc_name_list,
+        collections=collections,
+        versions=[version],
+        database=database,
+    )
     if df.empty:
         return {}
 
-    if 'created_at' in df.columns:
-        df['__created_at__'] = pd.to_datetime(df['created_at'], errors='coerce')
-    else:
-        df['__created_at__'] = pd.NaT
-    if 'version' not in df.columns:
-        df['version'] = ''
-
-    df = df.sort_values(['factor_name', '__created_at__', 'version'], ascending=[True, False, False])
     formula_map: Dict[str, str] = {}
     for fc_name, df_i in df.groupby('factor_name', sort=False):
-        formula = df_i.iloc[0].get('formula')
-        if isinstance(formula, str) and formula.strip():
-            formula_map[str(fc_name)] = formula.strip()
+        formula_set = {
+            str(x).strip()
+            for x in df_i['formula'].tolist()
+            if isinstance(x, str) and str(x).strip()
+        }
+        if len(formula_set) > 1:
+            raise ValueError(
+                f'Ambiguous formulas found for factor_name={fc_name}, version={version}, '
+                f'collections={collections}. Please specify collection or fix DB records.'
+            )
+        if formula_set:
+            formula_map[str(fc_name)] = next(iter(formula_set))
     return formula_map
 
 

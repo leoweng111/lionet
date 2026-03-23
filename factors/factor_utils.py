@@ -3,7 +3,7 @@ from collections import Counter
 import numpy as np
 import pandas as pd
 from joblib import Parallel, delayed
-from data import get_latest_factor_formula_map, get_risk_free_rate
+from data import get_factor_formula_map_by_version, get_risk_free_rate
 from .factor_ops import calc_formula_series
 
 
@@ -18,6 +18,7 @@ def resolve_factor_formula(fc_name: str,
 
 def get_factor_value(Data: pd.DataFrame,
                      fc_name_list: Union[str, list],
+                     version: str,
                      n_jobs=5):
     """
     Calculate factor value.
@@ -36,7 +37,7 @@ def get_factor_value(Data: pd.DataFrame,
     for col in ['time', 'instrument_id']:
         assert col in Data.columns, f'Data does not contain column {col}.'
     df = Data.copy().sort_values(['instrument_id', 'time']).reset_index(drop=True)
-    formula_map = get_latest_factor_formula_map(fc_name_list)
+    formula_map = get_factor_formula_map_by_version(fc_name_list=fc_name_list, version=version)
     missing = [name for name in fc_name_list if name not in formula_map]
     if missing:
         raise ValueError(f'No formula found in DB for factors: {missing}')

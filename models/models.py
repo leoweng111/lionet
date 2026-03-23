@@ -72,6 +72,7 @@ class BaseModel:
                  early_stopping_rounds: int = 50,
                  eval_metric: str = 'ic',
                  fc_freq: str = '1d',
+                 version: Union[str, None] = None,
                  start_time: Union[str, datetime.date, datetime.datetime, pd.Timestamp, None] = None,
                  end_time: Union[str, datetime.date, datetime.datetime, pd.Timestamp, None] = None,
                  transaction_period: Union[int, None] = None,
@@ -123,6 +124,7 @@ class BaseModel:
         self.fc_name_list = fc_name_list
         self.signal_name = signal_name
         self.fc_freq = fc_freq
+        self.version = version
         self.start_time = start_time
         self.end_time = end_time
         self.transaction_period = transaction_period
@@ -197,8 +199,10 @@ class BaseModel:
     def _preprocess_data(self):
         for col in ['time', 'instrument_id']:
             assert col in self.data.columns, f'self.data does not contain column {col}.'
+        if not isinstance(self.version, str) or not self.version.strip():
+            raise ValueError('BaseModel requires non-empty `version` to load factor formulas from DB.')
         # get factor value
-        self.data = get_factor_value(self.data, self.fc_name_list, self.n_jobs)
+        self.data = get_factor_value(self.data, self.fc_name_list, version=self.version, n_jobs=self.n_jobs)
         # get return as label
         self.data = get_future_ret(self.data, portfolio_adjust_method='1D', rfr=self.rfr)
 
@@ -441,6 +445,7 @@ class BaseModel:
     def backtest_predict_result(self):
         instrument_id_list = sorted(self.predict_result['instrument_id'].dropna().unique().tolist())
         bt = BackTester(fc_name_list=[self.signal_name],
+                        version=self.version or 'external_input',
                         instrument_id_list=instrument_id_list,
                         data=self.predict_result,
                         fc_freq=self.fc_freq,

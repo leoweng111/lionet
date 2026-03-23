@@ -14,8 +14,8 @@ from joblib import Parallel, delayed
 
 from data import (
     get_factor_formula_records,
+    get_factor_formula_map_by_version,
     get_futures_continuous_contract_price,
-    get_latest_factor_formula_map,
     update_factor_info,
 )
 from mongo.mongify import get_data
@@ -466,7 +466,10 @@ class FactorGenerator:
     def backtest_from_fc_config(self,
                                 config_ref: str,
                                 n_jobs: Optional[int] = None) -> BackTester:
+        _, _, config_version = self._parse_db_ref(config_ref)
         fc_name_list = self.load_fc(config_ref=config_ref, instrument_id_list=self.instrument_id_list)
+        # Ensure replay computes formulas from the exact saved version.
+        self.version = config_version
         generated_df = self.generate_with_fc(fc_name_list=fc_name_list)
         return self.backtest(data=generated_df, fc_name_list=fc_name_list, n_jobs=n_jobs)
 
@@ -916,6 +919,7 @@ class FactorGenerator:
 
         bt = BackTester(
             fc_name_list=fc_name_list,
+            version=self.version,
             instrument_type=self.instrument_type,
             instrument_id_list=self.instrument_id_list,
             fc_freq=self.fc_freq,
@@ -1076,8 +1080,9 @@ class LLMPromptFactorGenerator(FactorGenerator):
                     data_fields=self.base_col_list,
                 )
 
-            formula_map = get_latest_factor_formula_map(
+            formula_map = get_factor_formula_map_by_version(
                 fc_name_list=selected_fc_names,
+                version=self.version,
                 collections=['llm_prompt'],
                 database='factors',
             )
@@ -1324,8 +1329,9 @@ class GeneticFactorGenerator(FactorGenerator):
                     factor_df[fc_name] = pd.to_numeric(signal, errors='coerce').values
                 return factor_df
 
-            formula_map = get_latest_factor_formula_map(
+            formula_map = get_factor_formula_map_by_version(
                 fc_name_list=selected_fc_names,
+                version=self.version,
                 collections=['genetic_programming'],
                 database='factors',
             )

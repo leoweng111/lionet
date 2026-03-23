@@ -21,6 +21,7 @@ class BackTester:
 
     def __init__(self,
                  fc_name_list: Union[str, List],
+                 version: str,
                  instrument_type: str = 'futures_continuous_contract',
                  instrument_id_list: Union[str, List] = 'C0',
                  fc_freq: str = '1d',
@@ -60,6 +61,7 @@ class BackTester:
         self.data = data
         self.instrument_type = instrument_type
         self.fc_name_list = fc_name_list
+        self.version = version
         self.instrument_id_list = instrument_id_list
         self.start_time = start_time
         self.end_time = end_time
@@ -76,6 +78,9 @@ class BackTester:
         self.ts_performance_summary = None
         self.is_backtested = False
         self.is_preprocessed = isinstance(self.data, pd.DataFrame)
+
+        if not isinstance(self.version, str) or not self.version.strip():
+            raise ValueError('BackTester requires a non-empty `version` to resolve factor formulas precisely.')
 
         assert self.fc_freq in ['1m', '5m', '1d'], f'Only support 1m, 5m or 1d fc_freq, but got {fc_freq} instead.'
         assert self.portfolio_adjust_method in ['min', '1D', '1M', '1Q'], \
@@ -131,7 +136,7 @@ class BackTester:
             return
 
         # get factor value
-        self.data = get_factor_value(self.data, self.fc_name_list, self.n_jobs)
+        self.data = get_factor_value(self.data, self.fc_name_list, version=self.version, n_jobs=self.n_jobs)
 
         # get return as label
         self.data = get_future_ret(self.data, self.portfolio_adjust_method, self.rfr)
