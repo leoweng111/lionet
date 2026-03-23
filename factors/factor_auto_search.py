@@ -351,6 +351,165 @@ class FactorGenerator:
 
         return fc_pass_series[fc_pass_series].index.tolist()
 
+    def summarize_best_failed_indicator_metrics(self,
+                                                performance_summary: pd.DataFrame,
+                                                filter_indicator_dict: Dict[str, Tuple[float, float, int]],
+                                                selected_fc_name_list: Sequence[str],
+                                                require_all_row: bool = True,
+                                                require_all_instruments: bool = True) -> Dict[str, Dict[str, Any]]:
+        """Summarize best indicator values among factors that did not pass threshold filter.
+
+        Metric computation follows the same yearly-mean and yearly-threshold logic as filter_fc_by_threshold.
+        """
+        summary_df = performance_summary.copy()
+        if 'year' not in summary_df.columns:
+            summary_df = summary_df.reset_index()
+
+        summary_df['__year_str__'] = summary_df['year'].astype(str)
+        summary_df['__is_yearly__'] = summary_df['__year_str__'] != 'all'
+        for indicator, conf in filter_indicator_dict.items():
+            _, yearly_threshold, direction = conf
+            numeric_series = pd.to_numeric(summary_df[indicator], errors='coerce')
+            pass_col = f'__pass_yearly__{indicator}'
+            if direction == 1:
+                summary_df[pass_col] = (~summary_df['__is_yearly__']) | (numeric_series >= float(yearly_threshold))
+            else:
+                summary_df[pass_col] = (~summary_df['__is_yearly__']) | (numeric_series <= float(yearly_threshold))
+
+        group_cols = ['Factor Name'] + (['Instrument ID'] if 'Instrument ID' in summary_df.columns else [])
+        per_group_records: List[Dict[str, Any]] = []
+        for group_key, group_df in summary_df.groupby(group_cols, sort=False):
+            if not isinstance(group_key, tuple):
+                group_key = (group_key,)
+            record: Dict[str, Any] = {k: v for k, v in zip(group_cols, group_key)}
+            if require_all_row and 'all' not in group_df['__year_str__'].values:
+                record['__group_valid__'] = False
+            else:
+                record['__group_valid__'] = True
+
+            df_year = group_df.loc[group_df['__is_yearly__']].copy()
+            for indicator, _ in filter_indicator_dict.items():
+                yearly_values = pd.to_numeric(df_year[indicator], errors='coerce').dropna()
+                record[f'__mean__{indicator}'] = float(yearly_values.mean()) if not yearly_values.empty else np.nan
+                pass_col = f'__pass_yearly__{indicator}'
+                yearly_pass = bool(group_df.loc[group_df['__is_yearly__'], pass_col].all()) if not df_year.empty else False
+                record[f'__yearly_pass__{indicator}'] = bool(record['__group_valid__'] and yearly_pass)
+            per_group_records.append(record)
+
+        if not per_group_records:
+            return {}
+        per_group_df = pd.DataFrame(per_group_records)
+
+        selected_set = set(selected_fc_name_list)
+        failed_factors = [x for x in per_group_df['Factor Name'].dropna().unique().tolist() if x not in selected_set]
+        if not failed_factors:
+            return {}
+
+        best_metric_map: Dict[str, Dict[str, Any]] = {}
+        for indicator, conf in filter_indicator_dict.items():
+            mean_threshold, _, direction = conf
+            metric_col = f'__mean__{indicator}'
+            pass_col = f'__yearly_pass__{indicator}'
+
+            rows: List[Dict[str, Any]] = []
+            for fc_name, df_fc in per_group_df[per_group_df['Factor Name'].isin(failed_factors)].groupby('Factor Name', sort=False):
+                vals = pd.to_numeric(df_fc[metric_col], errors='coerce').dropna()
+                if vals.empty:
+                    continue
+                if require_all_instruments:
+                    agg_mean = float(vals.min()) if direction == 1 else float(vals.max())
+                    agg_yearly_pass = bool(df_fc[pass_col].all())
+                else:
+                    agg_mean = float(vals.max()) if direction == 1 else float(vals.min())
+                    agg_yearly_pass = bool(df_fc[pass_col].any())
+
+                rows.append({
+                    'factor_name': str(fc_name),
+                    'yearly_mean': agg_mean,
+                    'yearly_pass': agg_yearly_pass,
+                })
+
+            if not rows:
+                continue
+            rows_df = pd.DataFrame(rows)
+            rows_df = rows_df.sort_values('yearly_mean', ascending=(direction == -1)).reset_index(drop=True)
+            best_row = rows_df.iloc[0]
+            yearly_mean = float(best_row['yearly_mean'])
+            gap_to_threshold = float(yearly_mean - float(mean_threshold))
+
+            best_metric_map[indicator] = {
+                'factor_name': str(best_row['factor_name']),
+                'yearly_mean': yearly_mean,
+                'mean_threshold': float(mean_threshold),
+                'direction': int(direction),
+                'gap_to_threshold': gap_to_threshold,
+                'yearly_pass': bool(best_row['yearly_pass']),
+                'require_all_instruments': bool(require_all_instruments),
+                'require_all_row': bool(require_all_row),
+            }
+
+        return best_metric_map
+
+    def summarize_selected_indicator_metrics(self,
+                                             performance_summary: pd.DataFrame,
+                                             filter_indicator_dict: Dict[str, Tuple[float, float, int]],
+                                             selected_fc_name_list: Sequence[str]) -> Dict[str, Dict[str, Any]]:
+        """Build per-factor indicator summary for logging before DB persistence."""
+        if not selected_fc_name_list:
+            return {}
+
+        summary_df = performance_summary.copy()
+        if 'year' not in summary_df.columns:
+            summary_df = summary_df.reset_index()
+        summary_df['__year_str__'] = summary_df['year'].astype(str)
+        summary_df = summary_df.loc[summary_df['__year_str__'] != 'all'].copy()
+        if summary_df.empty:
+            return {}
+
+        has_instrument = 'Instrument ID' in summary_df.columns
+        out: Dict[str, Dict[str, Any]] = {}
+        for fc_name in selected_fc_name_list:
+            df_fc = summary_df.loc[summary_df['Factor Name'] == fc_name].copy()
+            if df_fc.empty:
+                continue
+
+            indicator_payload: Dict[str, Any] = {}
+            for indicator, conf in filter_indicator_dict.items():
+                mean_threshold, yearly_threshold, direction = conf
+                vals = pd.to_numeric(df_fc[indicator], errors='coerce').dropna()
+                if vals.empty:
+                    continue
+
+                yearly_mean = float(vals.mean())
+                yearly_worst = float(vals.min()) if int(direction) == 1 else float(vals.max())
+                payload: Dict[str, Any] = {
+                    'yearly_mean': yearly_mean,
+                    'yearly_worst': yearly_worst,
+                    'mean_threshold': float(mean_threshold),
+                    'yearly_threshold': float(yearly_threshold),
+                    'direction': int(direction),
+                }
+
+                if has_instrument:
+                    instrument_detail: Dict[str, Dict[str, float]] = {}
+                    for ins_id, df_ins in df_fc.groupby('Instrument ID', sort=False):
+                        ins_vals = pd.to_numeric(df_ins[indicator], errors='coerce').dropna()
+                        if ins_vals.empty:
+                            continue
+                        ins_mean = float(ins_vals.mean())
+                        ins_worst = float(ins_vals.min()) if int(direction) == 1 else float(ins_vals.max())
+                        instrument_detail[str(ins_id)] = {
+                            'yearly_mean': ins_mean,
+                            'yearly_worst': ins_worst,
+                        }
+                    if instrument_detail:
+                        payload['instrument_detail'] = instrument_detail
+
+                indicator_payload[indicator] = payload
+
+            out[str(fc_name)] = indicator_payload
+        return out
+
     def _build_metric_fitness_map(self,
                                   performance_summary: pd.DataFrame,
                                   selected_fc_name_list: Sequence[str]) -> Dict[str, Dict[str, Dict[str, float]]]:
@@ -625,15 +784,28 @@ class FactorGenerator:
 
         if not selected_fc_name_list:
             msg = f'No factors passed thresholds: filter_indicator_dict={filter_indicator_dict}.'
+            best_failed_indicator_metrics = self.summarize_best_failed_indicator_metrics(
+                performance_summary=bt.performance_summary,
+                filter_indicator_dict=filter_indicator_dict,
+                selected_fc_name_list=selected_fc_name_list,
+                require_all_row=require_all_row,
+                require_all_instruments=require_all_instruments,
+            )
             log.warning(msg)
+            if best_failed_indicator_metrics:
+                log.warning(
+                    'Best failed indicator metrics from generated factors: '
+                    f'{best_failed_indicator_metrics}'
+                )
             return {
                 'config_ref': None,
                 'config_path': None,
                 'selected_fc_name_list': [],
                 'bt': bt,
                 'message': msg,
+                'best_failed_indicator_metrics': best_failed_indicator_metrics,
             }
-
+        log.info(f'{len(selected_fc_name_list)} factors passed threshold filtering: {selected_fc_name_list}')
         leakage_result = self.check_if_leakage(fc_name_list=selected_fc_name_list, raise_error=False)
         selected_after_leakage = [
             x for x in selected_fc_name_list
@@ -653,6 +825,7 @@ class FactorGenerator:
 
         relative_result: Optional[Dict[str, Any]] = None
         selected_after_relative = list(selected_after_leakage)
+        log.info(f'{len(selected_after_leakage)} factors passed leakage check: {selected_after_leakage}')
         if self.check_relative:
             relative_result = self.filter_fc_by_db_relative_spearman(
                 selected_fc_name_list=selected_after_leakage,
@@ -677,11 +850,22 @@ class FactorGenerator:
                     'relative_check': relative_result,
                     'message': msg,
                 }
-
+            log.info(f'{len(selected_after_relative)} factors passed relative correlation check: {selected_after_relative}')
         config_ref = self.save_fc(
             fc_name_list=selected_after_relative,
             performance_summary=bt.performance_summary,
         )
+
+        selected_indicator_metrics = self.summarize_selected_indicator_metrics(
+            performance_summary=bt.performance_summary,
+            filter_indicator_dict=filter_indicator_dict,
+            selected_fc_name_list=selected_after_relative,
+        )
+        for fc_name in selected_after_relative:
+            log.info(
+                '[PersistFactorMetrics] '
+                f'factor={fc_name}, metrics={selected_indicator_metrics.get(fc_name, {})}'
+            )
 
         return {
             'config_ref': config_ref,
@@ -690,6 +874,7 @@ class FactorGenerator:
             'bt': bt,
             'leakage_check': leakage_result,
             'relative_check': relative_result,
+            'selected_indicator_metrics': selected_indicator_metrics,
         }
 
     def filter_fc_by_db_relative_spearman(self,

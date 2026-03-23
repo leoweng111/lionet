@@ -26,7 +26,7 @@ def get_factor_value(Data: pd.DataFrame,
     :param Data:
     :param fc_name_list:
     :param n_jobs:
-    :return: a dataframe with factor values in fc_name_list
+    :return: original dataframe columns + factor values in fc_name_list
     """
     if isinstance(fc_name_list, str):
         fc_name_list = [fc_name_list]
@@ -50,8 +50,12 @@ def get_factor_value(Data: pd.DataFrame,
     with Parallel(n_jobs=n_jobs) as parallel:
         mapper_list = parallel(delayed(_calc_one)(fc_name) for fc_name in fc_name_list)
 
-    out = df[['time', 'instrument_id']].copy()
+    out = df.copy()
     for mapper in mapper_list:
+        factor_col = [c for c in mapper.columns if c not in ['time', 'instrument_id']]
+        # factor_col[0]就是当前的fc_name，这里是为了避免同名因子列覆盖
+        if factor_col and factor_col[0] in out.columns:
+            out = out.drop(columns=[factor_col[0]])
         out = out.merge(mapper, on=['time', 'instrument_id'], how='left', validate='1:1')
     return out
 
