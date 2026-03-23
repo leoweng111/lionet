@@ -838,7 +838,7 @@ class FactorGenerator:
                     'relative_check': relative_result,
                     'message': msg,
                 }
-            log.info(f'{len(selected_after_relative)} factors passed relative correlation check.}')
+            log.info(f'{len(selected_after_relative)} factors passed relative correlation check.')
         config_ref = self.save_fc(
             fc_name_list=selected_after_relative,
             performance_summary=bt.performance_summary,
