@@ -96,8 +96,8 @@ def run_llm_prompt_factor_generate(
     )
     result = fg.auto_mine_select_and_save_fc(
         filter_indicator_dict={
-            'Net Return': (0.08, 0.05, 1),
-            'Net Sharpe': (0.5, 0.5, 1),
+            'Net Return': (0.05, 0.03, 1),
+            'Net Sharpe': (0.5, 0.3, 1),
         },
         n_jobs=n_jobs,
     )

@@ -65,8 +65,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument('--llm_user_requirement', type=str, default='生成期货的日频量价因子')
 
     parser.add_argument('--gp_max_factor_count', type=int, default=50)
-    parser.add_argument('--gp_generations', type=int, default=50)
-    parser.add_argument('--gp_population_size', type=int, default=200)
+    parser.add_argument('--gp_generations', type=int, default=30)
+    parser.add_argument('--gp_population_size', type=int, default=150)
     parser.add_argument('--gp_max_depth', type=int, default=4)
     parser.add_argument('--gp_elite_size', type=int, default=20)
     parser.add_argument('--gp_tournament_size', type=int, default=6)
@@ -79,8 +79,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument('--random_seed', type=int, default=None)
     parser.add_argument('--gp_early_stopping_generation_count', type=int, default=8)
     parser.add_argument('--gp_depth_penalty_coef', type=float, default=0.0)
-    parser.add_argument('--gp_depth_penalty_start_depth', type=int, default=3)
-    parser.add_argument('--gp_depth_penalty_linear_coef', type=float, default=0.0)
+    parser.add_argument('--gp_depth_penalty_start_depth', type=int, default=4)
+    parser.add_argument('--gp_depth_penalty_linear_coef', type=float, default=0.05)
     parser.add_argument('--gp_depth_penalty_quadratic_coef', type=float, default=0.0)
     parser.add_argument('--gp_log_interval', type=int, default=5)
 
