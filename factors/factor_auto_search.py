@@ -837,19 +837,55 @@ class FactorGenerator:
         filtered_out_fc = []
         for fc_name in candidate_col_list:
             max_corr = float(detail_map[fc_name].get('max_abs_spearman', 0.0))
+            matched_db_factor = detail_map[fc_name].get('matched_db_factor')
             if max_corr < self.relative_threshold:
                 selected_fc.append(fc_name)
+                decision = 'keep'
             else:
                 filtered_out_fc.append(fc_name)
+                decision = 'remove'
+
+            log.info(
+                '[RelativeCheck][PerFactor] '
+                f'factor={fc_name}, '
+                f'max_abs_spearman={max_corr:.6f}, '
+                f'matched_db_factor={matched_db_factor}, '
+                f'threshold={self.relative_threshold}, '
+                f'decision={decision}'
+            )
+
+        removed_detail = [
+            {
+                'factor_name': fc_name,
+                'max_abs_spearman': float(detail_map[fc_name].get('max_abs_spearman', 0.0)),
+                'matched_db_factor': detail_map[fc_name].get('matched_db_factor'),
+            }
+            for fc_name in filtered_out_fc
+        ]
+        kept_detail = [
+            {
+                'factor_name': fc_name,
+                'max_abs_spearman': float(detail_map[fc_name].get('max_abs_spearman', 0.0)),
+                'matched_db_factor': detail_map[fc_name].get('matched_db_factor'),
+            }
+            for fc_name in selected_fc
+        ]
 
         if filtered_out_fc:
-            detail_text = {
-                x: detail_map[x] for x in filtered_out_fc
-            }
             log.warning(
                 'Relative correlation filter removed factors: '
-                f'threshold={self.relative_threshold}, removed={detail_text}'
+                f'threshold={self.relative_threshold}, removed={removed_detail}'
             )
+        else:
+            log.info(
+                'Relative correlation filter removed factors: '
+                f'threshold={self.relative_threshold}, removed=[]'
+            )
+
+        log.info(
+            'Relative correlation filter kept factors: '
+            f'threshold={self.relative_threshold}, kept={kept_detail}'
+        )
 
         return {
             'enabled': True,
@@ -859,6 +895,8 @@ class FactorGenerator:
             'threshold': self.relative_threshold,
             'versions': self.relative_check_version_list,
             'detail': detail_map,
+            'kept_detail': kept_detail,
+            'removed_detail': removed_detail,
             'collection_count': int(raw_records['collection'].nunique()),
         }
 
