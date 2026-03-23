@@ -52,7 +52,7 @@ def run_llm_prompt_factor_generate(
     rolling_norm_eps: float = 1e-8,
     rolling_norm_clip: float = 10.0,
     check_leakage_count: int = 20,
-    check_relative: bool = False,
+    check_relative: bool = True,
     relative_threshold: float = 0.7,
     relative_check_version_list: Optional[Sequence[str]] = None,
     model_name: str = 'deepseek',
