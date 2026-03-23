@@ -17,6 +17,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from factors.factor_auto_search import GeneticFactorGenerator
+from utils.logging import log
 
 
 def _parse_instrument_id(value: str):
@@ -66,61 +67,82 @@ def run_gp_factor_generate(
     gp_depth_penalty_linear_coef: float = 0.0,
     gp_depth_penalty_quadratic_coef: float = 0.0,
     gp_log_interval: int = 5,
+    retry_time: int = 0,
     version: Optional[str] = None,
 ):
     version = version or datetime.now().strftime('%Y%m%d')
-    fg = GeneticFactorGenerator(
-        instrument_type=instrument_type,
-        instrument_id_list=instrument_id_list,
-        fc_freq=fc_freq,
-        data=data,
-        start_time=start_time,
-        end_time=end_time,
-        portfolio_adjust_method=portfolio_adjust_method,
-        interest_method=interest_method,
-        risk_free_rate=risk_free_rate,
-        calculate_baseline=calculate_baseline,
-        n_jobs=n_jobs,
-        base_col_list=base_col_list,
-        min_window_size=min_window_size,
-        max_factor_count=max_factor_count,
-        apply_rolling_norm=apply_rolling_norm,
-        rolling_norm_window=rolling_norm_window,
-        rolling_norm_min_periods=rolling_norm_min_periods,
-        rolling_norm_eps=rolling_norm_eps,
-        rolling_norm_clip=rolling_norm_clip,
-        check_leakage_count=check_leakage_count,
-        check_relative=check_relative,
-        relative_threshold=relative_threshold,
-        relative_check_version_list=relative_check_version_list,
-        gp_generations=gp_generations,
-        gp_population_size=gp_population_size,
-        gp_max_depth=gp_max_depth,
-        gp_elite_size=gp_elite_size,
-        gp_tournament_size=gp_tournament_size,
-        gp_crossover_prob=gp_crossover_prob,
-        gp_mutation_prob=gp_mutation_prob,
-        gp_leaf_prob=gp_leaf_prob,
-        gp_const_prob=gp_const_prob,
-        gp_window_choices=gp_window_choices,
-        fitness_metric=fitness_metric,
-        random_seed=random_seed,
-        gp_early_stopping_generation_count=gp_early_stopping_generation_count,
-        gp_depth_penalty_coef=gp_depth_penalty_coef,
-        gp_depth_penalty_start_depth=gp_depth_penalty_start_depth,
-        gp_depth_penalty_linear_coef=gp_depth_penalty_linear_coef,
-        gp_depth_penalty_quadratic_coef=gp_depth_penalty_quadratic_coef,
-        gp_log_interval=gp_log_interval,
-        version=version,
-    )
-    result = fg.auto_mine_select_and_save_fc(
-        filter_indicator_dict={
-            'Net Return': (0.05, 0.03, 1),
-            'Net Sharpe': (0.5, 0.3, 1),
-        },
-        n_jobs=n_jobs,
-    )
-    return result
+    max_retry = max(0, int(retry_time))
+    last_result = None
+    for attempt_idx in range(max_retry + 1):
+        fg = GeneticFactorGenerator(
+            instrument_type=instrument_type,
+            instrument_id_list=instrument_id_list,
+            fc_freq=fc_freq,
+            data=data,
+            start_time=start_time,
+            end_time=end_time,
+            portfolio_adjust_method=portfolio_adjust_method,
+            interest_method=interest_method,
+            risk_free_rate=risk_free_rate,
+            calculate_baseline=calculate_baseline,
+            n_jobs=n_jobs,
+            base_col_list=base_col_list,
+            min_window_size=min_window_size,
+            max_factor_count=max_factor_count,
+            apply_rolling_norm=apply_rolling_norm,
+            rolling_norm_window=rolling_norm_window,
+            rolling_norm_min_periods=rolling_norm_min_periods,
+            rolling_norm_eps=rolling_norm_eps,
+            rolling_norm_clip=rolling_norm_clip,
+            check_leakage_count=check_leakage_count,
+            check_relative=check_relative,
+            relative_threshold=relative_threshold,
+            relative_check_version_list=relative_check_version_list,
+            gp_generations=gp_generations,
+            gp_population_size=gp_population_size,
+            gp_max_depth=gp_max_depth,
+            gp_elite_size=gp_elite_size,
+            gp_tournament_size=gp_tournament_size,
+            gp_crossover_prob=gp_crossover_prob,
+            gp_mutation_prob=gp_mutation_prob,
+            gp_leaf_prob=gp_leaf_prob,
+            gp_const_prob=gp_const_prob,
+            gp_window_choices=gp_window_choices,
+            fitness_metric=fitness_metric,
+            random_seed=random_seed,
+            gp_early_stopping_generation_count=gp_early_stopping_generation_count,
+            gp_depth_penalty_coef=gp_depth_penalty_coef,
+            gp_depth_penalty_start_depth=gp_depth_penalty_start_depth,
+            gp_depth_penalty_linear_coef=gp_depth_penalty_linear_coef,
+            gp_depth_penalty_quadratic_coef=gp_depth_penalty_quadratic_coef,
+            gp_log_interval=gp_log_interval,
+            version=version,
+        )
+        result = fg.auto_mine_select_and_save_fc(
+            filter_indicator_dict={
+                'Net Return': (0.05, 0.03, 1),
+                'Net Sharpe': (0.5, 0.3, 1),
+            },
+            n_jobs=n_jobs,
+        )
+        last_result = result
+
+        selected_count = len(result.get('selected_fc_name_list', []))
+        if selected_count > 0 and result.get('config_ref'):
+            if attempt_idx > 0:
+                log.info(f'[gp] Success after retry: attempt={attempt_idx + 1}/{max_retry + 1}, selected_count={selected_count}')
+            return result
+
+        if attempt_idx < max_retry:
+            log.warning(f'[gp] No factor persisted on attempt {attempt_idx + 1}/{max_retry + 1}, retrying...')
+
+    log.warning(f'[gp] No factor persisted after all attempts: total_attempts={max_retry + 1}')
+    return last_result or {
+        'config_ref': None,
+        'config_path': None,
+        'selected_fc_name_list': [],
+        'message': 'No factor persisted after retries.',
+    }
 
 
 def _parse_window_choices(value: Optional[str]) -> Optional[Sequence[int]]:
@@ -186,6 +208,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument('--gp_depth_penalty_linear_coef', type=float, default=0.05)
     parser.add_argument('--gp_depth_penalty_quadratic_coef', type=float, default=0.0)
     parser.add_argument('--gp_log_interval', type=int, default=5)
+    parser.add_argument('--retry_time', type=int, default=0,
+                        help='Retry times when one mining run persists no factors. Total attempts = retry_time + 1.')
 
     return parser
 
@@ -244,6 +268,7 @@ def main(argv: Optional[Sequence[str]] = None):
         gp_depth_penalty_linear_coef=args.gp_depth_penalty_linear_coef,
         gp_depth_penalty_quadratic_coef=args.gp_depth_penalty_quadratic_coef,
         gp_log_interval=args.gp_log_interval,
+        retry_time=args.retry_time,
         version=args.version,
     )
     print(f"[gp] config_ref={result.get('config_ref')}")
