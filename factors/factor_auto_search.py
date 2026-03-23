@@ -1107,8 +1107,10 @@ class LLMPromptFactorGenerator(FactorGenerator):
             remaining = target_factor_count - len(valid_formula_list)
             this_round_count = min(max(1, self.llm_factor_count), remaining)
             prompt = self._build_llm_formula_prompt(this_round_count, existing_formulas=valid_formula_list)
-            log.info(f'LLM prompt round {round_idx + 1}/{max_rounds}, requesting {this_round_count} formulas, ',
-                     f'{len(valid_formula_list)}/{target_factor_count} valid formulas collected so far.')
+            log.info(
+                f'LLM prompt round {round_idx + 1}/{max_rounds}, requesting {this_round_count} formulas, '
+                f'{len(valid_formula_list)}/{target_factor_count} valid formulas collected so far.'
+            )
             try:
                 response = llm.invoke(prompt)
                 content = getattr(response, 'content', '')
