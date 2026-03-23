@@ -1208,7 +1208,7 @@ class GeneticFactorGenerator(FactorGenerator):
                  relative_check_version_list: Optional[Sequence[str]] = None,
                  version: Optional[str] = None,
                  gp_generations: int = 50,
-                 gp_population_size: int = 200,
+                 gp_population_size: int = 150,
                  gp_max_depth: int = 4,
                  gp_elite_size: int = 20,
                  gp_tournament_size: int = 6,

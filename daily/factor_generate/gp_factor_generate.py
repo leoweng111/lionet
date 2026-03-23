@@ -115,8 +115,8 @@ def run_gp_factor_generate(
     )
     result = fg.auto_mine_select_and_save_fc(
         filter_indicator_dict={
-            'Net Return': (0.08, 0.05, 1),
-            'Net Sharpe': (0.5, 0.5, 1),
+            'Net Return': (0.05, 0.03, 1),
+            'Net Sharpe': (0.5, 0.3, 1),
         },
         n_jobs=n_jobs,
     )
@@ -168,7 +168,7 @@ def build_parser() -> argparse.ArgumentParser:
                         help='Comma-separated versions for relative check. Default None means all versions.')
 
     parser.add_argument('--gp_generations', type=int, default=50)
-    parser.add_argument('--gp_population_size', type=int, default=200)
+    parser.add_argument('--gp_population_size', type=int, default=150)
     parser.add_argument('--gp_max_depth', type=int, default=4)
     parser.add_argument('--gp_elite_size', type=int, default=20)
     parser.add_argument('--gp_tournament_size', type=int, default=6)
