@@ -83,7 +83,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument('--gp_depth_penalty_linear_coef', type=float, default=0.05)
     parser.add_argument('--gp_depth_penalty_quadratic_coef', type=float, default=0.0)
     parser.add_argument('--gp_log_interval', type=int, default=5)
-    parser.add_argument('--gp_retry_time', type=int, default=0,
+    parser.add_argument('--gp_retry_time', type=int, default=3,
                         help='Retry times for GP when one mining run persists no factors.')
 
     parser.add_argument('--check_leakage_count', type=int, default=20)

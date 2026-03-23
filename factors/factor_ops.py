@@ -29,7 +29,14 @@ class DataNode(FactorNode):
         self.field = field
 
     def calc(self, df: pd.DataFrame) -> pd.Series:
-        return pd.to_numeric(df[self.field], errors='coerce')
+        if self.field in df.columns:
+            return pd.to_numeric(df[self.field], errors='coerce')
+        # Alias support for futures open interest naming.
+        if self.field == 'oi' and 'position' in df.columns:
+            return pd.to_numeric(df['position'], errors='coerce')
+        if self.field == 'position' and 'oi' in df.columns:
+            return pd.to_numeric(df['oi'], errors='coerce')
+        raise KeyError(f'Field `{self.field}` is not available in input dataframe.')
 
     def to_formula(self) -> str:
         return self.field
@@ -493,9 +500,201 @@ class OpTsRankCorr(FactorNode):
         return f"TsRankCorr({self.left}, {self.right}, {self.window})"
 
 
-BINARY_OPS = [OpAdd, OpSub, OpMul, OpDiv, OpMax, OpMin, OpLt, OpGt]
+class OpEma(FactorNode):
+    def __init__(self, child: FactorNode, window: int):
+        self.child = child
+        self.window = int(window)
+
+    def calc(self, df: pd.DataFrame) -> pd.Series:
+        s = _safe_series(self.child.calc(df))
+        if 'instrument_id' in df.columns:
+            return s.groupby(df['instrument_id']).transform(lambda x: x.ewm(span=self.window, adjust=False).mean())
+        return s.ewm(span=self.window, adjust=False).mean()
+
+    def to_formula(self) -> str:
+        return f"Ema({self.child}, {self.window})"
+
+
+class OpTsDecayExp(FactorNode):
+    def __init__(self, child: FactorNode, window: int):
+        self.child = child
+        self.window = int(window)
+
+    def calc(self, df: pd.DataFrame) -> pd.Series:
+        s = _safe_series(self.child.calc(df))
+        if 'instrument_id' in df.columns:
+            return s.groupby(df['instrument_id']).transform(lambda x: x.ewm(span=self.window, adjust=False).mean())
+        return s.ewm(span=self.window, adjust=False).mean()
+
+    def to_formula(self) -> str:
+        return f"TsDecayExp({self.child}, {self.window})"
+
+
+class OpTsCov(FactorNode):
+    def __init__(self, left: FactorNode, right: FactorNode, window: int):
+        self.left = left
+        self.right = right
+        self.window = int(window)
+
+    def _calc_one(self, x: pd.Series, y: pd.Series) -> pd.Series:
+        return x.rolling(self.window).cov(y)
+
+    def calc(self, df: pd.DataFrame) -> pd.Series:
+        x = _safe_series(self.left.calc(df))
+        y = _safe_series(self.right.calc(df))
+        if 'instrument_id' not in df.columns:
+            return self._calc_one(x, y)
+        out = pd.Series(np.nan, index=df.index, dtype=float)
+        grouped = df.groupby('instrument_id', sort=False).groups
+        for _, idx in grouped.items():
+            idx_list = list(idx)
+            out.loc[idx_list] = self._calc_one(x.loc[idx_list], y.loc[idx_list]).values
+        return out
+
+    def to_formula(self) -> str:
+        return f"TsCov({self.left}, {self.right}, {self.window})"
+
+
+class OpTsBeta(FactorNode):
+    def __init__(self, left: FactorNode, right: FactorNode, window: int):
+        self.left = left
+        self.right = right
+        self.window = int(window)
+
+    def _calc_one(self, x: pd.Series, y: pd.Series) -> pd.Series:
+        cov_xy = x.rolling(self.window).cov(y)
+        var_y = y.rolling(self.window).var().replace(0, np.nan)
+        return cov_xy / var_y
+
+    def calc(self, df: pd.DataFrame) -> pd.Series:
+        x = _safe_series(self.left.calc(df))
+        y = _safe_series(self.right.calc(df))
+        if 'instrument_id' not in df.columns:
+            return self._calc_one(x, y)
+        out = pd.Series(np.nan, index=df.index, dtype=float)
+        grouped = df.groupby('instrument_id', sort=False).groups
+        for _, idx in grouped.items():
+            idx_list = list(idx)
+            out.loc[idx_list] = self._calc_one(x.loc[idx_list], y.loc[idx_list]).values
+        return out
+
+    def to_formula(self) -> str:
+        return f"TsBeta({self.left}, {self.right}, {self.window})"
+
+
+class OpVpDivergence(FactorNode):
+    def __init__(self, left: FactorNode, right: FactorNode, window: int):
+        self.left = left
+        self.right = right
+        self.window = int(window)
+
+    def _calc_one(self, x: pd.Series, y: pd.Series) -> pd.Series:
+        return x.diff(1).rolling(self.window).corr(y.diff(1))
+
+    def calc(self, df: pd.DataFrame) -> pd.Series:
+        x = _safe_series(self.left.calc(df))
+        y = _safe_series(self.right.calc(df))
+        if 'instrument_id' not in df.columns:
+            return self._calc_one(x, y)
+        out = pd.Series(np.nan, index=df.index, dtype=float)
+        grouped = df.groupby('instrument_id', sort=False).groups
+        for _, idx in grouped.items():
+            idx_list = list(idx)
+            out.loc[idx_list] = self._calc_one(x.loc[idx_list], y.loc[idx_list]).values
+        return out
+
+    def to_formula(self) -> str:
+        return f"VpDivergence({self.left}, {self.right}, {self.window})"
+
+
+class OpAmihud(FactorNode):
+    def __init__(self, left: FactorNode, right: FactorNode, window: int):
+        self.left = left
+        self.right = right
+        self.window = int(window)
+
+    def _calc_one(self, close: pd.Series, volume: pd.Series) -> pd.Series:
+        close_safe = close.replace(0, np.nan)
+        volume_safe = volume.replace(0, np.nan)
+        shock = (close.diff(1).abs() / close_safe) / volume_safe
+        return shock.rolling(self.window).mean()
+
+    def calc(self, df: pd.DataFrame) -> pd.Series:
+        close = _safe_series(self.left.calc(df))
+        volume = _safe_series(self.right.calc(df))
+        if 'instrument_id' not in df.columns:
+            return self._calc_one(close, volume)
+        out = pd.Series(np.nan, index=df.index, dtype=float)
+        grouped = df.groupby('instrument_id', sort=False).groups
+        for _, idx in grouped.items():
+            idx_list = list(idx)
+            out.loc[idx_list] = self._calc_one(close.loc[idx_list], volume.loc[idx_list]).values
+        return out
+
+    def to_formula(self) -> str:
+        return f"Amihud({self.left}, {self.right}, {self.window})"
+
+
+class OpOiTrendConviction(FactorNode):
+    def __init__(self, left: FactorNode, right: FactorNode):
+        self.left = left
+        self.right = right
+
+    def _calc_one(self, close: pd.Series, oi: pd.Series) -> pd.Series:
+        return pd.Series(np.sign(close.diff(1)) * oi.diff(1), index=close.index)
+
+    def calc(self, df: pd.DataFrame) -> pd.Series:
+        close = _safe_series(self.left.calc(df))
+        oi = _safe_series(self.right.calc(df))
+        if 'instrument_id' not in df.columns:
+            return self._calc_one(close, oi)
+        out = pd.Series(np.nan, index=df.index, dtype=float)
+        grouped = df.groupby('instrument_id', sort=False).groups
+        for _, idx in grouped.items():
+            idx_list = list(idx)
+            out.loc[idx_list] = self._calc_one(close.loc[idx_list], oi.loc[idx_list]).values
+        return out
+
+    def to_formula(self) -> str:
+        return f"OiTrendConviction({self.left}, {self.right})"
+
+
+class OpMaRibbon(FactorNode):
+    def __init__(self, child: FactorNode, window1: int, window2: int, window3: int):
+        self.child = child
+        self.window1 = int(window1)
+        self.window2 = int(window2)
+        self.window3 = int(window3)
+
+    def _calc_one(self, x: pd.Series) -> pd.Series:
+        ma1 = x.rolling(self.window1).mean()
+        ma2 = x.rolling(self.window2).mean()
+        ma3 = x.rolling(self.window3).mean()
+        ma_df = pd.DataFrame({'ma1': ma1, 'ma2': ma2, 'ma3': ma3}, index=x.index)
+        spread = ma_df.max(axis=1) - ma_df.min(axis=1)
+        center = ma_df.mean(axis=1).abs().replace(0, np.nan)
+        return spread / center
+
+    def calc(self, df: pd.DataFrame) -> pd.Series:
+        x = _safe_series(self.child.calc(df))
+        if 'instrument_id' not in df.columns:
+            return self._calc_one(x)
+        out = pd.Series(np.nan, index=df.index, dtype=float)
+        grouped = df.groupby('instrument_id', sort=False).groups
+        for _, idx in grouped.items():
+            idx_list = list(idx)
+            out.loc[idx_list] = self._calc_one(x.loc[idx_list]).values
+        return out
+
+    def to_formula(self) -> str:
+        return f"MaRibbon({self.child}, {self.window1}, {self.window2}, {self.window3})"
+
+
+BINARY_OPS = [OpAdd, OpSub, OpMul, OpDiv, OpMax, OpMin, OpLt, OpGt, OpOiTrendConviction]
 UNARY_OPS = [OpSqrtAbs, OpAbs, OpInv, OpSig, OpSign, OpDelta]
 UNARY_TS_OPS = [
+    OpEma,
+    OpTsDecayExp,
     OpTsMean,
     OpTsStd,
     OpTsDelta,
@@ -509,14 +708,29 @@ UNARY_TS_OPS = [
     OpTsTimeWeightedMean,
     OpTsRank,
 ]
-BINARY_TS_OPS = [OpTsCorr, OpTsRankCorr]
+BINARY_TS_OPS = [OpTsCorr, OpTsRankCorr, OpTsCov, OpTsBeta, OpVpDivergence, OpAmihud]
+TERNARY_WINDOW_TS_OPS = [OpMaRibbon]
 
 UNARY_CHILD_OPS = tuple(UNARY_OPS + UNARY_TS_OPS + [OpNeg])
 BINARY_CHILD_OPS = tuple(BINARY_OPS + BINARY_TS_OPS)
 
 OP_CLASS_BY_NAME: Dict[str, Type[Any]] = {
     cls.__name__.replace('Op', ''): cls
-    for cls in (BINARY_OPS + UNARY_OPS + UNARY_TS_OPS + BINARY_TS_OPS + [OpNeg])
+    for cls in (BINARY_OPS + UNARY_OPS + UNARY_TS_OPS + BINARY_TS_OPS + TERNARY_WINDOW_TS_OPS + [OpNeg])
+}
+
+OP_ALIAS_BY_NAME: Dict[str, Type[Any]] = {
+    # Case-insensitive aliases.
+    **{k.lower(): v for k, v in OP_CLASS_BY_NAME.items()},
+    # Snake-case aliases expected from quant literature.
+    'ema': OpEma,
+    'ts_decay_exp': OpTsDecayExp,
+    'ts_cov': OpTsCov,
+    'ts_beta': OpTsBeta,
+    'vp_divergence': OpVpDivergence,
+    'amihud': OpAmihud,
+    'oi_trend_conviction': OpOiTrendConviction,
+    'ma_ribbon': OpMaRibbon,
 }
 
 
@@ -525,11 +739,15 @@ def available_operator_prompt_text() -> str:
     unary = ', '.join(cls.__name__.replace('Op', '') for cls in UNARY_OPS + [OpNeg])
     unary_ts = ', '.join(cls.__name__.replace('Op', '') for cls in UNARY_TS_OPS)
     binary_ts = ', '.join(cls.__name__.replace('Op', '') for cls in BINARY_TS_OPS)
+    ternary_ts = ', '.join(cls.__name__.replace('Op', '') for cls in TERNARY_WINDOW_TS_OPS)
+    alias_text = 'ema, ts_decay_exp, ts_cov, ts_beta, vp_divergence, amihud, oi_trend_conviction, ma_ribbon'
     return (
         f"可用二元算子(2参数): {binary}\n"
         f"可用一元算子(1参数): {unary}\n"
         f"可用一元时序算子(2参数, 第二个为窗口整数N): {unary_ts}\n"
-        f"可用二元时序算子(3参数, 第三个为窗口整数N): {binary_ts}"
+        f"可用二元时序算子(3参数, 第三个为窗口整数N): {binary_ts}\n"
+        f"可用多窗口时序算子(4参数, 后三个为窗口整数N): {ternary_ts}\n"
+        f"同义别名(大小写不敏感): {alias_text}"
     )
 
 
@@ -549,6 +767,10 @@ def parse_formula_to_node(formula: str,
         raise ValueError('formula must be a non-empty string.')
 
     fields = set(data_fields or ['open', 'high', 'low', 'close', 'volume', 'position'])
+    if 'position' in fields:
+        fields.add('oi')
+    if 'oi' in fields:
+        fields.add('position')
     expr = ast.parse(formula.strip(), mode='eval').body
 
     def _build(node: ast.AST) -> FactorNode:
@@ -569,6 +791,8 @@ def parse_formula_to_node(formula: str,
             op_name = node.func.id
             op_cls = OP_CLASS_BY_NAME.get(op_name)
             if op_cls is None:
+                op_cls = OP_ALIAS_BY_NAME.get(op_name.lower())
+            if op_cls is None:
                 raise ValueError(f'Unsupported operator `{op_name}`.')
 
             if op_cls in BINARY_OPS:
@@ -587,6 +811,15 @@ def parse_formula_to_node(formula: str,
                 if len(node.args) != 3:
                     raise ValueError(f'{op_name} expects 3 args (X, Y, N).')
                 return op_cls(_build(node.args[0]), _build(node.args[1]), _parse_window_arg(node.args[2]))
+            if op_cls in TERNARY_WINDOW_TS_OPS:
+                if len(node.args) != 4:
+                    raise ValueError(f'{op_name} expects 4 args (X, N1, N2, N3).')
+                return op_cls(
+                    _build(node.args[0]),
+                    _parse_window_arg(node.args[1]),
+                    _parse_window_arg(node.args[2]),
+                    _parse_window_arg(node.args[3]),
+                )
 
         raise ValueError(f'Unsupported formula node: {ast.dump(node)}')
 
