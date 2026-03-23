@@ -167,7 +167,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument('--relative_check_version_list', type=str, default=None,
                         help='Comma-separated versions for relative check. Default None means all versions.')
 
-    parser.add_argument('--gp_generations', type=int, default=50)
+    parser.add_argument('--gp_generations', type=int, default=30)
     parser.add_argument('--gp_population_size', type=int, default=150)
     parser.add_argument('--gp_max_depth', type=int, default=4)
     parser.add_argument('--gp_elite_size', type=int, default=20)
