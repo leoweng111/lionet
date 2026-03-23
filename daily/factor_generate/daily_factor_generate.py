@@ -51,7 +51,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument('--rolling_norm_min_periods', type=int, default=20)
     parser.add_argument('--rolling_norm_eps', type=float, default=1e-8)
     parser.add_argument('--rolling_norm_clip', type=float, default=10.0)
-    parser.add_argument('--check_relative', action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument('--check_relative', action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument('--relative_threshold', type=float, default=0.7)
     parser.add_argument('--relative_check_version_list', type=str, default=None,
                         help='Comma-separated versions for relative check. Default None means all versions.')

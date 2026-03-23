@@ -54,7 +54,7 @@ class FactorGenerator:
                  rolling_norm_eps: float = 1e-8,
                  rolling_norm_clip: float = 5.0,
                  check_leakage_count: int = 20,
-                 check_relative: bool = False,
+                 check_relative: bool = True,
                  relative_threshold: float = 0.7,
                  relative_check_version_list: Optional[Sequence[str]] = None,
                  version: Optional[str] = None):
@@ -1203,7 +1203,7 @@ class GeneticFactorGenerator(FactorGenerator):
                  rolling_norm_eps: float = 1e-8,
                  rolling_norm_clip: float = 5.0,
                  check_leakage_count: int = 20,
-                 check_relative: bool = False,
+                 check_relative: bool = True,
                  relative_threshold: float = 0.7,
                  relative_check_version_list: Optional[Sequence[str]] = None,
                  version: Optional[str] = None,
