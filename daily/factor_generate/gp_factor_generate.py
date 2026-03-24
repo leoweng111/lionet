@@ -67,13 +67,13 @@ def run_gp_factor_generate(
     gp_depth_penalty_linear_coef: float = 0.0,
     gp_depth_penalty_quadratic_coef: float = 0.0,
     gp_log_interval: int = 5,
-    retry_time: int = 0,
+    attempt_time: int = 3,
     version: Optional[str] = None,
 ):
     version = version or datetime.now().strftime('%Y%m%d')
-    max_retry = max(0, int(retry_time))
+    total_attempts = max(1, int(attempt_time))
     last_result = None
-    for attempt_idx in range(max_retry + 1):
+    for attempt_idx in range(total_attempts):
         fg = GeneticFactorGenerator(
             instrument_type=instrument_type,
             instrument_id_list=instrument_id_list,
@@ -130,13 +130,13 @@ def run_gp_factor_generate(
         selected_count = len(result.get('selected_fc_name_list', []))
         if selected_count > 0 and result.get('config_ref'):
             if attempt_idx > 0:
-                log.info(f'[gp] Success after retry: attempt={attempt_idx + 1}/{max_retry + 1}, selected_count={selected_count}')
+                log.info(f'[gp] Success after attempts: attempt={attempt_idx + 1}/{total_attempts}, selected_count={selected_count}')
             return result
 
-        if attempt_idx < max_retry:
-            log.warning(f'[gp] No factor persisted on attempt {attempt_idx + 1}/{max_retry + 1}, retrying...')
+        if attempt_idx < total_attempts - 1:
+            log.warning(f'[gp] No factor persisted on attempt {attempt_idx + 1}/{total_attempts}, retrying...')
 
-    log.warning(f'[gp] No factor persisted after all attempts: total_attempts={max_retry + 1}')
+    log.warning(f'[gp] No factor persisted after all attempts: total_attempts={total_attempts}')
     return last_result or {
         'config_ref': None,
         'config_path': None,
@@ -208,8 +208,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument('--gp_depth_penalty_linear_coef', type=float, default=0.05)
     parser.add_argument('--gp_depth_penalty_quadratic_coef', type=float, default=0.0)
     parser.add_argument('--gp_log_interval', type=int, default=5)
-    parser.add_argument('--retry_time', type=int, default=0,
-                        help='Retry times when one mining run persists no factors. Total attempts = retry_time + 1.')
+    parser.add_argument('--attempt_time', type=int, default=3,
+                        help='Total attempts when mining GP factors. Must be >= 1.')
 
     return parser
 
@@ -268,7 +268,7 @@ def main(argv: Optional[Sequence[str]] = None):
         gp_depth_penalty_linear_coef=args.gp_depth_penalty_linear_coef,
         gp_depth_penalty_quadratic_coef=args.gp_depth_penalty_quadratic_coef,
         gp_log_interval=args.gp_log_interval,
-        retry_time=args.retry_time,
+        attempt_time=args.attempt_time,
         version=args.version,
     )
     print(f"[gp] config_ref={result.get('config_ref')}")

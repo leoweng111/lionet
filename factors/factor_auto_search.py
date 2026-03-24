@@ -407,14 +407,17 @@ class FactorGenerator:
                 if require_all_instruments:
                     agg_mean = float(vals.min()) if direction == 1 else float(vals.max())
                     agg_yearly_pass = bool(df_fc[pass_col].all())
+                    agg_group_valid = bool(df_fc['__group_valid__'].all()) if '__group_valid__' in df_fc.columns else True
                 else:
                     agg_mean = float(vals.max()) if direction == 1 else float(vals.min())
                     agg_yearly_pass = bool(df_fc[pass_col].any())
+                    agg_group_valid = bool(df_fc['__group_valid__'].any()) if '__group_valid__' in df_fc.columns else True
 
                 rows.append({
                     'factor_name': str(fc_name),
                     'yearly_mean': agg_mean,
                     'yearly_pass': agg_yearly_pass,
+                    'group_valid': agg_group_valid,
                 })
 
             if not rows:
@@ -423,15 +426,94 @@ class FactorGenerator:
             rows_df = rows_df.sort_values('yearly_mean', ascending=(direction == -1)).reset_index(drop=True)
             best_row = rows_df.iloc[0]
             yearly_mean = float(best_row['yearly_mean'])
-            gap_to_threshold = float(yearly_mean - float(mean_threshold))
+
+            df_factor = summary_df.loc[
+                (summary_df['Factor Name'] == str(best_row['factor_name'])) & summary_df['__is_yearly__']
+            ].copy()
+            yearly_detail: List[Dict[str, Any]] = []
+            if not df_factor.empty:
+                if 'Instrument ID' in df_factor.columns:
+                    for year_text, df_year in df_factor.groupby('__year_str__', sort=True):
+                        vals = pd.to_numeric(df_year[indicator], errors='coerce').dropna()
+                        if vals.empty:
+                            continue
+                        if require_all_instruments:
+                            year_value = float(vals.min()) if direction == 1 else float(vals.max())
+                        else:
+                            year_value = float(vals.max()) if direction == 1 else float(vals.min())
+                        year_pass = (year_value >= float(conf[1])) if direction == 1 else (year_value <= float(conf[1]))
+                        yearly_detail.append({
+                            'year': str(year_text),
+                            'value': year_value,
+                            'threshold': float(conf[1]),
+                            'pass': bool(year_pass),
+                        })
+                else:
+                    for year_text, df_year in df_factor.groupby('__year_str__', sort=True):
+                        vals = pd.to_numeric(df_year[indicator], errors='coerce').dropna()
+                        if vals.empty:
+                            continue
+                        year_value = float(vals.mean())
+                        year_pass = (year_value >= float(conf[1])) if direction == 1 else (year_value <= float(conf[1]))
+                        yearly_detail.append({
+                            'year': str(year_text),
+                            'value': year_value,
+                            'threshold': float(conf[1]),
+                            'pass': bool(year_pass),
+                        })
+
+            mean_pass = (yearly_mean >= float(mean_threshold)) if direction == 1 else (yearly_mean <= float(mean_threshold))
+            yearly_all_pass = bool(all(item['pass'] for item in yearly_detail)) if yearly_detail else False
+
+            # Compute whole-filter pass/fail for this factor across all indicators.
+            df_factor_group = per_group_df.loc[per_group_df['Factor Name'] == str(best_row['factor_name'])].copy()
+            failed_indicators: List[str] = []
+            for ind_all, conf_all in filter_indicator_dict.items():
+                mean_thr_all, _, direction_all = conf_all
+                metric_col_all = f'__mean__{ind_all}'
+                pass_col_all = f'__yearly_pass__{ind_all}'
+                vals_all = pd.to_numeric(df_factor_group[metric_col_all], errors='coerce').dropna()
+                if vals_all.empty:
+                    failed_indicators.append(ind_all)
+                    continue
+
+                if require_all_instruments:
+                    agg_mean_all = float(vals_all.min()) if direction_all == 1 else float(vals_all.max())
+                    agg_yearly_pass_all = bool(df_factor_group[pass_col_all].all())
+                    agg_group_valid_all = bool(df_factor_group['__group_valid__'].all())
+                else:
+                    agg_mean_all = float(vals_all.max()) if direction_all == 1 else float(vals_all.min())
+                    agg_yearly_pass_all = bool(df_factor_group[pass_col_all].any())
+                    agg_group_valid_all = bool(df_factor_group['__group_valid__'].any())
+
+                mean_pass_all = (agg_mean_all >= float(mean_thr_all)) if direction_all == 1 else (agg_mean_all <= float(mean_thr_all))
+                if not (mean_pass_all and agg_yearly_pass_all and agg_group_valid_all):
+                    failed_indicators.append(ind_all)
+            overall_pass = len(failed_indicators) == 0
+
+            failed_checks: List[str] = []
+            if not mean_pass:
+                failed_checks.append('mean_threshold_not_passed')
+            if not yearly_all_pass:
+                failed_checks.append('yearly_threshold_not_passed')
+            if not bool(best_row.get('group_valid', True)):
+                failed_checks.append('missing_or_invalid_all_row_or_group_constraint')
 
             best_metric_map[indicator] = {
                 'factor_name': str(best_row['factor_name']),
                 'yearly_mean': yearly_mean,
                 'mean_threshold': float(mean_threshold),
+                'yearly_threshold': float(conf[1]),
                 'direction': int(direction),
-                'gap_to_threshold': gap_to_threshold,
+                f'gap_to_{indicator}_mean_threshold': float(yearly_mean - float(mean_threshold)),
                 'yearly_pass': bool(best_row['yearly_pass']),
+                'group_valid': bool(best_row.get('group_valid', True)),
+                'mean_pass': bool(mean_pass),
+                'yearly_all_pass': bool(yearly_all_pass),
+                'yearly_detail': yearly_detail,
+                f'{indicator}_failed_checks': failed_checks,
+                'overall_pass': bool(overall_pass),
+                'failed_indicators': failed_indicators,
                 'require_all_instruments': bool(require_all_instruments),
                 'require_all_row': bool(require_all_row),
             }
@@ -497,6 +579,86 @@ class FactorGenerator:
 
             out[str(fc_name)] = indicator_payload
         return out
+
+    @staticmethod
+    def _format_best_failed_indicator_metrics_log(best_failed_indicator_metrics: Dict[str, Dict[str, Any]]) -> str:
+        if not best_failed_indicator_metrics:
+            return 'Best failed indicator metrics: none.'
+
+        def _to_float(x: Any) -> float:
+            try:
+                return float(x)
+            except Exception:
+                return float('nan')
+
+        indicator_to_factor = {
+            indicator: str(info.get('factor_name'))
+            for indicator, info in best_failed_indicator_metrics.items()
+        }
+        unique_factors = sorted({x for x in indicator_to_factor.values() if x and x != 'None'})
+
+        lines = [
+            'Best failed indicator metrics (readable, indicator-wise best candidates):',
+            '  Note: `gap_to_mean_threshold` = yearly_mean - mean_threshold. '
+            'It can be positive while overall check still fails if any year violates yearly_threshold.',
+            '  Note: each indicator independently selects its own best failed factor; '
+            'factor names can be different across indicators.',
+            f'  Indicator -> factor mapping: {indicator_to_factor}',
+            f'  Unique factors in this diagnostic: {unique_factors}',
+        ]
+        for indicator, info in best_failed_indicator_metrics.items():
+            lines.append(f'  - Indicator: {indicator}')
+            lines.append(f'    factor_name: {info.get("factor_name")}')
+            lines.append(
+                '    mean_check: '
+                f'value={_to_float(info.get("yearly_mean")):.6f}, '
+                f'threshold={_to_float(info.get("mean_threshold")):.6f}, '
+                f'pass={info.get("mean_pass")}'
+            )
+            lines.append(
+                '    yearly_check: '
+                f'threshold={_to_float(info.get("yearly_threshold")):.6f}, '
+                f'all_pass={info.get("yearly_all_pass")}, '
+                f'group_valid={info.get("group_valid")}'
+            )
+            for y in info.get('yearly_detail', []):
+                lines.append(
+                    f'      year={y.get("year")}: value={_to_float(y.get("value")):.6f}, '
+                    f'threshold={_to_float(y.get("threshold")):.6f}, pass={y.get("pass")}'
+                )
+            failed_key = f'{indicator}_failed_checks'
+            gap_key = f'gap_to_{indicator}_mean_threshold'
+            lines.append(f'    {failed_key}: {info.get(failed_key, [])}')
+            lines.append(f'    {gap_key}: {_to_float(info.get(gap_key, 0.0)):.6f}')
+            lines.append(
+                '    overall_filter: '
+                f'overall_pass={info.get("overall_pass")}, '
+                f'failed_indicators={info.get("failed_indicators", [])}'
+            )
+        return '\n'.join(lines)
+
+    @staticmethod
+    def _format_selected_indicator_metrics_log(fc_name: str,
+                                               metrics: Dict[str, Any]) -> str:
+        if not metrics:
+            return f'[PersistFactorMetrics] factor={fc_name} (no indicator metrics found).'
+
+        def _to_float(x: Any) -> float:
+            try:
+                return float(x)
+            except Exception:
+                return float('nan')
+
+        lines = [f'[PersistFactorMetrics] factor={fc_name}']
+        for indicator, info in metrics.items():
+            lines.append(
+                f'  - {indicator}: mean={_to_float(info.get("yearly_mean", 0.0)):.6f}, '
+                f'mean_threshold={_to_float(info.get("mean_threshold", 0.0)):.6f}, '
+                f'worst_year={_to_float(info.get("yearly_worst", 0.0)):.6f}, '
+                f'yearly_threshold={_to_float(info.get("yearly_threshold", 0.0)):.6f}, '
+                f'direction={int(info.get("direction", 1))}'
+            )
+        return '\n'.join(lines)
 
     def _build_metric_fitness_map(self,
                                   performance_summary: pd.DataFrame,
@@ -781,10 +943,7 @@ class FactorGenerator:
             )
             log.warning(msg)
             if best_failed_indicator_metrics:
-                log.warning(
-                    'Best failed indicator metrics from generated factors: '
-                    f'{best_failed_indicator_metrics}'
-                )
+                log.warning(self._format_best_failed_indicator_metrics_log(best_failed_indicator_metrics))
             return {
                 'config_ref': None,
                 'config_path': None,
@@ -850,10 +1009,10 @@ class FactorGenerator:
             selected_fc_name_list=selected_after_relative,
         )
         for fc_name in selected_after_relative:
-            log.info(
-                '[PersistFactorMetrics] '
-                f'factor={fc_name}, metrics={selected_indicator_metrics.get(fc_name, {})}'
-            )
+            log.info(self._format_selected_indicator_metrics_log(
+                fc_name=fc_name,
+                metrics=selected_indicator_metrics.get(fc_name, {}),
+            ))
 
         return {
             'config_ref': config_ref,

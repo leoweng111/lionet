@@ -83,8 +83,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument('--gp_depth_penalty_linear_coef', type=float, default=0.05)
     parser.add_argument('--gp_depth_penalty_quadratic_coef', type=float, default=0.0)
     parser.add_argument('--gp_log_interval', type=int, default=5)
-    parser.add_argument('--gp_retry_time', type=int, default=3,
-                        help='Retry times for GP when one mining run persists no factors.')
+    parser.add_argument('--gp_attempt_time', type=int, default=3,
+                        help='Total attempts for GP mining when persistence may fail.')
 
     parser.add_argument('--check_leakage_count', type=int, default=20)
     parser.add_argument('--only', type=str, default='all', choices=['all', 'llm_prompt', 'gp'])
@@ -194,7 +194,7 @@ def run_daily_once(args) -> dict:
             gp_depth_penalty_linear_coef=args.gp_depth_penalty_linear_coef,
             gp_depth_penalty_quadratic_coef=args.gp_depth_penalty_quadratic_coef,
             gp_log_interval=args.gp_log_interval,
-            retry_time=args.gp_retry_time,
+            attempt_time=args.gp_attempt_time,
             version=version,
         )
         print(f"[daily][gp] config_path={gp_result.get('config_path')}")
