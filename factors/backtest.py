@@ -29,7 +29,7 @@ class BackTester:
                  start_time: str = None,
                  end_time: str = None,
                  portfolio_adjust_method: str = '1D',
-                 interest_method: str = 'compound',
+                 interest_method: str = 'simple',
                  risk_free_rate: bool = False,
                  calculate_baseline: bool = True,
                  apply_rolling_norm: bool = True,

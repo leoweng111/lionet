@@ -121,7 +121,7 @@ def get_ts_ret_and_turnover(Data: pd.DataFrame,
 
 def get_annualized_ret(Data: pd.DataFrame,
                        ret_col: Union[str, list],
-                       interest_method: str = 'compound'):
+                       interest_method: str = 'simple'):
     """
     Get annualized return for every year in data and total annualized return.
 

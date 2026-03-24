@@ -39,7 +39,7 @@ def run_llm_prompt_factor_generate(
     start_time: Optional[str] = None,
     end_time: Optional[str] = None,
     portfolio_adjust_method: str = '1D',
-    interest_method: str = 'compound',
+    interest_method: str = 'simple',
     risk_free_rate: bool = False,
     calculate_baseline: bool = True,
     n_jobs: int = 5,
@@ -117,7 +117,7 @@ def build_parser() -> argparse.ArgumentParser:
                         choices=['futures_continuous_contract'])
     parser.add_argument('--fc_freq', type=str, default='1d', choices=['1m', '5m', '1d'])
     parser.add_argument('--portfolio_adjust_method', type=str, default='1D', choices=['min', '1D', '1M', '1Q'])
-    parser.add_argument('--interest_method', type=str, default='compound', choices=['simple', 'compound'])
+    parser.add_argument('--interest_method', type=str, default='simple', choices=['simple', 'compound'])
     parser.add_argument('--risk_free_rate', action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument('--calculate_baseline', action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument('--n_jobs', type=int, default=5)

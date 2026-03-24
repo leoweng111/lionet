@@ -39,7 +39,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument('--instrument_type', type=str, default='futures_continuous_contract',
                         choices=['futures_continuous_contract'])
     parser.add_argument('--portfolio_adjust_method', type=str, default='1D', choices=['min', '1D', '1M', '1Q'])
-    parser.add_argument('--interest_method', type=str, default='compound', choices=['simple', 'compound'])
+    parser.add_argument('--interest_method', type=str, default='simple', choices=['simple', 'compound'])
     parser.add_argument('--fc_freq', type=str, default='1d', choices=['1m', '5m', '1d'])
     parser.add_argument('--risk_free_rate', action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument('--calculate_baseline', action=argparse.BooleanOptionalAction, default=True)
