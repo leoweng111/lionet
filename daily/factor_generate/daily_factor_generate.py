@@ -88,8 +88,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     parser.add_argument('--check_leakage_count', type=int, default=20)
     parser.add_argument('--only', type=str, default='all', choices=['all', 'llm_prompt', 'gp'])
-    parser.add_argument('--schedule', action=argparse.BooleanOptionalAction, default=False,
-                        help='If enabled, run daily at 22:00 using schedule library.')
+    parser.add_argument('--execute_now', action=argparse.BooleanOptionalAction, default=False,
+                        help='Execute immediately once and exit. Default behavior is scheduled daily execution.')
     return parser
 
 
@@ -212,7 +212,7 @@ def main(argv: Optional[Sequence[str]] = None):
     if argv is None and 'ipykernel' in sys.modules:
         argv = []
     args = build_parser().parse_args(argv)
-    if not args.schedule:
+    if args.execute_now:
         return run_daily_once(args)
 
     def _job():
