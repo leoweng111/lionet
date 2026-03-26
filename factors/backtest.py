@@ -44,7 +44,7 @@ class BackTester:
         # 时序收益率
         """
         Some params need to be initialized for backtesting.
-        We assume that the signal is generated at the open time of every bar, and we immediately trade at this bar
+        We assume that the signal is generated at the open time of every bar, and we immediately strategy at this bar
         with average transaction price (open + high + low + close) / 4 of this bar, and will complete the transaction
         at the close time of the next `transaction_period` bar
 
