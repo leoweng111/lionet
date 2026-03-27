@@ -50,6 +50,11 @@ FUTURES_FIXED_LISTING_MONTHS = {
 # Instrument-level trading fee config.
 FEE = {"C0": "0.0002", "FG0": "0.0002"}
 
+# Futures contract multiplier config, keyed by root symbol (e.g. C, RB, FG).
+FUTURES_CONTRACT_MULTIPLIER = {
+    'C': 10,
+}
+
 # LLM (DeepSeek)
 DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
 DEEPSEEK_BASE_URL = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
