@@ -107,9 +107,22 @@ def get_ts_ret_and_turnover(Data: pd.DataFrame,
 
     # For a single instrument, TS gross return is signal_t * future_ret_t.
     df_gross_ret_ts = df[fc_col].mul(df['future_ret'], axis=0)
-    # the position of and before first day is 0.
-    # So the turnover of first day is just the position of first day.
-    df_turnover_ts = df[fc_col].diff().abs()
+    # Physical turnover:
+    # - Normal day: |position_t - position_{t-1}|
+    # - Rollover day: close old + open new => |position_{t-1}| + |position_t|
+    normal_turnover = df[fc_col].diff().abs()
+    rollover_turnover = df[fc_col].shift(1).abs() + df[fc_col].abs()
+    if 'is_rollover' in df.columns:
+        rollover_mask = df['is_rollover'].fillna(False).astype(bool)
+        turnover_values = np.where(
+            rollover_mask.to_numpy().reshape(-1, 1),
+            rollover_turnover.to_numpy(),
+            normal_turnover.to_numpy(),
+        )
+        df_turnover_ts = pd.DataFrame(turnover_values, index=normal_turnover.index, columns=normal_turnover.columns)
+    else:
+        df_turnover_ts = normal_turnover
+
     first_row_idx = df_turnover_ts.index[0]
     df_turnover_ts.loc[first_row_idx] = df[fc_col].loc[first_row_idx].abs()
 

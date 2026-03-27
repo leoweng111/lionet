@@ -2,12 +2,20 @@
 This script is to get and deal with futures data based on akshare.
 """
 import time
-from typing import List, Union
+from typing import Dict, List, Optional, Sequence, Union
 import pandas as pd
+import numpy as np
 
 import akshare as ak
 from mongo.mongify import get_data, update_data
-from utils.params import START_DATE_STR, END_DATE_STR, START_DATE, END_DATE
+from utils.params import (
+    START_DATE_STR,
+    END_DATE_STR,
+    START_DATE,
+    END_DATE,
+    RESEARCH_START_DATE,
+    FUTURES_FIXED_LISTING_MONTHS,
+)
 from utils.logging import log
 
 
@@ -92,17 +100,24 @@ def get_futures_continuous_contract_price(instrument_id: Union[str, List, None] 
     if not from_database:
         df_list = []
         for ins_id in instrument_id:
-            df_futures = ak.futures_main_sina(symbol=ins_id, start_date=start_date, end_date=end_date)
-            time.sleep(wait_time)
+            root_instrument = _to_root_instrument(ins_id)
+            df_futures = build_roll_adjusted_continuous_contract_price(
+                instrument_id=root_instrument,
+                start_date=start_date,
+                end_date=end_date,
+                wait_time=wait_time,
+                research_start_date=RESEARCH_START_DATE,
+            )
             df_futures['instrument_id'] = ins_id
             df_list.append(df_futures)
-        df_futures_price = pd.concat(df_list)
-        rename_dc = {'日期': 'time', '开盘价': 'open', '最高价': 'high', '最低价': 'low',
-                     '收盘价': 'close', '成交量': 'volume', '持仓量': 'position'}
-
-        df_futures_price = df_futures_price.rename(columns=rename_dc)
-        df_futures_price = df_futures_price[['time', 'instrument_id',
-                                             'open', 'high', 'low', 'close', 'volume', 'position']].copy()
+        if not df_list:
+            return pd.DataFrame(columns=[
+                'time', 'instrument_id', 'symbol',
+                'open', 'high', 'low', 'close', 'settle',
+                'volume', 'position',
+                'weighted_factor', 'cur_weighted_factor', 'is_rollover',
+            ])
+        df_futures_price = pd.concat(df_list, ignore_index=True)
         df_futures_price = df_futures_price.loc[df_futures_price['instrument_id'].isin(instrument_id)]
         df_futures_price['time'] = pd.to_datetime(df_futures_price['time'])
 
@@ -150,6 +165,323 @@ def update_futures_continuous_contract_price(instrument_id: Union[str, List, Non
                 method=method)
 
     log.info(f'Successfully update futures continuous contract daily price.')
+
+
+def _to_root_instrument(instrument_id: str) -> str:
+    ins = str(instrument_id).upper().strip()
+    if not ins:
+        raise ValueError('instrument_id is empty.')
+    return ins[:-1] if ins.endswith('0') else ins
+
+
+def get_available_symbol(instrument_id: str,
+                         year: Union[str, int],
+                         month_list: Optional[Sequence[int]] = None,
+                         wait_time: float = 0.05) -> List[str]:
+    """Return available listed contract symbols for one product and year.
+
+    Example: instrument_id='C', year='2025' -> ['C2501', 'C2505', ...]
+    """
+    root = _to_root_instrument(instrument_id)
+    yy = str(year).strip()[-2:]
+    # If this product has configured fixed listing months, directly return symbols
+    # instead of probing all months via AkShare.
+    fixed_months = FUTURES_FIXED_LISTING_MONTHS.get(root)
+    if fixed_months:
+        base_months = [int(m) for m in fixed_months]
+        if month_list is not None:
+            month_set = {int(x) for x in month_list}
+            base_months = [m for m in base_months if m in month_set]
+        return [f'{root}{yy}{m:02d}' for m in base_months]
+
+    months = list(month_list) if month_list is not None else list(range(1, 13))
+
+    available: List[str] = []
+    for m in months:
+        symbol = f'{root}{yy}{int(m):02d}'
+        try:
+            df = ak.futures_zh_daily_sina(symbol=symbol)
+            if isinstance(df, pd.DataFrame) and not df.empty:
+                available.append(symbol)
+        except Exception:
+            pass
+        if wait_time > 0:
+            time.sleep(wait_time)
+    return available
+
+
+def _normalize_zh_daily_symbol_df(df_raw: pd.DataFrame,
+                                  symbol: str) -> pd.DataFrame:
+    if not isinstance(df_raw, pd.DataFrame) or df_raw.empty:
+        return pd.DataFrame()
+    df = df_raw.copy()
+    rename_dc: Dict[str, str] = {
+        'date': 'time',
+        'hold': 'position',
+    }
+    df = df.rename(columns=rename_dc)
+    required = ['time', 'open', 'high', 'low', 'close', 'volume', 'position']
+    missing = [c for c in required if c not in df.columns]
+    if missing:
+        raise ValueError(f'futures_zh_daily_sina({symbol}) missing columns: {missing}')
+    if 'settle' not in df.columns:
+        df['settle'] = df['close']
+
+    df['time'] = pd.to_datetime(df['time'])
+    for c in ['open', 'high', 'low', 'close', 'settle', 'volume', 'position']:
+        df[c] = pd.to_numeric(df[c], errors='coerce')
+    df['settle'] = df['settle'].fillna(df['close'])
+    df['volume'] = df['volume'].fillna(0.0)
+    df['position'] = df['position'].fillna(0.0)
+    df = df.dropna(subset=['time', 'open', 'high', 'low', 'close'])
+    df['symbol'] = symbol
+    return df[['time', 'symbol', 'open', 'high', 'low', 'close', 'settle', 'volume', 'position']]
+
+
+def _collect_symbols_for_range(instrument_id: str,
+                               start_date: str,
+                               end_date: str,
+                               wait_time: float = 0.05) -> List[str]:
+    start_year = pd.to_datetime(start_date).year
+    end_year = pd.to_datetime(end_date).year
+    years = list(range(start_year - 1, end_year + 2))
+    symbols: List[str] = []
+    for y in years:
+        symbols.extend(get_available_symbol(instrument_id=instrument_id, year=y, wait_time=wait_time))
+    return sorted(list(dict.fromkeys(symbols)))
+
+
+def _empty_continuous_price_df() -> pd.DataFrame:
+    return pd.DataFrame(columns=[
+        'time', 'symbol',
+        'open', 'high', 'low', 'close', 'settle',
+        'volume', 'position',
+        'weighted_factor', 'cur_weighted_factor', 'is_rollover',
+    ])
+
+
+def _build_roll_adjusted_continuous_from_panel(df_panel: pd.DataFrame,
+                                               start_date: str,
+                                               end_date: str,
+                                               instrument_id: str,
+                                               research_start_date: str) -> pd.DataFrame:
+    if df_panel.empty:
+        return _empty_continuous_price_df()
+
+    start_ts = pd.to_datetime(start_date)
+    end_ts = pd.to_datetime(end_date)
+    research_ts = pd.to_datetime(research_start_date)
+
+    panel = df_panel.copy()
+    panel = panel[(panel['time'] >= start_ts) & (panel['time'] <= end_ts)].copy()
+    if panel.empty:
+        return _empty_continuous_price_df()
+
+    panel = panel.sort_values(['time', 'symbol']).reset_index(drop=True)
+    # Build per-date contract ranking matrices.
+    # We use volume as the primary dominant criterion, while checking consistency with
+    # position-based dominant symbol for diagnostics.
+    vol_df = panel.pivot_table(index='time', columns='symbol', values='volume', aggfunc='last').sort_index()
+    pos_df = panel.pivot_table(index='time', columns='symbol', values='position', aggfunc='last').sort_index()
+
+    dominant_by_volume = vol_df.idxmax(axis=1)
+    dominant_by_position = pos_df.idxmax(axis=1)
+
+    # Primary dominant symbol is volume-max.
+    dominant_today = dominant_by_volume.copy()
+
+    # If volume-max and position-max are different, we log detailed diagnostics.
+    mismatch_mask = (
+        dominant_by_volume.notna()
+        & dominant_by_position.notna()
+        & (dominant_by_volume != dominant_by_position)
+    )
+    for t in dominant_today.index[mismatch_mask]:
+        vol_symbol = str(dominant_by_volume.loc[t])
+        pos_symbol = str(dominant_by_position.loc[t])
+        vol_value = pd.to_numeric(vol_df.loc[t, vol_symbol], errors='coerce') if vol_symbol in vol_df.columns else np.nan
+        pos_value = pd.to_numeric(pos_df.loc[t, pos_symbol], errors='coerce') if pos_symbol in pos_df.columns else np.nan
+        log.warning(
+            '[DominantMismatch] '
+            f'instrument={instrument_id}, date={pd.Timestamp(t).strftime("%Y-%m-%d")}, '
+            f'volume_symbol={vol_symbol}, volume={float(vol_value) if pd.notna(vol_value) else np.nan}, '
+            f'position_symbol={pos_symbol}, position={float(pos_value) if pd.notna(pos_value) else np.nan}, '
+            'decision=use_volume_symbol'
+        )
+    dominant_used = dominant_today.shift(1)
+    if not dominant_used.empty:
+        dominant_used.iloc[0] = dominant_today.iloc[0]
+    dominant_used = dominant_used.ffill().fillna(dominant_today)
+
+    panel_indexed = panel.set_index(['time', 'symbol']).sort_index()
+    time_list = dominant_used.index.tolist()
+
+    weighted_factor = 1.0
+    cur_weighted_factor = 1.0
+    started = False
+    prev_symbol = None
+    rows: List[Dict[str, object]] = []
+
+    def _row_by_key(key: tuple) -> Optional[pd.Series]:
+        if key not in panel_indexed.index:
+            return None
+        row = panel_indexed.loc[key]
+        if isinstance(row, pd.DataFrame):
+            row = row.iloc[-1]
+        return row
+
+    for t in time_list:
+        symbol = dominant_used.loc[t]
+        if pd.isna(symbol):
+            continue
+        symbol = str(symbol)
+
+        row_key = (t, symbol)
+        row = _row_by_key(row_key)
+        if row is None:
+            fallback = dominant_today.loc[t]
+            if pd.isna(fallback):
+                continue
+            symbol = str(fallback)
+            row_key = (t, symbol)
+            row = _row_by_key(row_key)
+            if row is None:
+                continue
+
+        if not started and t >= research_ts:
+            weighted_factor = 1.0
+            cur_weighted_factor = 1.0
+            started = True
+
+        is_rollover = bool(prev_symbol is not None and symbol != prev_symbol)
+        if started and is_rollover:
+            cur_ratio = 1.0
+            old_row = _row_by_key((t, prev_symbol))
+            new_row = _row_by_key((t, symbol))
+            if old_row is not None and new_row is not None:
+                old_open = float(pd.to_numeric(old_row.get('open'), errors='coerce'))
+                new_open = float(pd.to_numeric(new_row.get('open'), errors='coerce'))
+                if np.isfinite(old_open) and np.isfinite(new_open) and abs(new_open) > 1e-12:
+                    cur_ratio = old_open / new_open
+            cur_weighted_factor = float(cur_ratio)
+            weighted_factor = float(weighted_factor) * float(cur_ratio)
+
+        adj = float(weighted_factor) if started else 1.0
+        rows.append({
+            'time': t,
+            'symbol': symbol,
+            'open': float(row['open']) * adj,
+            'high': float(row['high']) * adj,
+            'low': float(row['low']) * adj,
+            'close': float(row['close']) * adj,
+            'settle': float(row['settle']) * adj if pd.notna(row['settle']) else np.nan,
+            'volume': float(row['volume']) if pd.notna(row['volume']) else np.nan,
+            'position': float(row['position']) if pd.notna(row['position']) else np.nan,
+            'weighted_factor': float(adj),
+            'cur_weighted_factor': float(cur_weighted_factor if started else 1.0),
+            'is_rollover': bool(started and is_rollover),
+        })
+        prev_symbol = symbol
+
+    out = pd.DataFrame(rows)
+    if out.empty:
+        return out
+    out = out.sort_values('time').reset_index(drop=True)
+    return out
+
+
+def build_roll_adjusted_continuous_contract_price(instrument_id: str,
+                                                  start_date: str,
+                                                  end_date: str,
+                                                  wait_time: float = 2,
+                                                  research_start_date: str = RESEARCH_START_DATE) -> pd.DataFrame:
+    """Build continuous daily price from contract-level data with anti-leakage rollover rule."""
+    root = _to_root_instrument(instrument_id)
+    symbols = _collect_symbols_for_range(
+        instrument_id=root,
+        start_date=start_date,
+        end_date=end_date,
+        wait_time=min(wait_time, 0.1),
+    )
+    if not symbols:
+        log.warning(f'No available symbols found for instrument={root} in range [{start_date}, {end_date}].')
+        return pd.DataFrame()
+
+    panel_list: List[pd.DataFrame] = []
+    for symbol in symbols:
+        try:
+            df_raw = ak.futures_zh_daily_sina(symbol=symbol)
+            df_symbol = _normalize_zh_daily_symbol_df(df_raw, symbol=symbol)
+            if not df_symbol.empty:
+                panel_list.append(df_symbol)
+        except Exception as e:
+            log.warning(f'Failed to fetch symbol={symbol}: {e}')
+        if wait_time > 0:
+            time.sleep(wait_time)
+
+    if not panel_list:
+        return pd.DataFrame()
+    panel_df = pd.concat(panel_list, ignore_index=True)
+    return _build_roll_adjusted_continuous_from_panel(
+        df_panel=panel_df,
+        start_date=start_date,
+        end_date=end_date,
+        instrument_id=root,
+        research_start_date=research_start_date,
+    )
+
+
+def compare_with_ak_main_continuous(instrument_id: str,
+                                    start_date: str,
+                                    end_date: str,
+                                    wait_time: float = 0.3,
+                                    atol: float = 1e-8) -> pd.DataFrame:
+    """Compare custom stitched continuous vs ak.futures_main_sina; return mismatch rows."""
+    root = _to_root_instrument(instrument_id)
+    custom_df = build_roll_adjusted_continuous_contract_price(
+        instrument_id=root,
+        start_date=start_date,
+        end_date=end_date,
+        wait_time=wait_time,
+        research_start_date=RESEARCH_START_DATE,
+    )
+    if custom_df.empty:
+        return pd.DataFrame()
+
+    main_df = ak.futures_main_sina(symbol=f'{root}0', start_date=start_date, end_date=end_date)
+    rename_dc = {
+        '日期': 'time',
+        '开盘价': 'open',
+        '最高价': 'high',
+        '最低价': 'low',
+        '收盘价': 'close',
+        '成交量': 'volume',
+        '持仓量': 'position',
+    }
+    main_df = main_df.rename(columns=rename_dc)
+    main_df['time'] = pd.to_datetime(main_df['time'])
+    for c in ['open', 'high', 'low', 'close', 'volume', 'position']:
+        if c in main_df.columns:
+            main_df[c] = pd.to_numeric(main_df[c], errors='coerce')
+
+    custom_cmp = custom_df[['time', 'open', 'high', 'low', 'close', 'weighted_factor', 'symbol', 'is_rollover']].copy()
+    wf = pd.to_numeric(custom_cmp['weighted_factor'], errors='coerce').replace(0, np.nan)
+    for c in ['open', 'high', 'low', 'close']:
+        custom_cmp[f'{c}_raw'] = pd.to_numeric(custom_cmp[c], errors='coerce') / wf
+
+    merged = custom_cmp[['time', 'symbol', 'is_rollover', 'open_raw', 'high_raw', 'low_raw', 'close_raw']].merge(
+        main_df[['time', 'open', 'high', 'low', 'close']],
+        on='time', how='inner', suffixes=('_custom', '_main')
+    )
+    if merged.empty:
+        return pd.DataFrame()
+
+    mismatch_mask = np.zeros(len(merged), dtype=bool)
+    for c in ['open', 'high', 'low', 'close']:
+        left = pd.to_numeric(merged[f'{c}_raw'], errors='coerce')
+        right = pd.to_numeric(merged[f'{c}_main'], errors='coerce')
+        mismatch_mask |= ~np.isclose(left, right, atol=atol, rtol=0.0, equal_nan=True)
+    return merged.loc[mismatch_mask].copy().reset_index(drop=True)
 
 
 def get_risk_free_rate(start_year: int = START_DATE.year,

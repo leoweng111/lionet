@@ -36,6 +36,17 @@ END_DATE = datetime.date.today()
 END_TIME = datetime.datetime.now()
 END_DATE_STR = datetime.date.today().strftime('%Y%m%d')
 
+# Futures back-adjustment anchor date:
+# adjusted price equals raw price on this date, then rolls apply cumulatively afterwards.
+RESEARCH_START_DATE = '20200101'
+
+# Futures fixed listing-month mapping.
+# Key is root instrument id (without trailing 0), value is listed month numbers.
+# Example: C -> Jan/Mar/May/Jul/Sep/Nov.
+FUTURES_FIXED_LISTING_MONTHS = {
+    'C': [1, 3, 5, 7, 9, 11],
+}
+
 # Instrument-level trading fee config.
 FEE = {"C0": "0.0002", "FG0": "0.0002"}
 
