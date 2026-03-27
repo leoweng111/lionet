@@ -87,7 +87,7 @@ class BackTester:
         self.fc_name_with_param_list = None
         self.performance_dc = None
         self.performance_summary = None
-        self.ts_performance_summary = None
+        self.performance_detail = None
         self.is_backtested = False
         self.is_preprocessed = isinstance(self.data, pd.DataFrame)
         self._did_preprocess = False
@@ -239,6 +239,14 @@ class BackTester:
         if isinstance(instrument_id_list, str):
             instrument_id_list = [instrument_id_list]
 
+        def _build_nav(ret_series: pd.Series) -> pd.Series:
+            ret = pd.to_numeric(ret_series, errors='coerce').fillna(0.0)
+            if self.interest_method == 'simple':
+                return 1.0 + ret.cumsum()
+            if self.interest_method == 'compound':
+                return (1.0 + ret).cumprod()
+            raise ValueError(f'Unsupported interest_method={self.interest_method}.')
+
         legend_drawn = False
         for instrument_id in instrument_id_list:
             for fac in fc_name:
@@ -250,7 +258,7 @@ class BackTester:
                 if end_ts is not None:
                     gross_ret = gross_ret.loc[gross_ret['time'] <= end_ts]
                 gross_ret = gross_ret.set_index('time')
-                cum_gross_ret = (1 + gross_ret[fac]).cumprod()
+                cum_gross_ret = _build_nav(gross_ret[fac])
                 line_gross_strategy, = ax1.plot(cum_gross_ret.index, cum_gross_ret, label='Strategy')
                 ax1.set_title(f'Cumulative Gross Return of factor {fac} ({instrument_id})')
                 ax1.set_xlabel('time')
@@ -262,7 +270,7 @@ class BackTester:
                 if end_ts is not None:
                     net_ret = net_ret.loc[net_ret['time'] <= end_ts]
                 net_ret = net_ret.set_index('time')
-                cum_net_ret = (1 + net_ret[fac]).cumprod()
+                cum_net_ret = _build_nav(net_ret[fac])
                 line_net_strategy, = ax2.plot(cum_net_ret.index, cum_net_ret, label='Strategy')
                 ax2.set_title(f'Cumulative Net Return of factor {fac} ({instrument_id})')
                 ax2.set_xlabel('time')
@@ -292,28 +300,28 @@ class BackTester:
 
                     line_gross_long, = ax1.plot(
                         gross_baseline.index,
-                        (1 + gross_baseline['__baseline_long__']).cumprod(),
+                        _build_nav(gross_baseline['__baseline_long__']),
                         color='tab:red',
                         linestyle='--',
                         label='Baseline Long',
                     )
                     line_gross_short, = ax1.plot(
                         gross_baseline.index,
-                        (1 + gross_baseline['__baseline_short__']).cumprod(),
+                        _build_nav(gross_baseline['__baseline_short__']),
                         color='tab:green',
                         linestyle='--',
                         label='Baseline Short',
                     )
                     ax2.plot(
                         net_baseline.index,
-                        (1 + net_baseline['__baseline_long__']).cumprod(),
+                        _build_nav(net_baseline['__baseline_long__']),
                         color='tab:red',
                         linestyle='--',
                         label='Baseline Long',
                     )
                     ax2.plot(
                         net_baseline.index,
-                        (1 + net_baseline['__baseline_short__']).cumprod(),
+                        _build_nav(net_baseline['__baseline_short__']),
                         color='tab:green',
                         linestyle='--',
                         label='Baseline Short',
@@ -386,7 +394,7 @@ class BackTester:
 
         self.performance_dc = {}
         performance_summary_list = []
-        ts_performance_summary_list = []
+        performance_detail_list = []
 
         for instrument_id, result in result_list:
             performance_dc_i, performance_summary_i = result
@@ -396,12 +404,69 @@ class BackTester:
             performance_summary_i['Instrument ID'] = instrument_id
             performance_summary_list.append(performance_summary_i)
 
-            ts_performance_summary_i = performance_summary_i.copy()
-            ts_performance_summary_i['Instrument ID'] = instrument_id
-            ts_performance_summary_list.append(ts_performance_summary_i)
+            data_i = self.data[self.data['instrument_id'] == instrument_id].copy()
+            for fac in self.fc_name_with_param_list:
+                fac_perf = performance_dc_i[fac]
+
+                daily_gross = fac_perf['daily_gross_ret'][['time', fac]].rename(columns={fac: 'daily_gross_ret'})
+                daily_net = fac_perf['daily_net_ret'][['time', fac]].rename(columns={fac: 'daily_net_ret'})
+                daily_turnover = fac_perf['daily_turnover'][['time', fac]].rename(columns={fac: 'daily_turnover'})
+
+                detail_i = data_i.merge(daily_gross, on='time', how='left', validate='1:1')
+                detail_i = detail_i.merge(daily_net, on='time', how='left', validate='1:1')
+                detail_i = detail_i.merge(daily_turnover, on='time', how='left', validate='1:1')
+                detail_i = detail_i.sort_values('time').reset_index(drop=True)
+                gross_ret = pd.to_numeric(detail_i['daily_gross_ret'], errors='coerce').fillna(0.0)
+                net_ret = pd.to_numeric(detail_i['daily_net_ret'], errors='coerce').fillna(0.0)
+                if self.interest_method == 'simple':
+                    detail_i['daily_gross_nav'] = 1.0 + gross_ret.cumsum()
+                    detail_i['daily_net_nav'] = 1.0 + net_ret.cumsum()
+                elif self.interest_method == 'compound':
+                    detail_i['daily_gross_nav'] = (1.0 + gross_ret).cumprod()
+                    detail_i['daily_net_nav'] = (1.0 + net_ret).cumprod()
+                else:
+                    raise ValueError(f'Unsupported interest_method={self.interest_method}.')
+                detail_i['factor_name'] = fac
+
+                if fac in detail_i.columns:
+                    detail_i = detail_i.rename(columns={fac: 'factor_value'})
+
+                if 'daily_gross_ret_baseline' in fac_perf and 'daily_net_ret_baseline' in fac_perf:
+                    gross_baseline = fac_perf['daily_gross_ret_baseline'][
+                        ['time', '__baseline_long__', '__baseline_short__']
+                    ].rename(columns={
+                        '__baseline_long__': 'daily_gross_ret_baseline_long',
+                        '__baseline_short__': 'daily_gross_ret_baseline_short',
+                    })
+                    net_baseline = fac_perf['daily_net_ret_baseline'][
+                        ['time', '__baseline_long__', '__baseline_short__']
+                    ].rename(columns={
+                        '__baseline_long__': 'daily_net_ret_baseline_long',
+                        '__baseline_short__': 'daily_net_ret_baseline_short',
+                    })
+                    detail_i = detail_i.merge(gross_baseline, on='time', how='left', validate='1:1')
+                    detail_i = detail_i.merge(net_baseline, on='time', how='left', validate='1:1')
+                    gross_base_long = pd.to_numeric(detail_i['daily_gross_ret_baseline_long'], errors='coerce').fillna(0.0)
+                    gross_base_short = pd.to_numeric(detail_i['daily_gross_ret_baseline_short'], errors='coerce').fillna(0.0)
+                    net_base_long = pd.to_numeric(detail_i['daily_net_ret_baseline_long'], errors='coerce').fillna(0.0)
+                    net_base_short = pd.to_numeric(detail_i['daily_net_ret_baseline_short'], errors='coerce').fillna(0.0)
+                    if self.interest_method == 'simple':
+                        detail_i['daily_gross_nav_baseline_long'] = 1.0 + gross_base_long.cumsum()
+                        detail_i['daily_gross_nav_baseline_short'] = 1.0 + gross_base_short.cumsum()
+                        detail_i['daily_net_nav_baseline_long'] = 1.0 + net_base_long.cumsum()
+                        detail_i['daily_net_nav_baseline_short'] = 1.0 + net_base_short.cumsum()
+                    else:
+                        detail_i['daily_gross_nav_baseline_long'] = (1.0 + gross_base_long).cumprod()
+                        detail_i['daily_gross_nav_baseline_short'] = (1.0 + gross_base_short).cumprod()
+                        detail_i['daily_net_nav_baseline_long'] = (1.0 + net_base_long).cumprod()
+                        detail_i['daily_net_nav_baseline_short'] = (1.0 + net_base_short).cumprod()
+
+                performance_detail_list.append(detail_i)
 
         self.performance_summary = pd.concat(performance_summary_list)
-        self.ts_performance_summary = pd.concat(ts_performance_summary_list)
+        self.performance_detail = pd.concat(performance_detail_list).sort_values(
+            ['instrument_id', 'factor_name', 'time']
+        ).reset_index(drop=True)
 
         self.is_backtested = True
         self.is_preprocessed = True

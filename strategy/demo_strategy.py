@@ -27,6 +27,12 @@ def main():
         margin_rate=0.1,
         fee_per_lot=2.0,
         slippage=1.0,
+        apply_rolling_norm=True,
+        rolling_norm_window=30,
+        rolling_norm_min_periods=20,
+        rolling_norm_eps=1e-8,
+        rolling_norm_clip=5.0,
+        signal_delay_days=1,
     )
     detail = strategy.backtest()
     print(detail[['time', 'factor_value', 'position_lots', 'equity', 'nav']].tail(10).to_string(index=False))

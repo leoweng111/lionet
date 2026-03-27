@@ -449,15 +449,14 @@ class BaseModel:
                         instrument_id_list=instrument_id_list,
                         data=self.predict_result,
                         fc_freq=self.fc_freq,
-                        interest_method=self.interest_method,
-                        fee=self.fee)
+                        interest_method=self.interest_method)
 
         bt.backtest()
         self.bt = bt
         self.performance_dc = bt.performance_dc
         self.performance_summary = bt.performance_summary
-        self.ts_performance_dc = bt.ts_performance_dc
-        self.ts_performance_summary = bt.ts_performance_summary
+        self.ts_performance_dc = bt.performance_dc
+        self.ts_performance_summary = bt.performance_summary
 
     def plot_nav(self, net: bool = True):
         self.bt.plot_nav(self.signal_name)

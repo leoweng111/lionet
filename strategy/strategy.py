@@ -7,7 +7,6 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from dataclasses import dataclass
 from math import floor
 from typing import Optional
 
@@ -16,52 +15,11 @@ import numpy as np
 import pandas as pd
 
 from data import get_data, get_futures_continuous_contract_price
+from factors.factor_indicators import get_performance
 from factors.factor_ops import calc_formula_series
-from factors.factor_utils import get_weighted_price
+from factors.factor_utils import get_weighted_price, rolling_normalize_features
 from utils.logging import log
 from utils.params import FUTURES_CONTRACT_MULTIPLIER
-
-
-@dataclass
-class StrategyBacktestView:
-    """Lightweight plotting view for strategy simulation results."""
-
-    performance_detail: pd.DataFrame
-    initial_capital: float
-    factor_name: str
-    instrument_id: str
-
-    def plot_nav(self,
-                 show_baseline: bool = False,
-                 x_tick_rotation: int = 45,
-                 auto_layout: bool = True,
-                 close_fig: bool = True):
-        if self.performance_detail is None or self.performance_detail.empty:
-            raise ValueError('No performance_detail available. Please run Strategy.backtest() first.')
-
-        df = self.performance_detail.copy().sort_values('time')
-        if 'equity' not in df.columns:
-            raise ValueError('performance_detail missing `equity` column.')
-
-        fig, ax = plt.subplots(1, 1, figsize=(12, 4))
-        nav = df['equity'] / float(self.initial_capital)
-        ax.plot(df['time'], nav, label='Strategy')
-
-        if show_baseline and 'baseline_equity' in df.columns:
-            base_nav = df['baseline_equity'] / float(self.initial_capital)
-            ax.plot(df['time'], base_nav, linestyle='--', label='Baseline Long Hold')
-
-        ax.set_title(f'Strategy NAV ({self.instrument_id}, factor={self.factor_name})')
-        ax.set_xlabel('time')
-        ax.set_ylabel('NAV')
-        ax.tick_params(axis='x', labelrotation=x_tick_rotation)
-        ax.legend(loc='best')
-
-        if auto_layout:
-            fig.tight_layout()
-        plt.show()
-        if close_fig:
-            plt.close(fig)
 
 
 class Strategy:
@@ -78,7 +36,13 @@ class Strategy:
                  initial_capital: float = 1_000_000.0,
                  margin_rate: float = 0.1,
                  fee_per_lot: float = 2.0,
-                 slippage: float = 1.0):
+                 slippage: float = 1.0,
+                 apply_rolling_norm: bool = True,
+                 rolling_norm_window: int = 30,
+                 rolling_norm_min_periods: int = 20,
+                 rolling_norm_eps: float = 1e-8,
+                 rolling_norm_clip: float = 5.0,
+                 signal_delay_days: int = 1):
         self.database = database
         self.collection = collection
         self.version = version
@@ -91,15 +55,23 @@ class Strategy:
         self.margin_rate = float(margin_rate)
         self.fee_per_lot = float(fee_per_lot)
         self.slippage = float(slippage)
+        self.apply_rolling_norm = bool(apply_rolling_norm)
+        self.rolling_norm_window = int(rolling_norm_window)
+        self.rolling_norm_min_periods = int(rolling_norm_min_periods)
+        self.rolling_norm_eps = float(rolling_norm_eps)
+        self.rolling_norm_clip = float(rolling_norm_clip)
+        self.signal_delay_days = int(signal_delay_days)
 
         self.performance_detail: Optional[pd.DataFrame] = None
-        self.bt: Optional[StrategyBacktestView] = None
+        self.performance_summary: Optional[pd.DataFrame] = None
         self.formula: Optional[str] = None
 
         if self.initial_capital <= 0:
             raise ValueError('initial_capital must be positive.')
         if self.margin_rate <= 0:
             raise ValueError('margin_rate must be positive.')
+        if self.signal_delay_days < 0:
+            raise ValueError('signal_delay_days must be non-negative.')
 
     @staticmethod
     def _root_instrument(instrument_id: str) -> str:
@@ -195,8 +167,17 @@ class Strategy:
         # Factor must be calculated on weighted(adjusted) prices.
         factor_input = get_weighted_price(raw_df)
         factor_input[self.factor_name] = calc_formula_series(df=factor_input, formula=self.formula)
-
-        sim_df = raw_df[['time', 'instrument_id', 'open', 'close', 'weighted_factor'] +
+        if self.apply_rolling_norm:
+            factor_input = rolling_normalize_features(
+                df=factor_input,
+                factor_cols=[self.factor_name],
+                rolling_norm_window=self.rolling_norm_window,
+                rolling_norm_min_periods=self.rolling_norm_min_periods,
+                rolling_norm_eps=self.rolling_norm_eps,
+                rolling_norm_clip=self.rolling_norm_clip,
+                instrument_col='instrument_id',
+            )
+        sim_df = raw_df[['time', 'instrument_id', 'open', 'high', 'low', 'close', 'volume', 'position', 'weighted_factor'] +
                         [c for c in ['symbol', 'is_rollover'] if c in raw_df.columns]].copy()
         sim_df = sim_df.merge(
             factor_input[['time', 'instrument_id', self.factor_name]],
@@ -204,10 +185,13 @@ class Strategy:
             how='left',
             validate='1:1',
         )
+        # Align execution timing with T-signal -> T+1 open trade convention.
+        if self.signal_delay_days > 0:
+            sim_df[self.factor_name] = sim_df.groupby('instrument_id')[self.factor_name].shift(self.signal_delay_days)
+        sim_df['next_open'] = sim_df.groupby('instrument_id')['open'].shift(-1)
 
         equity = float(self.initial_capital)
         position_lots = 0
-        prev_close = None
 
         baseline_lots = 0
         baseline_equity = float(self.initial_capital)
@@ -220,6 +204,7 @@ class Strategy:
             t = pd.Timestamp(row['time'])
             open_px = float(pd.to_numeric(row['open'], errors='coerce'))
             close_px = float(pd.to_numeric(row['close'], errors='coerce'))
+            next_open_px = float(pd.to_numeric(row['next_open'], errors='coerce')) if pd.notna(row['next_open']) else np.nan
             factor_val = float(pd.to_numeric(row[self.factor_name], errors='coerce')) if pd.notna(row[self.factor_name]) else 0.0
             symbol = row['symbol'] if 'symbol' in row.index else None
 
@@ -227,50 +212,14 @@ class Strategy:
             log.info('=' * 50)
             log.info(
                 f'[Strategy][{t.strftime("%Y-%m-%d")}] instrument={self.instrument_id}, symbol={symbol}, '
-                f'open={open_px:.6f}, close={close_px:.6f}, factor={factor_val:.6f}'
+                f'open={open_px:.6f}, next_open={next_open_px if np.isfinite(next_open_px) else float("nan"):.6f}, '
+                f'factor={factor_val:.6f}'
             )
-
-            # 1) Gap PnL: previous close -> today open on carried overnight position.
-            gap_pnl = 0.0
-            if prev_close is not None:
-                gap_pnl = position_lots * (open_px - prev_close) * multiplier
-            equity += gap_pnl
 
             if i == 0:
                 baseline_lots = self._calc_target_lots(self.initial_capital, 1.0, open_px, multiplier)
-            baseline_gap_pnl = 0.0 if prev_close is None else baseline_lots * (open_px - prev_close) * multiplier
-            baseline_equity += baseline_gap_pnl
 
-            if equity <= 0:
-                terminated = True
-                terminate_reason = 'equity_le_zero_after_gap'
-                log.warning(f'[Strategy] Terminated: equity <= 0 after gap pnl. equity={equity:.6f}')
-                rows.append({
-                    'time': t,
-                    'instrument_id': self.instrument_id,
-                    'symbol': symbol,
-                    'factor_value': factor_val,
-                    'position_lots': position_lots,
-                    'target_lots': position_lots,
-                    'delta_lots': 0,
-                    'open': open_px,
-                    'close': close_px,
-                    'gap_pnl': gap_pnl,
-                    'intraday_pnl': 0.0,
-                    'fee': 0.0,
-                    'slippage_cost': 0.0,
-                    'equity': equity,
-                    'required_margin': 0.0,
-                    'available_cash': equity,
-                    'is_rebalanced': False,
-                    'warning': terminate_reason,
-                    'baseline_gap_pnl': baseline_gap_pnl,
-                    'baseline_intraday_pnl': 0.0,
-                    'baseline_equity': baseline_equity,
-                })
-                break
-
-            # 2) At today open, compute target lots from fixed initial capital (simple-interest style).
+            # At today open, compute target lots from fixed initial capital (simple-interest style).
             target_lots = self._calc_target_lots(self.initial_capital, factor_val, open_px, multiplier)
 
             max_lots_by_margin = floor(max(equity, 0.0) / (open_px * multiplier * self.margin_rate))
@@ -334,9 +283,18 @@ class Strategy:
                     'target_lots': target_lots,
                     'delta_lots': delta_lots,
                     'open': open_px,
+                    'high': float(pd.to_numeric(row['high'], errors='coerce')),
+                    'low': float(pd.to_numeric(row['low'], errors='coerce')),
                     'close': close_px,
-                    'gap_pnl': gap_pnl,
+                    'volume': float(pd.to_numeric(row['volume'], errors='coerce')),
+                    'position': float(pd.to_numeric(row['position'], errors='coerce')),
+                    'weighted_factor': float(pd.to_numeric(row['weighted_factor'], errors='coerce')),
+                    'next_open': next_open_px,
+                    'gap_pnl': 0.0,
                     'intraday_pnl': 0.0,
+                    'open_to_open_pnl': 0.0,
+                    'daily_gross_pnl': 0.0,
+                    'daily_net_pnl': -fee - slippage_cost,
                     'fee': fee,
                     'slippage_cost': slippage_cost,
                     'equity': equity,
@@ -344,18 +302,23 @@ class Strategy:
                     'available_cash': equity,
                     'is_rebalanced': is_rebalanced,
                     'warning': terminate_reason if not warning_text else f'{warning_text}; {terminate_reason}',
-                    'baseline_gap_pnl': baseline_gap_pnl,
+                    'baseline_gap_pnl': 0.0,
                     'baseline_intraday_pnl': 0.0,
+                    'baseline_open_to_open_pnl': 0.0,
                     'baseline_equity': baseline_equity,
                 })
                 break
 
-            # 3) Intraday PnL: today open -> today close after rebalance.
-            intraday_pnl = position_lots * (close_px - open_px) * multiplier
-            equity += intraday_pnl
+            # Open-to-open holding PnL: today open -> next trading day's open.
+            if np.isfinite(next_open_px) and next_open_px > 0:
+                open_to_open_pnl = position_lots * (next_open_px - open_px) * multiplier
+                baseline_open_to_open_pnl = baseline_lots * (next_open_px - open_px) * multiplier
+            else:
+                open_to_open_pnl = 0.0
+                baseline_open_to_open_pnl = 0.0
 
-            baseline_intraday_pnl = baseline_lots * (close_px - open_px) * multiplier
-            baseline_equity += baseline_intraday_pnl
+            equity += open_to_open_pnl
+            baseline_equity += baseline_open_to_open_pnl
 
             required_margin = abs(position_lots) * open_px * multiplier * self.margin_rate
             available_cash = equity - required_margin
@@ -368,7 +331,7 @@ class Strategy:
 
             log.info(
                 f'[Strategy][DailySummary] lots={position_lots}, target={target_lots}, delta={delta_lots}, '
-                f'gap_pnl={gap_pnl:.6f}, intraday_pnl={intraday_pnl:.6f}, fee={fee:.6f}, '
+                f'open_to_open_pnl={open_to_open_pnl:.6f}, fee={fee:.6f}, '
                 f'slippage_cost={slippage_cost:.6f}, equity={equity:.6f}, '
                 f'required_margin={required_margin:.6f}, available_cash={available_cash:.6f}'
             )
@@ -382,9 +345,18 @@ class Strategy:
                 'target_lots': target_lots,
                 'delta_lots': delta_lots,
                 'open': open_px,
+                'high': float(pd.to_numeric(row['high'], errors='coerce')),
+                'low': float(pd.to_numeric(row['low'], errors='coerce')),
                 'close': close_px,
-                'gap_pnl': gap_pnl,
-                'intraday_pnl': intraday_pnl,
+                'volume': float(pd.to_numeric(row['volume'], errors='coerce')),
+                'position': float(pd.to_numeric(row['position'], errors='coerce')),
+                'weighted_factor': float(pd.to_numeric(row['weighted_factor'], errors='coerce')),
+                'next_open': next_open_px,
+                'gap_pnl': 0.0,
+                'intraday_pnl': 0.0,
+                'open_to_open_pnl': open_to_open_pnl,
+                'daily_gross_pnl': open_to_open_pnl,
+                'daily_net_pnl': open_to_open_pnl - fee - slippage_cost,
                 'fee': fee,
                 'slippage_cost': slippage_cost,
                 'equity': equity,
@@ -392,18 +364,26 @@ class Strategy:
                 'available_cash': available_cash,
                 'is_rebalanced': is_rebalanced,
                 'warning': warning_text,
-                'baseline_gap_pnl': baseline_gap_pnl,
-                'baseline_intraday_pnl': baseline_intraday_pnl,
+                'baseline_gap_pnl': 0.0,
+                'baseline_intraday_pnl': 0.0,
+                'baseline_open_to_open_pnl': baseline_open_to_open_pnl,
                 'baseline_equity': baseline_equity,
             })
 
-            prev_close = close_px
             if terminated:
                 break
 
         detail = pd.DataFrame(rows)
         if detail.empty:
             raise ValueError('No simulation result generated.')
+
+        detail = detail.sort_values('time').reset_index(drop=True)
+        detail['daily_gross_ret'] = detail['daily_gross_pnl'] / float(self.initial_capital)
+        detail['daily_net_ret'] = detail['daily_net_pnl'] / float(self.initial_capital)
+        detail['daily_turnover'] = detail['delta_lots'].abs()
+        detail['daily_gross_nav'] = 1.0 + detail['daily_gross_ret'].fillna(0.0).cumsum()
+        detail['daily_net_nav'] = 1.0 + detail['daily_net_ret'].fillna(0.0).cumsum()
+        detail['factor_name'] = self.factor_name
 
         detail['nav'] = detail['equity'] / float(self.initial_capital)
         detail['baseline_nav'] = detail['baseline_equity'] / float(self.initial_capital)
@@ -415,13 +395,40 @@ class Strategy:
                 + f'terminated={terminate_reason}'
             )
 
-        self.performance_detail = detail
-        self.bt = StrategyBacktestView(
-            performance_detail=detail,
-            initial_capital=self.initial_capital,
-            factor_name=self.factor_name,
-            instrument_id=self.instrument_id,
+        summary_input = detail[['time']].merge(
+            sim_df[['time', 'instrument_id', self.factor_name]],
+            on='time',
+            how='left',
+            validate='1:1',
         )
+        summary_input['future_ret'] = 0.0
+        nonzero_mask = summary_input[self.factor_name].abs() > 1e-12
+        summary_input.loc[nonzero_mask, 'future_ret'] = (
+            detail.loc[nonzero_mask, 'daily_gross_ret'].to_numpy() /
+            summary_input.loc[nonzero_mask, self.factor_name].to_numpy()
+        )
+        if 'is_rollover' in sim_df.columns:
+            summary_input = summary_input.merge(
+                sim_df[['time', 'is_rollover']],
+                on='time',
+                how='left',
+                validate='1:1',
+            )
+
+        _, strategy_summary = get_performance(
+            Data=summary_input,
+            fc_name_list=[self.factor_name],
+            fc_freq='1d',
+            portfolio_adjust_method='1D',
+            interest_method='simple',
+            calculate_baseline=True,
+            n_jobs=1,
+        )
+        strategy_summary = strategy_summary.copy()
+        strategy_summary['Instrument ID'] = self.instrument_id
+
+        self.performance_detail = detail
+        self.performance_summary = strategy_summary
         return detail
 
     def plot_nav(self,
@@ -429,12 +436,28 @@ class Strategy:
                  x_tick_rotation: int = 45,
                  auto_layout: bool = True,
                  close_fig: bool = True):
-        if self.bt is None:
+        if self.performance_detail is None or self.performance_detail.empty:
             raise ValueError('Please call backtest() first.')
-        self.bt.plot_nav(
-            show_baseline=show_baseline,
-            x_tick_rotation=x_tick_rotation,
-            auto_layout=auto_layout,
-            close_fig=close_fig,
-        )
+        df = self.performance_detail.copy().sort_values('time')
+
+        fig, ax = plt.subplots(1, 1, figsize=(12, 4))
+        # Strategy NAV is shown in simple-interest form: 1 + cumulative daily net return.
+        simple_nav = 1.0 + pd.to_numeric(df['daily_net_ret'], errors='coerce').fillna(0.0).cumsum()
+        ax.plot(df['time'], simple_nav, label='Strategy')
+
+        if show_baseline and 'baseline_nav' in df.columns:
+            baseline_simple_nav = df['baseline_equity'] / float(self.initial_capital)
+            ax.plot(df['time'], baseline_simple_nav, linestyle='--', label='Baseline Long Hold')
+
+        ax.set_title(f'Strategy NAV ({self.instrument_id}, factor={self.factor_name})')
+        ax.set_xlabel('time')
+        ax.set_ylabel('NAV')
+        ax.tick_params(axis='x', labelrotation=x_tick_rotation)
+        ax.legend(loc='best')
+
+        if auto_layout:
+            fig.tight_layout()
+        plt.show()
+        if close_fig:
+            plt.close(fig)
 
