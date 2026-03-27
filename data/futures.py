@@ -139,7 +139,7 @@ def get_futures_continuous_contract_price(instrument_id: Union[str, List, None] 
 def update_futures_continuous_contract_price(instrument_id: Union[str, List, None] = None,
                                              start_date: str = None,
                                              end_date: str = None,
-                                             wait_time: float = 0.3,
+                                             wait_time: float = 2.0,
                                              method: str = 'insert_many'):
     """
     Update futures continuous contract daily price in database.
@@ -178,7 +178,7 @@ def _to_root_instrument(instrument_id: str) -> str:
 def get_available_symbol(instrument_id: str,
                          year: Union[str, int],
                          month_list: Optional[Sequence[int]] = None,
-                         wait_time: float = 0.05) -> List[str]:
+                         wait_time: float = 0.5) -> List[str]:
     """Return available listed contract symbols for one product and year.
 
     Example: instrument_id='C', year='2025' -> ['C2501', 'C2505', ...]
@@ -242,7 +242,7 @@ def _normalize_zh_daily_symbol_df(df_raw: pd.DataFrame,
 def get_futures_symbol_info(instrument_id: Union[str, List, None] = None,
                             start_date: str = None,
                             end_date: str = None,
-                            wait_time: float = 0.05) -> List[str]:
+                            wait_time: float = 0.5) -> List[str]:
     """Get available listed symbols for one/many products in a date range."""
     if not instrument_id:
         instrument_id = get_futures_continuous_contract_info(from_database=True)['instrument_id'].tolist()
