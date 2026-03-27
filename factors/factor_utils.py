@@ -65,9 +65,9 @@ def join_fc_name_and_parameter(fc_name, parameter):
     return fc_name + '_' + '_'.join([str(value) for _, value in parameter.items()])
 
 
-def apply_weighted_price(df: pd.DataFrame,
-                         weighted_factor_col: str = 'weighted_factor',
-                         price_cols: Union[str, list, None] = None) -> pd.DataFrame:
+def get_weighted_price(df: pd.DataFrame,
+                       weighted_factor_col: str = 'weighted_factor',
+                       price_cols: Union[str, list, None] = None) -> pd.DataFrame:
     """Apply weighted adjustment to price fields: adjusted = raw * weighted_factor."""
     out = df.copy()
     if weighted_factor_col not in out.columns:

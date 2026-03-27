@@ -8,7 +8,7 @@ import pandas as pd
 from joblib import Parallel, delayed
 
 from .factor_indicators import get_performance
-from .factor_utils import apply_weighted_price, get_factor_value, get_future_ret, rolling_normalize_features
+from .factor_utils import get_weighted_price, get_factor_value, get_future_ret, rolling_normalize_features
 from data import get_futures_continuous_contract_price
 from utils.logging import log
 from error.errors import NotBackTestingError
@@ -32,7 +32,7 @@ class BackTester:
                  interest_method: str = 'simple',
                  risk_free_rate: bool = False,
                  calculate_baseline: bool = True,
-                 apply_weighted_price: bool = False,
+                 apply_weighted_price: bool = True,
                  apply_rolling_norm: bool = True,
                  rolling_norm_window: int = 30,
                  rolling_norm_min_periods: int = 20,
@@ -158,7 +158,7 @@ class BackTester:
         if self.is_preprocessed:
             # if the data is provided outside, still we may need to apply the weighted factor to price.
             if self.apply_weighted_price:
-                self.data = apply_weighted_price(self.data)
+                self.data = get_weighted_price(self.data)
                 # Recompute future_ret from adjusted prices so single BackTester usage can fully reproduce
                 # weighted-price logic even with externally prepared data.
                 self.data = get_future_ret(
@@ -181,7 +181,7 @@ class BackTester:
 
         # get factor value
         if self.apply_weighted_price:
-            self.data = apply_weighted_price(self.data)
+            self.data = get_weighted_price(self.data)
 
         self.data = get_factor_value(self.data, self.fc_name_list, version=self.version, n_jobs=self.n_jobs)
 
