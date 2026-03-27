@@ -8,7 +8,7 @@ import pandas as pd
 from joblib import Parallel, delayed
 
 from .factor_indicators import get_performance
-from .factor_utils import get_factor_value, get_future_ret, rolling_normalize_features
+from .factor_utils import apply_weighted_price, get_factor_value, get_future_ret, rolling_normalize_features
 from data import get_futures_continuous_contract_price
 from utils.logging import log
 from error.errors import NotBackTestingError
@@ -32,6 +32,7 @@ class BackTester:
                  interest_method: str = 'simple',
                  risk_free_rate: bool = False,
                  calculate_baseline: bool = True,
+                 apply_weighted_price: bool = False,
                  apply_rolling_norm: bool = True,
                  rolling_norm_window: int = 30,
                  rolling_norm_min_periods: int = 20,
@@ -75,6 +76,7 @@ class BackTester:
         self.interest_method = interest_method
         self.rfr = risk_free_rate
         self.calculate_baseline = calculate_baseline
+        self.apply_weighted_price = apply_weighted_price
         self.apply_rolling_norm = apply_rolling_norm
         self.rolling_norm_window = rolling_norm_window
         self.rolling_norm_min_periods = rolling_norm_min_periods
@@ -114,6 +116,13 @@ class BackTester:
             for col in ['time', 'instrument_id', 'future_ret'] + self.fc_name_list:
                 assert col in self.data.columns, f'Provided data does not contain column {col}.'
 
+            if self.apply_weighted_price:
+                for col in ['weighted_factor', 'open', 'high', 'low', 'close']:
+                    if col not in self.data.columns:
+                        raise ValueError(
+                            f'apply_weighted_price=True requires external `data` to contain column `{col}`.'
+                        )
+
         # otherwise we load data from local database
         else:
             if self.instrument_type == 'futures_continuous_contract':
@@ -147,6 +156,16 @@ class BackTester:
             return
 
         if self.is_preprocessed:
+            # if the data is provided outside, still we may need to apply the weighted factor to price.
+            if self.apply_weighted_price:
+                self.data = apply_weighted_price(self.data)
+                # Recompute future_ret from adjusted prices so single BackTester usage can fully reproduce
+                # weighted-price logic even with externally prepared data.
+                self.data = get_future_ret(
+                    self.data,
+                    portfolio_adjust_method=self.portfolio_adjust_method,
+                    rfr=self.rfr,
+                )
             if self.apply_rolling_norm:
                 self.data = rolling_normalize_features(
                     df=self.data,
@@ -161,6 +180,9 @@ class BackTester:
             return
 
         # get factor value
+        if self.apply_weighted_price:
+            self.data = apply_weighted_price(self.data)
+
         self.data = get_factor_value(self.data, self.fc_name_list, version=self.version, n_jobs=self.n_jobs)
 
         if self.apply_rolling_norm:
@@ -175,7 +197,11 @@ class BackTester:
             )
 
         # get return as label
-        self.data = get_future_ret(self.data, self.portfolio_adjust_method, self.rfr)
+        self.data = get_future_ret(
+            self.data,
+            self.portfolio_adjust_method,
+            self.rfr,
+        )
         self._did_preprocess = True
 
         # For single-instrument TS strategy we keep raw factor values.

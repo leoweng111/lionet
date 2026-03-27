@@ -105,6 +105,7 @@ def get_futures_continuous_contract_price(instrument_id: Union[str, List, None] 
                 instrument_id=root_instrument,
                 start_date=start_date,
                 end_date=end_date,
+                from_database=False,
                 wait_time=wait_time,
                 research_start_date=RESEARCH_START_DATE,
             )
@@ -238,17 +239,189 @@ def _normalize_zh_daily_symbol_df(df_raw: pd.DataFrame,
     return df[['time', 'symbol', 'open', 'high', 'low', 'close', 'settle', 'volume', 'position']]
 
 
-def _collect_symbols_for_range(instrument_id: str,
-                               start_date: str,
-                               end_date: str,
-                               wait_time: float = 0.05) -> List[str]:
+def get_futures_symbol_info(instrument_id: Union[str, List, None] = None,
+                            start_date: str = None,
+                            end_date: str = None,
+                            wait_time: float = 0.05) -> List[str]:
+    """Get available listed symbols for one/many products in a date range."""
+    if not instrument_id:
+        instrument_id = get_futures_continuous_contract_info(from_database=True)['instrument_id'].tolist()
+    if isinstance(instrument_id, str):
+        instrument_id = [instrument_id]
+
+    if not start_date:
+        start_date = START_DATE_STR
+    if not end_date:
+        end_date = END_DATE_STR
+
     start_year = pd.to_datetime(start_date).year
     end_year = pd.to_datetime(end_date).year
     years = list(range(start_year - 1, end_year + 2))
     symbols: List[str] = []
-    for y in years:
-        symbols.extend(get_available_symbol(instrument_id=instrument_id, year=y, wait_time=wait_time))
+    for ins_id in instrument_id:
+        root = _to_root_instrument(ins_id)
+        for y in years:
+            symbols.extend(get_available_symbol(instrument_id=root, year=y, wait_time=wait_time))
     return sorted(list(dict.fromkeys(symbols)))
+
+
+def _infer_root_from_symbol(symbol: str) -> str:
+    s = str(symbol).upper().strip()
+    if not s:
+        return s
+    i = 0
+    while i < len(s) and s[i].isalpha():
+        i += 1
+    return s[:i]
+
+
+def get_futures_symbol_price(instrument_id: Union[str, List, None] = None,
+                             symbol_list: Union[str, List, None] = None,
+                             start_date: str = None,
+                             end_date: str = None,
+                             from_database: bool = True,
+                             wait_time: float = 0.3) -> pd.DataFrame:
+    """Get symbol-level futures daily price either from DB cache or AkShare API.
+
+    Output columns include:
+    ['time', 'instrument_id', 'symbol', 'open', 'high', 'low', 'close', 'settle', 'volume', 'position']
+    """
+    if not start_date:
+        start_date = START_DATE_STR
+    if not end_date:
+        end_date = END_DATE_STR
+
+    if isinstance(symbol_list, str):
+        symbol_list = [symbol_list]
+
+    if not symbol_list:
+        symbol_list = get_futures_symbol_info(
+            instrument_id=instrument_id,
+            start_date=start_date,
+            end_date=end_date,
+            wait_time=min(wait_time, 0.1),
+        )
+
+    if not symbol_list:
+        log.warning(f'No symbol found for instrument_id={instrument_id}, range=[{start_date}, {end_date}].')
+        return pd.DataFrame(columns=[
+            'time', 'instrument_id', 'symbol', 'open', 'high', 'low', 'close', 'settle', 'volume', 'position'
+        ])
+
+    if from_database:
+        mongo_operator = {
+            '$and': [
+                {'time': {'$gte': pd.Timestamp(start_date)}},
+                {'time': {'$lte': pd.Timestamp(end_date)}},
+                {'symbol': {'$in': list(symbol_list)}},
+            ]
+        }
+        df = get_data(database='futures', collection='symbol_price_daily', mongo_operator=mongo_operator)
+        if not isinstance(df, pd.DataFrame) or df.empty:
+            log.warning(
+                f'No symbol price found in DB futures.symbol_price_daily for symbols={len(symbol_list)}, '
+                f'range=[{start_date}, {end_date}]'
+            )
+            return pd.DataFrame(columns=[
+                'time', 'instrument_id', 'symbol', 'open', 'high', 'low', 'close', 'settle', 'volume', 'position'
+            ])
+        if 'instrument_id' not in df.columns:
+            df['instrument_id'] = df['symbol'].map(_infer_root_from_symbol)
+        return df.sort_values(['symbol', 'time']).reset_index(drop=True)
+
+    df_list: List[pd.DataFrame] = []
+    for symbol in symbol_list:
+        try:
+            df_raw = ak.futures_zh_daily_sina(symbol=symbol)
+            df_symbol = _normalize_zh_daily_symbol_df(df_raw, symbol=symbol)
+            if df_symbol.empty:
+                continue
+            root = _infer_root_from_symbol(symbol)
+            df_symbol['instrument_id'] = root
+            df_symbol = df_symbol[(df_symbol['time'] >= pd.Timestamp(start_date)) & (df_symbol['time'] <= pd.Timestamp(end_date))]
+            if not df_symbol.empty:
+                df_list.append(df_symbol)
+        except Exception as e:
+            log.warning(f'Failed to fetch symbol={symbol} from ak.futures_zh_daily_sina: {e}')
+        if wait_time > 0:
+            time.sleep(wait_time)
+
+    if not df_list:
+        return pd.DataFrame(columns=[
+            'time', 'instrument_id', 'symbol', 'open', 'high', 'low', 'close', 'settle', 'volume', 'position'
+        ])
+    out = pd.concat(df_list, ignore_index=True)
+    return out[['time', 'instrument_id', 'symbol', 'open', 'high', 'low', 'close', 'settle', 'volume', 'position']]
+
+
+def update_futures_symbol_price(instrument_id: Union[str, List, None] = None,
+                                symbol_list: Union[str, List, None] = None,
+                                start_date: str = None,
+                                end_date: str = None,
+                                wait_time: float = 0.3,
+                                method: str = 'insert_many') -> None:
+    """Update symbol-level futures daily price into futures.symbol_price_daily.
+
+    For each symbol, write to DB immediately and log success/failure explicitly.
+    """
+    if not start_date:
+        start_date = START_DATE_STR
+    if not end_date:
+        end_date = END_DATE_STR
+
+    if isinstance(symbol_list, str):
+        symbol_list = [symbol_list]
+    if not symbol_list:
+        symbol_list = get_futures_symbol_info(
+            instrument_id=instrument_id,
+            start_date=start_date,
+            end_date=end_date,
+            wait_time=min(wait_time, 0.1),
+        )
+
+    if not symbol_list:
+        log.warning('No symbols to update for futures.symbol_price_daily.')
+        return
+
+    success_symbols: List[str] = []
+    failed_symbols: List[str] = []
+    for symbol in symbol_list:
+        try:
+            df_symbol = get_futures_symbol_price(
+                symbol_list=[symbol],
+                start_date=start_date,
+                end_date=end_date,
+                from_database=False,
+                wait_time=wait_time,
+            )
+            if df_symbol.empty:
+                failed_symbols.append(symbol)
+                log.warning(
+                    f'[symbol_price_daily] skip empty symbol={symbol}, range=[{start_date}, {end_date}]'
+                )
+                continue
+
+            update_data(
+                database='futures',
+                collection='symbol_price_daily',
+                df=df_symbol,
+                method=method,
+                filter_column=['time', 'symbol'],
+            )
+            success_symbols.append(symbol)
+            log.info(
+                f'[symbol_price_daily] updated symbol={symbol}, rows={len(df_symbol)}, '
+                f'range=[{start_date}, {end_date}], method={method}'
+            )
+        except Exception as e:
+            failed_symbols.append(symbol)
+            log.warning(f'[symbol_price_daily] failed symbol={symbol}: {e}')
+
+    log.info(
+        f'update_futures_symbol_price finished: success={len(success_symbols)}, failed={len(failed_symbols)}'
+    )
+    if failed_symbols:
+        log.warning(f'Failed symbols: {failed_symbols}')
 
 
 def _empty_continuous_price_df() -> pd.DataFrame:
@@ -366,15 +539,17 @@ def _build_roll_adjusted_continuous_from_panel(df_panel: pd.DataFrame,
             cur_weighted_factor = float(cur_ratio)
             weighted_factor = float(weighted_factor) * float(cur_ratio)
 
+        # Keep raw unadjusted prices in output.
+        # Back-adjusted prices should be calculated on demand via: raw_price * weighted_factor.
         adj = float(weighted_factor) if started else 1.0
         rows.append({
             'time': t,
             'symbol': symbol,
-            'open': float(row['open']) * adj,
-            'high': float(row['high']) * adj,
-            'low': float(row['low']) * adj,
-            'close': float(row['close']) * adj,
-            'settle': float(row['settle']) * adj if pd.notna(row['settle']) else np.nan,
+            'open': float(row['open']),
+            'high': float(row['high']),
+            'low': float(row['low']),
+            'close': float(row['close']),
+            'settle': float(row['settle']) if pd.notna(row['settle']) else np.nan,
             'volume': float(row['volume']) if pd.notna(row['volume']) else np.nan,
             'position': float(row['position']) if pd.notna(row['position']) else np.nan,
             'weighted_factor': float(adj),
@@ -393,11 +568,16 @@ def _build_roll_adjusted_continuous_from_panel(df_panel: pd.DataFrame,
 def build_roll_adjusted_continuous_contract_price(instrument_id: str,
                                                   start_date: str,
                                                   end_date: str,
+                                                  from_database: bool = True,
                                                   wait_time: float = 2,
                                                   research_start_date: str = RESEARCH_START_DATE) -> pd.DataFrame:
-    """Build continuous daily price from contract-level data with anti-leakage rollover rule."""
+    """Build continuous daily price from symbol-level data with anti-leakage rollover rule.
+
+    Output prices are RAW (non-adjusted). Use `price * weighted_factor` when adjusted
+    prices are needed in research/backtest.
+    """
     root = _to_root_instrument(instrument_id)
-    symbols = _collect_symbols_for_range(
+    symbols = get_futures_symbol_info(
         instrument_id=root,
         start_date=start_date,
         end_date=end_date,
@@ -407,21 +587,24 @@ def build_roll_adjusted_continuous_contract_price(instrument_id: str,
         log.warning(f'No available symbols found for instrument={root} in range [{start_date}, {end_date}].')
         return pd.DataFrame()
 
-    panel_list: List[pd.DataFrame] = []
-    for symbol in symbols:
-        try:
-            df_raw = ak.futures_zh_daily_sina(symbol=symbol)
-            df_symbol = _normalize_zh_daily_symbol_df(df_raw, symbol=symbol)
-            if not df_symbol.empty:
-                panel_list.append(df_symbol)
-        except Exception as e:
-            log.warning(f'Failed to fetch symbol={symbol}: {e}')
-        if wait_time > 0:
-            time.sleep(wait_time)
-
-    if not panel_list:
+    panel_df = get_futures_symbol_price(
+        instrument_id=root,
+        symbol_list=symbols,
+        start_date=start_date,
+        end_date=end_date,
+        from_database=from_database,
+        wait_time=wait_time,
+    )
+    if panel_df.empty:
+        if from_database:
+            log.warning(
+                f'No symbol data in DB for instrument={root}. '
+                f'Please run update_futures_symbol_price first. range=[{start_date}, {end_date}]'
+            )
+        else:
+            log.warning(f'No symbol data from AkShare for instrument={root}, range=[{start_date}, {end_date}]')
         return pd.DataFrame()
-    panel_df = pd.concat(panel_list, ignore_index=True)
+
     return _build_roll_adjusted_continuous_from_panel(
         df_panel=panel_df,
         start_date=start_date,
@@ -442,6 +625,7 @@ def compare_with_ak_main_continuous(instrument_id: str,
         instrument_id=root,
         start_date=start_date,
         end_date=end_date,
+        from_database=False,
         wait_time=wait_time,
         research_start_date=RESEARCH_START_DATE,
     )
@@ -464,12 +648,8 @@ def compare_with_ak_main_continuous(instrument_id: str,
         if c in main_df.columns:
             main_df[c] = pd.to_numeric(main_df[c], errors='coerce')
 
-    custom_cmp = custom_df[['time', 'open', 'high', 'low', 'close', 'weighted_factor', 'symbol', 'is_rollover']].copy()
-    wf = pd.to_numeric(custom_cmp['weighted_factor'], errors='coerce').replace(0, np.nan)
-    for c in ['open', 'high', 'low', 'close']:
-        custom_cmp[f'{c}_raw'] = pd.to_numeric(custom_cmp[c], errors='coerce') / wf
-
-    merged = custom_cmp[['time', 'symbol', 'is_rollover', 'open_raw', 'high_raw', 'low_raw', 'close_raw']].merge(
+    custom_cmp = custom_df[['time', 'open', 'high', 'low', 'close', 'symbol', 'is_rollover']].copy()
+    merged = custom_cmp[['time', 'symbol', 'is_rollover', 'open', 'high', 'low', 'close']].merge(
         main_df[['time', 'open', 'high', 'low', 'close']],
         on='time', how='inner', suffixes=('_custom', '_main')
     )
@@ -478,7 +658,7 @@ def compare_with_ak_main_continuous(instrument_id: str,
 
     mismatch_mask = np.zeros(len(merged), dtype=bool)
     for c in ['open', 'high', 'low', 'close']:
-        left = pd.to_numeric(merged[f'{c}_raw'], errors='coerce')
+        left = pd.to_numeric(merged[f'{c}_custom'], errors='coerce')
         right = pd.to_numeric(merged[f'{c}_main'], errors='coerce')
         mismatch_mask |= ~np.isclose(left, right, atol=atol, rtol=0.0, equal_nan=True)
     return merged.loc[mismatch_mask].copy().reset_index(drop=True)

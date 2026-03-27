@@ -65,6 +65,26 @@ def join_fc_name_and_parameter(fc_name, parameter):
     return fc_name + '_' + '_'.join([str(value) for _, value in parameter.items()])
 
 
+def apply_weighted_price(df: pd.DataFrame,
+                         weighted_factor_col: str = 'weighted_factor',
+                         price_cols: Union[str, list, None] = None) -> pd.DataFrame:
+    """Apply weighted adjustment to price fields: adjusted = raw * weighted_factor."""
+    out = df.copy()
+    if weighted_factor_col not in out.columns:
+        raise ValueError(f'Column `{weighted_factor_col}` is required for weighted-price adjustment.')
+
+    if price_cols is None:
+        price_cols = ['open', 'high', 'low', 'close', 'settle']
+    if isinstance(price_cols, str):
+        price_cols = [price_cols]
+
+    wf = pd.to_numeric(out[weighted_factor_col], errors='coerce').replace(0, np.nan).fillna(1.0)
+    for c in price_cols:
+        if c in out.columns:
+            out[c] = pd.to_numeric(out[c], errors='coerce') * wf
+    return out
+
+
 def get_future_ret(Data: pd.DataFrame,
                    portfolio_adjust_method: Union[str, None] = None,
                    rfr: bool = False) -> pd.DataFrame:
@@ -79,6 +99,7 @@ def get_future_ret(Data: pd.DataFrame,
     for col in ['time', 'instrument_id']:
         assert col in Data.columns, f'df does not contain columns {col}.'
     df = Data.copy()
+
 
     # # special logic for transaction period
     # if not transaction_period:

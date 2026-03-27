@@ -113,7 +113,8 @@ class FactorGenerator:
                 from_database=True,
             )
 
-        required_cols = ['time', 'instrument_id'] + self.base_col_list
+        optional_cols = [c for c in ['weighted_factor', 'cur_weighted_factor', 'is_rollover', 'symbol'] if c in df.columns]
+        required_cols = ['time', 'instrument_id'] + self.base_col_list + optional_cols
         for col in required_cols:
             if col not in df.columns:
                 raise ValueError(f'Input data does not contain required column: {col}')
@@ -171,17 +172,22 @@ class FactorGenerator:
     def _finalize_generated_data(self,
                                  base_df: pd.DataFrame,
                                  factor_df: pd.DataFrame) -> pd.DataFrame:
+        raw_cols = ['time', 'instrument_id', 'open', 'high', 'low', 'close', 'volume', 'position']
+        optional_cols = [c for c in ['weighted_factor', 'cur_weighted_factor', 'is_rollover', 'symbol'] if c in base_df.columns]
         df_with_ret = get_future_ret(
-            base_df[['time', 'instrument_id', 'open', 'high', 'low', 'close', 'volume', 'position']].copy(),
+            base_df[raw_cols + optional_cols].copy(),
             portfolio_adjust_method=self.portfolio_adjust_method,
             rfr=self.risk_free_rate,
         )
-        df_with_ret = df_with_ret[['time', 'instrument_id', 'future_ret']].copy()
+        df_with_ret = df_with_ret[['time', 'instrument_id', 'future_ret'] + optional_cols].copy()
 
         generated_data = df_with_ret.merge(factor_df, on=['time', 'instrument_id'], how='left', validate='1:1')
         generated_data = generated_data.sort_values(['instrument_id', 'time']).reset_index(drop=True)
 
-        self.generated_fc_name_list = [c for c in generated_data.columns if c not in ['time', 'instrument_id', 'future_ret']]
+        self.generated_fc_name_list = [
+            c for c in generated_data.columns
+            if c not in ['time', 'instrument_id', 'future_ret', 'weighted_factor', 'cur_weighted_factor', 'is_rollover', 'symbol']
+        ]
         self.generated_data = generated_data
         log.info(f'Generated {len(self.generated_fc_name_list)} factors by method={self.method}.')
         return generated_data
@@ -1262,6 +1268,7 @@ class FactorGenerator:
             interest_method=self.interest_method,
             risk_free_rate=self.risk_free_rate,
             calculate_baseline=self.calculate_baseline,
+            apply_weighted_price=bool(isinstance(data, pd.DataFrame) and ('weighted_factor' in data.columns)),
             apply_rolling_norm=self.apply_rolling_norm,
             rolling_norm_window=self.rolling_norm_window,
             rolling_norm_min_periods=self.rolling_norm_min_periods,
