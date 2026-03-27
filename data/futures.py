@@ -76,7 +76,7 @@ def get_futures_continuous_contract_price(instrument_id: Union[str, List, None] 
                                           start_date: str = None,
                                           end_date: str = None,
                                           from_database: bool = True,
-                                          wait_time: float = 0.3):
+                                          wait_time: float = 2.0):
     """
     Get futures continuous contract daily price with optional filters.
 
@@ -280,7 +280,7 @@ def get_futures_symbol_price(instrument_id: Union[str, List, None] = None,
                              start_date: str = None,
                              end_date: str = None,
                              from_database: bool = True,
-                             wait_time: float = 0.3) -> pd.DataFrame:
+                             wait_time: float = 2.0) -> pd.DataFrame:
     """Get symbol-level futures daily price either from DB cache or AkShare API.
 
     Output columns include:
@@ -299,7 +299,7 @@ def get_futures_symbol_price(instrument_id: Union[str, List, None] = None,
             instrument_id=instrument_id,
             start_date=start_date,
             end_date=end_date,
-            wait_time=min(wait_time, 0.1),
+            wait_time=min(wait_time, 0.5),
         )
 
     if not symbol_list:
@@ -335,12 +335,16 @@ def get_futures_symbol_price(instrument_id: Union[str, List, None] = None,
             df_raw = ak.futures_zh_daily_sina(symbol=symbol)
             df_symbol = _normalize_zh_daily_symbol_df(df_raw, symbol=symbol)
             if df_symbol.empty:
+                log.warning(f'{symbol} has no valid data from ak.futures_zh_daily_sina, skip.')
                 continue
             root = _infer_root_from_symbol(symbol)
             df_symbol['instrument_id'] = root
             df_symbol = df_symbol[(df_symbol['time'] >= pd.Timestamp(start_date)) & (df_symbol['time'] <= pd.Timestamp(end_date))]
             if not df_symbol.empty:
                 df_list.append(df_symbol)
+                log.info(f'Fetched symbol={symbol} from ak.futures_zh_daily_sina, rows={len(df_symbol)}, range=[{start_date}, {end_date}]')
+            else:
+                log.warning(f'symbol={symbol} has no data in the specified date range from ak.futures_zh_daily_sina, skip.')
         except Exception as e:
             log.warning(f'Failed to fetch symbol={symbol} from ak.futures_zh_daily_sina: {e}')
         if wait_time > 0:
@@ -358,7 +362,7 @@ def update_futures_symbol_price(instrument_id: Union[str, List, None] = None,
                                 symbol_list: Union[str, List, None] = None,
                                 start_date: str = None,
                                 end_date: str = None,
-                                wait_time: float = 0.3,
+                                wait_time: float = 2.0,
                                 method: str = 'insert_many') -> None:
     """Update symbol-level futures daily price into futures.symbol_price_daily.
 
@@ -376,7 +380,7 @@ def update_futures_symbol_price(instrument_id: Union[str, List, None] = None,
             instrument_id=instrument_id,
             start_date=start_date,
             end_date=end_date,
-            wait_time=min(wait_time, 0.1),
+            wait_time=min(wait_time, 0.5),
         )
 
     if not symbol_list:
@@ -569,7 +573,7 @@ def build_roll_adjusted_continuous_contract_price(instrument_id: str,
                                                   start_date: str,
                                                   end_date: str,
                                                   from_database: bool = True,
-                                                  wait_time: float = 2,
+                                                  wait_time: float = 2.0,
                                                   research_start_date: str = RESEARCH_START_DATE) -> pd.DataFrame:
     """Build continuous daily price from symbol-level data with anti-leakage rollover rule.
 
@@ -581,7 +585,7 @@ def build_roll_adjusted_continuous_contract_price(instrument_id: str,
         instrument_id=root,
         start_date=start_date,
         end_date=end_date,
-        wait_time=min(wait_time, 0.1),
+        wait_time=min(wait_time, 0.5),
     )
     if not symbols:
         log.warning(f'No available symbols found for instrument={root} in range [{start_date}, {end_date}].')
@@ -617,7 +621,7 @@ def build_roll_adjusted_continuous_contract_price(instrument_id: str,
 def compare_with_ak_main_continuous(instrument_id: str,
                                     start_date: str,
                                     end_date: str,
-                                    wait_time: float = 0.3,
+                                    wait_time: float = 2.0,
                                     atol: float = 1e-8) -> pd.DataFrame:
     """Compare custom stitched continuous vs ak.futures_main_sina; return mismatch rows."""
     root = _to_root_instrument(instrument_id)
