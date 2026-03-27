@@ -76,6 +76,7 @@ def get_futures_continuous_contract_price(instrument_id: Union[str, List, None] 
                                           start_date: str = None,
                                           end_date: str = None,
                                           from_database: bool = True,
+                                          load_prev_weighted_factor: bool = True,
                                           wait_time: float = 2.0):
     """
     Get futures continuous contract daily price with optional filters.
@@ -84,6 +85,8 @@ def get_futures_continuous_contract_price(instrument_id: Union[str, List, None] 
     :param start_date: start_date
     :param end_date: end_date
     :param from_database: get data from database or not
+    :param load_prev_weighted_factor: when building continuous data, whether to continue
+        weighted_factor from the latest DB record before start_date.
     :param wait_time: wait time between query from akshare
     :return: futures continuous contract daily price data
     """
@@ -106,6 +109,8 @@ def get_futures_continuous_contract_price(instrument_id: Union[str, List, None] 
                 start_date=start_date,
                 end_date=end_date,
                 from_database=False,
+                continuous_instrument_id=ins_id,
+                load_prev_weighted_factor=load_prev_weighted_factor,
                 wait_time=wait_time,
                 research_start_date=RESEARCH_START_DATE,
             )
@@ -139,6 +144,7 @@ def get_futures_continuous_contract_price(instrument_id: Union[str, List, None] 
 def update_futures_continuous_contract_price(instrument_id: Union[str, List, None] = None,
                                              start_date: str = None,
                                              end_date: str = None,
+                                             load_prev_weighted_factor: bool = True,
                                              wait_time: float = 2.0,
                                              method: str = 'insert_many'):
     """
@@ -147,6 +153,8 @@ def update_futures_continuous_contract_price(instrument_id: Union[str, List, Non
     :param instrument_id: the instrument ids need to be updated
     :param start_date: start_date
     :param end_date: end_date
+    :param load_prev_weighted_factor: if True, continue weighted_factor from DB record
+        before start_date; otherwise start from 1.0 behavior.
     :param wait_time: wait time between query from akshare
     :param method: updating method
     :return: None
@@ -159,6 +167,7 @@ def update_futures_continuous_contract_price(instrument_id: Union[str, List, Non
                                                              start_date=start_date,
                                                              end_date=end_date,
                                                              from_database=False,
+                                                             load_prev_weighted_factor=load_prev_weighted_factor,
                                                              wait_time=wait_time)
     update_data(database='futures',
                 collection='continuous_contract_price_daily',
@@ -437,11 +446,45 @@ def _empty_continuous_price_df() -> pd.DataFrame:
     ])
 
 
+def _load_prev_weighted_factor(continuous_instrument_id: str,
+                               start_date: str) -> float:
+    """Load weighted_factor from the latest DB row before start_date."""
+    mongo_operator = {
+        '$and': [
+            {'instrument_id': continuous_instrument_id},
+            {'time': {'$lt': pd.Timestamp(start_date)}},
+        ]
+    }
+    df_prev = get_data(
+        database='futures',
+        collection='continuous_contract_price_daily',
+        mongo_operator=mongo_operator,
+    )
+    if not isinstance(df_prev, pd.DataFrame) or df_prev.empty:
+        return 1.0
+
+    df_prev = df_prev.copy()
+    if 'time' not in df_prev.columns or 'weighted_factor' not in df_prev.columns:
+        return 1.0
+    df_prev['time'] = pd.to_datetime(df_prev['time'], errors='coerce')
+    df_prev['weighted_factor'] = pd.to_numeric(df_prev['weighted_factor'], errors='coerce')
+    df_prev = df_prev.dropna(subset=['time', 'weighted_factor'])
+    if df_prev.empty:
+        return 1.0
+
+    df_prev = df_prev.sort_values('time', ascending=False)
+    last_wf = float(df_prev.iloc[0]['weighted_factor'])
+    if not np.isfinite(last_wf) or last_wf <= 0:
+        return 1.0
+    return last_wf
+
+
 def _build_roll_adjusted_continuous_from_panel(df_panel: pd.DataFrame,
                                                start_date: str,
                                                end_date: str,
                                                instrument_id: str,
-                                               research_start_date: str) -> pd.DataFrame:
+                                               research_start_date: str,
+                                               initial_weighted_factor: float = 1.0) -> pd.DataFrame:
     if df_panel.empty:
         return _empty_continuous_price_df()
 
@@ -493,7 +536,7 @@ def _build_roll_adjusted_continuous_from_panel(df_panel: pd.DataFrame,
     panel_indexed = panel.set_index(['time', 'symbol']).sort_index()
     time_list = dominant_used.index.tolist()
 
-    weighted_factor = 1.0
+    weighted_factor = float(initial_weighted_factor)
     cur_weighted_factor = 1.0
     started = False
     prev_symbol = None
@@ -526,7 +569,7 @@ def _build_roll_adjusted_continuous_from_panel(df_panel: pd.DataFrame,
                 continue
 
         if not started and t >= research_ts:
-            weighted_factor = 1.0
+            weighted_factor = float(initial_weighted_factor)
             cur_weighted_factor = 1.0
             started = True
 
@@ -573,6 +616,8 @@ def build_roll_adjusted_continuous_contract_price(instrument_id: str,
                                                   start_date: str,
                                                   end_date: str,
                                                   from_database: bool = True,
+                                                  continuous_instrument_id: Optional[str] = None,
+                                                  load_prev_weighted_factor: bool = True,
                                                   wait_time: float = 2.0,
                                                   research_start_date: str = RESEARCH_START_DATE) -> pd.DataFrame:
     """Build continuous daily price from symbol-level data with anti-leakage rollover rule.
@@ -581,6 +626,7 @@ def build_roll_adjusted_continuous_contract_price(instrument_id: str,
     prices are needed in research/backtest.
     """
     root = _to_root_instrument(instrument_id)
+    continuous_id = continuous_instrument_id or (instrument_id if str(instrument_id).endswith('0') else f'{root}0')
     symbols = get_futures_symbol_info(
         instrument_id=root,
         start_date=start_date,
@@ -609,12 +655,31 @@ def build_roll_adjusted_continuous_contract_price(instrument_id: str,
             log.warning(f'No symbol data from AkShare for instrument={root}, range=[{start_date}, {end_date}]')
         return pd.DataFrame()
 
+    initial_weighted_factor = 1.0
+    if load_prev_weighted_factor:
+        try:
+            initial_weighted_factor = _load_prev_weighted_factor(
+                continuous_instrument_id=continuous_id,
+                start_date=start_date,
+            )
+            log.info(
+                f'[continuous][weighted_factor] instrument={continuous_id}, '
+                f'start_date={start_date}, initial_weighted_factor={initial_weighted_factor}'
+            )
+        except Exception as e:
+            log.warning(
+                f'[continuous][weighted_factor] failed to load previous weighted_factor for '
+                f'instrument={continuous_id}, start_date={start_date}. fallback=1.0, error={e}'
+            )
+            initial_weighted_factor = 1.0
+
     return _build_roll_adjusted_continuous_from_panel(
         df_panel=panel_df,
         start_date=start_date,
         end_date=end_date,
         instrument_id=root,
         research_start_date=research_start_date,
+        initial_weighted_factor=initial_weighted_factor,
     )
 
 
