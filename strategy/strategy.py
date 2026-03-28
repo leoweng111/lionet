@@ -118,6 +118,7 @@ class Strategy:
             return 0
         raw_target = (initial_capital * factor_value) / (open_price * float(multiplier))
         # keep truncation-toward-zero behavior for positive/negative factors
+        # e.g. int(-1.9) = -1, int(1.9) = 1
         return int(raw_target)
 
     def _load_price_df(self) -> pd.DataFrame:
@@ -184,6 +185,7 @@ class Strategy:
             validate='1:1',
         )
         # Align execution timing with T-signal -> T+1 open trade convention.
+        # this is corresponding with the Backtester procedure
         if self.signal_delay_days > 0:
             sim_df[self.factor_name] = sim_df.groupby('instrument_id')[self.factor_name].shift(self.signal_delay_days)
         sim_df['next_open'] = sim_df.groupby('instrument_id')['open'].shift(-1)
@@ -191,8 +193,10 @@ class Strategy:
         equity = float(self.initial_capital)
         position_lots = 0
 
-        baseline_lots = 0
-        baseline_equity = float(self.initial_capital)
+        baseline_long_lots = 0
+        baseline_short_lots = 0
+        baseline_long_equity = float(self.initial_capital)
+        baseline_short_equity = float(self.initial_capital)
 
         rows = []
         terminated = False
@@ -215,7 +219,8 @@ class Strategy:
             )
 
             if i == 0:
-                baseline_lots = self._calc_target_lots(self.initial_capital, 1.0, open_px, multiplier)
+                baseline_long_lots = self._calc_target_lots(self.initial_capital, 1.0, open_px, multiplier)
+                baseline_short_lots = self._calc_target_lots(self.initial_capital, -1.0, open_px, multiplier)
 
             # At today open, compute target lots from fixed initial capital (simple-interest style).
             target_lots = self._calc_target_lots(self.initial_capital, factor_val, open_px, multiplier)
@@ -302,21 +307,28 @@ class Strategy:
                     'warning': terminate_reason if not warning_text else f'{warning_text}; {terminate_reason}',
                     'baseline_gap_pnl': 0.0,
                     'baseline_intraday_pnl': 0.0,
+                    'baseline_long_open_to_open_pnl': 0.0,
+                    'baseline_short_open_to_open_pnl': 0.0,
                     'baseline_open_to_open_pnl': 0.0,
-                    'baseline_equity': baseline_equity,
+                    'baseline_long_equity': baseline_long_equity,
+                    'baseline_short_equity': baseline_short_equity,
+                    'baseline_equity': baseline_long_equity,
                 })
                 break
 
             # Open-to-open holding PnL: today open -> next trading day's open.
             if np.isfinite(next_open_px) and next_open_px > 0:
                 open_to_open_pnl = position_lots * (next_open_px - open_px) * multiplier
-                baseline_open_to_open_pnl = baseline_lots * (next_open_px - open_px) * multiplier
+                baseline_long_open_to_open_pnl = baseline_long_lots * (next_open_px - open_px) * multiplier
+                baseline_short_open_to_open_pnl = baseline_short_lots * (next_open_px - open_px) * multiplier
             else:
                 open_to_open_pnl = 0.0
-                baseline_open_to_open_pnl = 0.0
+                baseline_long_open_to_open_pnl = 0.0
+                baseline_short_open_to_open_pnl = 0.0
 
             equity += open_to_open_pnl
-            baseline_equity += baseline_open_to_open_pnl
+            baseline_long_equity += baseline_long_open_to_open_pnl
+            baseline_short_equity += baseline_short_open_to_open_pnl
 
             required_margin = abs(position_lots) * open_px * multiplier * self.margin_rate
             available_cash = equity - required_margin
@@ -364,8 +376,13 @@ class Strategy:
                 'warning': warning_text,
                 'baseline_gap_pnl': 0.0,
                 'baseline_intraday_pnl': 0.0,
-                'baseline_open_to_open_pnl': baseline_open_to_open_pnl,
-                'baseline_equity': baseline_equity,
+                'baseline_long_open_to_open_pnl': baseline_long_open_to_open_pnl,
+                'baseline_short_open_to_open_pnl': baseline_short_open_to_open_pnl,
+                # Keep legacy field as long-only baseline for backward compatibility.
+                'baseline_open_to_open_pnl': baseline_long_open_to_open_pnl,
+                'baseline_long_equity': baseline_long_equity,
+                'baseline_short_equity': baseline_short_equity,
+                'baseline_equity': baseline_long_equity,
             })
 
             if terminated:
@@ -385,6 +402,8 @@ class Strategy:
 
         detail['nav'] = detail['equity'] / float(self.initial_capital)
         detail['baseline_nav'] = detail['baseline_equity'] / float(self.initial_capital)
+        detail['baseline_nav_long'] = detail['baseline_long_equity'] / float(self.initial_capital)
+        detail['baseline_nav_short'] = detail['baseline_short_equity'] / float(self.initial_capital)
         detail['terminated'] = False
         if terminated:
             detail.loc[detail.index[-1], 'terminated'] = True
@@ -443,9 +462,21 @@ class Strategy:
         simple_nav = 1.0 + pd.to_numeric(df['daily_net_ret'], errors='coerce').fillna(0.0).cumsum()
         ax.plot(df['time'], simple_nav, label='Strategy')
 
-        if show_baseline and 'baseline_nav' in df.columns:
-            baseline_simple_nav = df['baseline_equity'] / float(self.initial_capital)
-            ax.plot(df['time'], baseline_simple_nav, linestyle='--', label='Baseline Long Hold')
+        if show_baseline and 'baseline_nav_long' in df.columns and 'baseline_nav_short' in df.columns:
+            ax.plot(
+                df['time'],
+                df['baseline_nav_long'],
+                color='tab:red',
+                linestyle='--',
+                label='Baseline Long',
+            )
+            ax.plot(
+                df['time'],
+                df['baseline_nav_short'],
+                color='tab:green',
+                linestyle='--',
+                label='Baseline Short',
+            )
 
         ax.set_title(f'Strategy NAV ({self.instrument_id}, factor={self.factor_name})')
         ax.set_xlabel('time')
