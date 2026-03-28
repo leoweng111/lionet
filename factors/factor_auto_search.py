@@ -24,7 +24,7 @@ from utils.params import SUPPORTED_FILTER_INDICATORS
 
 from .backtest import BackTester
 from .factor_ops import available_operator_prompt_text, calc_formula_df, calc_formula_series
-from .factor_utils import get_future_ret, rolling_normalize_features
+from .factor_utils import get_future_ret, get_weighted_price, rolling_normalize_features
 from .gp_factor_engine import GPCandidate, run_gp_evolution
 
 
@@ -44,6 +44,7 @@ class FactorGenerator:
                  interest_method: str = 'simple',
                  risk_free_rate: bool = False,
                  calculate_baseline: bool = True,
+                 apply_weighted_price: bool = True,
                  n_jobs: int = 5,
                  base_col_list: Optional[Sequence[str]] = None,
                  min_window_size: int = 30,
@@ -68,6 +69,7 @@ class FactorGenerator:
         self.interest_method = interest_method
         self.risk_free_rate = risk_free_rate
         self.calculate_baseline = calculate_baseline
+        self.apply_weighted_price = bool(apply_weighted_price)
         self.n_jobs = n_jobs
 
         self.base_col_list = list(base_col_list) if base_col_list else ['open', 'high', 'low', 'close', 'volume', 'position']
@@ -122,6 +124,14 @@ class FactorGenerator:
         df = df[required_cols].copy()
         df['time'] = pd.to_datetime(df['time'])
         df = df.sort_values(['instrument_id', 'time']).reset_index(drop=True)
+
+        if self.apply_weighted_price:
+            if 'weighted_factor' not in df.columns:
+                raise ValueError(
+                    'apply_weighted_price=True requires `weighted_factor` in source data. '
+                    'Set apply_weighted_price=False to use raw prices.'
+                )
+            df = get_weighted_price(df)
 
         available_instruments = df['instrument_id'].dropna().unique().tolist()
         invalid_instruments = [x for x in self.instrument_id_list if x not in available_instruments]
@@ -1268,7 +1278,9 @@ class FactorGenerator:
             interest_method=self.interest_method,
             risk_free_rate=self.risk_free_rate,
             calculate_baseline=self.calculate_baseline,
-            apply_weighted_price=bool(isinstance(data, pd.DataFrame) and ('weighted_factor' in data.columns)),
+            # FactorGenerator data path already handles price adjustment in load_base_data.
+            # Keep BackTester from applying weighted-price preprocessing again.
+            apply_weighted_price=False,
             apply_rolling_norm=self.apply_rolling_norm,
             rolling_norm_window=self.rolling_norm_window,
             rolling_norm_min_periods=self.rolling_norm_min_periods,
@@ -1295,6 +1307,7 @@ class LLMPromptFactorGenerator(FactorGenerator):
                  interest_method: str = 'simple',
                  risk_free_rate: bool = False,
                  calculate_baseline: bool = True,
+                 apply_weighted_price: bool = True,
                  n_jobs: int = 5,
                  base_col_list: Optional[Sequence[str]] = None,
                  min_window_size: int = 30,
@@ -1325,6 +1338,7 @@ class LLMPromptFactorGenerator(FactorGenerator):
             interest_method=interest_method,
             risk_free_rate=risk_free_rate,
             calculate_baseline=calculate_baseline,
+            apply_weighted_price=apply_weighted_price,
             n_jobs=n_jobs,
             base_col_list=base_col_list,
             min_window_size=min_window_size,
@@ -1537,6 +1551,7 @@ class GeneticFactorGenerator(FactorGenerator):
                  interest_method: str = 'simple',
                  risk_free_rate: bool = False,
                  calculate_baseline: bool = True,
+                 apply_weighted_price: bool = True,
                  n_jobs: int = 5,
                  base_col_list: Optional[Sequence[str]] = None,
                  min_window_size: int = 30,
@@ -1582,6 +1597,7 @@ class GeneticFactorGenerator(FactorGenerator):
             interest_method=interest_method,
             risk_free_rate=risk_free_rate,
             calculate_baseline=calculate_baseline,
+            apply_weighted_price=apply_weighted_price,
             n_jobs=n_jobs,
             base_col_list=base_col_list,
             min_window_size=min_window_size,
