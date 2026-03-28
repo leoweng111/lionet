@@ -41,7 +41,8 @@ class Strategy:
                  rolling_norm_min_periods: int = 20,
                  rolling_norm_eps: float = 1e-8,
                  rolling_norm_clip: float = 5.0,
-                 signal_delay_days: int = 1):
+                 signal_delay_days: int = 1,
+                 min_open_ratio: float = 1.0):
         """Initialize strategy simulation settings.
 
         :param version: 因子版本号，用于在因子库中唯一定位公式。
@@ -65,6 +66,13 @@ class Strategy:
         :param signal_delay_days: 信号执行延迟天数。
             例如 1 表示使用 T 日信号，在 T+1 开盘执行交易，
             与“信号生成后下一交易日开盘执行”的常见研究口径一致。
+        :param min_open_ratio: 开仓“激进程度”阈值，范围 [0, 1]。
+            令 raw_target 为理论手数，trunc_target 为向0截断后的手数。
+            若 |raw_target - trunc_target| >= min_open_ratio，则向远离0方向多开1手；
+            否则保持 trunc_target。
+            - min_open_ratio=1: 完全向0截断（当前保守模式）
+            - min_open_ratio=0.5: 四舍五入到更激进的一手
+            - min_open_ratio=0: 只要非整数就向远离0方向取整
         """
         self.database = database
         self.collection = collection
@@ -84,6 +92,7 @@ class Strategy:
         self.rolling_norm_eps = float(rolling_norm_eps)
         self.rolling_norm_clip = float(rolling_norm_clip)
         self.signal_delay_days = int(signal_delay_days)
+        self.min_open_ratio = float(min_open_ratio)
 
         self.performance_detail: Optional[pd.DataFrame] = None
         self.performance_summary: Optional[pd.DataFrame] = None
@@ -94,6 +103,8 @@ class Strategy:
             raise ValueError('margin_rate must be positive.')
         if self.signal_delay_days < 0:
             raise ValueError('signal_delay_days must be non-negative.')
+        if not (0.0 <= self.min_open_ratio <= 1.0):
+            raise ValueError('min_open_ratio must be in [0, 1].')
 
     @staticmethod
     def _root_instrument(instrument_id: str) -> str:
@@ -113,13 +124,18 @@ class Strategy:
     def _calc_target_lots(initial_capital: float,
                           factor_value: float,
                           open_price: float,
-                          multiplier: int) -> int:
+                          multiplier: int,
+                          min_open_ratio: float = 1.0) -> int:
         if not np.isfinite(factor_value) or not np.isfinite(open_price) or open_price <= 0:
             return 0
         raw_target = (initial_capital * factor_value) / (open_price * float(multiplier))
-        # keep truncation-toward-zero behavior for positive/negative factors
-        # e.g. int(-1.9) = -1, int(1.9) = 1
-        return int(raw_target)
+        trunc_target = int(raw_target)
+        frac = raw_target - trunc_target
+
+        # Aggressive opening rule controlled by min_open_ratio.
+        if abs(frac) >= float(min_open_ratio) and abs(frac) > 0:
+            return trunc_target + (1 if raw_target > 0 else -1)
+        return trunc_target
 
     def _load_price_df(self) -> pd.DataFrame:
         main_id = self._main_instrument(self.instrument_id)
@@ -219,11 +235,17 @@ class Strategy:
             )
 
             if i == 0:
-                baseline_long_lots = self._calc_target_lots(self.initial_capital, 1.0, open_px, multiplier)
-                baseline_short_lots = self._calc_target_lots(self.initial_capital, -1.0, open_px, multiplier)
+                baseline_long_lots = self._calc_target_lots(
+                    self.initial_capital, 1.0, open_px, multiplier, self.min_open_ratio
+                )
+                baseline_short_lots = self._calc_target_lots(
+                    self.initial_capital, -1.0, open_px, multiplier, self.min_open_ratio
+                )
 
             # At today open, compute target lots from fixed initial capital (simple-interest style).
-            target_lots = self._calc_target_lots(self.initial_capital, factor_val, open_px, multiplier)
+            target_lots = self._calc_target_lots(
+                self.initial_capital, factor_val, open_px, multiplier, self.min_open_ratio
+            )
 
             max_lots_by_margin = floor(max(equity, 0.0) / (open_px * multiplier * self.margin_rate))
             warning_text = ''

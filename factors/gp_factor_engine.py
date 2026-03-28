@@ -6,6 +6,7 @@ without changing existing gp.py scripts.
 
 import copy
 import random
+import re
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Sequence, Tuple, cast
 
@@ -13,6 +14,7 @@ import numpy as np
 import pandas as pd
 
 from utils.logging import log
+from utils.params import FUTURES_CONTRACT_MULTIPLIER
 from .factor_indicators import (
     get_annualized_ret,
     get_annualized_sharpe,
@@ -248,6 +250,46 @@ def _metric_score(eval_df: pd.DataFrame, fitness_metric: str) -> float:
     raise ValueError(f'Unsupported fitness_metric: {fitness_metric}')
 
 
+def _infer_root_instrument(instrument_id: Any) -> str:
+    ins = str(instrument_id).upper().strip()
+    if not ins:
+        return ''
+    if ins.endswith('0') and len(ins) > 1:
+        return ins[:-1]
+    m = re.match(r'([A-Z]+)', ins)
+    return m.group(1) if m else ins
+
+
+def _calc_small_factor_penalty(eval_df: pd.DataFrame,
+                               factor_col: str,
+                               open_col: str,
+                               instrument_col: str,
+                               assumed_initial_capital: float,
+                               small_factor_penalty_coef: float) -> float:
+    if small_factor_penalty_coef <= 0:
+        return 0.0
+    if assumed_initial_capital <= 0:
+        return 0.0
+    if factor_col not in eval_df.columns or open_col not in eval_df.columns or instrument_col not in eval_df.columns:
+        return 0.0
+
+    df = eval_df[[factor_col, open_col, instrument_col]].copy()
+    df[factor_col] = pd.to_numeric(df[factor_col], errors='coerce')
+    df[open_col] = pd.to_numeric(df[open_col], errors='coerce')
+
+    root_series = df[instrument_col].map(_infer_root_instrument)
+    multiplier_series = root_series.map(FUTURES_CONTRACT_MULTIPLIER)
+    multiplier_series = pd.to_numeric(multiplier_series, errors='coerce')
+    min_factor_to_open_1lot = (df[open_col] * multiplier_series) / float(assumed_initial_capital)
+
+    valid = np.isfinite(df[factor_col]) & np.isfinite(min_factor_to_open_1lot) & (min_factor_to_open_1lot > 0)
+    if not bool(valid.any()):
+        return 0.0
+
+    tradable_ratio = float((df.loc[valid, factor_col].abs() >= min_factor_to_open_1lot.loc[valid]).mean())
+    return float(small_factor_penalty_coef) * (1.0 - tradable_ratio)
+
+
 def calc_fitness_and_sign(tree: FactorNode,
                           df: pd.DataFrame,
                           fitness_metric: str = 'ic',
@@ -260,7 +302,9 @@ def calc_fitness_and_sign(tree: FactorNode,
                           rolling_norm_window: int = 30,
                           rolling_norm_min_periods: int = 20,
                           rolling_norm_eps: float = 1e-8,
-                          rolling_norm_clip: float = 10.0) -> Tuple[float, float, int]:
+                          rolling_norm_clip: float = 10.0,
+                          small_factor_penalty_coef: float = 0.0,
+                          assumed_initial_capital: float = 1_000_000.0) -> Tuple[float, float, int]:
     try:
         factor_series = pd.to_numeric(tree.calc(df), errors='coerce')
         if apply_rolling_norm:
@@ -284,6 +328,7 @@ def calc_fitness_and_sign(tree: FactorNode,
         eval_df = pd.DataFrame({
             'time': pd.to_datetime(df['time'], errors='coerce') if 'time' in df.columns else pd.NaT,
             'instrument_id': df['instrument_id'] if 'instrument_id' in df.columns else 'UNKNOWN',
+            'open': pd.to_numeric(df['open'], errors='coerce') if 'open' in df.columns else np.nan,
             'future_ret': pd.to_numeric(df[target_col], errors='coerce'),
             'factor': pd.to_numeric(factor_series, errors='coerce'),
         }).dropna(subset=['future_ret', 'factor'])
@@ -308,6 +353,17 @@ def calc_fitness_and_sign(tree: FactorNode,
         )
         if depth_penalty > 0:
             best_fit = best_fit - depth_penalty
+
+        small_factor_penalty = _calc_small_factor_penalty(
+            eval_df=eval_df,
+            factor_col='factor',
+            open_col='open',
+            instrument_col='instrument_id',
+            assumed_initial_capital=assumed_initial_capital,
+            small_factor_penalty_coef=small_factor_penalty_coef,
+        )
+        if small_factor_penalty > 0:
+            best_fit = best_fit - small_factor_penalty
 
         return float(best_fit), original_best_fit, sign
     except Exception:
@@ -356,6 +412,8 @@ def run_gp_evolution(
     rolling_norm_min_periods: int = 20,
     rolling_norm_eps: float = 1e-8,
     rolling_norm_clip: float = 10.0,
+    small_factor_penalty_coef: float = 0.0,
+    assumed_initial_capital: float = 1_000_000.0,
 ) -> List[GPCandidate]:
     rng = random.Random(random_seed)
 
@@ -373,7 +431,9 @@ def run_gp_evolution(
         f'depth_penalty_start_depth={depth_penalty_start_depth}, '
         f'depth_penalty_linear_coef={depth_penalty_linear_coef}, '
         f'depth_penalty_quadratic_coef={depth_penalty_quadratic_coef}, '
-        f'apply_rolling_norm={apply_rolling_norm}'
+        f'apply_rolling_norm={apply_rolling_norm}, '
+        f'small_factor_penalty_coef={small_factor_penalty_coef}, '
+        f'assumed_initial_capital={assumed_initial_capital}'
     )
 
     population = [
@@ -407,6 +467,8 @@ def run_gp_evolution(
                 rolling_norm_min_periods=rolling_norm_min_periods,
                 rolling_norm_eps=rolling_norm_eps,
                 rolling_norm_clip=rolling_norm_clip,
+                small_factor_penalty_coef=small_factor_penalty_coef,
+                assumed_initial_capital=assumed_initial_capital,
             )
             scored_pop.append((tree, penalized_fitness))
             penalized_fitness_values.append(float(penalized_fitness))

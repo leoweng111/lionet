@@ -33,6 +33,7 @@ def main():
         rolling_norm_eps=1e-8,
         rolling_norm_clip=5.0,
         signal_delay_days=1,
+        min_open_ratio=1.0,
     )
     detail = strategy.backtest()
     print(detail[['time', 'factor_value', 'position_lots', 'equity', 'nav']].tail(10).to_string(index=False))

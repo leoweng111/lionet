@@ -1568,7 +1568,9 @@ class GeneticFactorGenerator(FactorGenerator):
                  gp_depth_penalty_start_depth: int = 4,
                  gp_depth_penalty_linear_coef: float = 0.05,
                  gp_depth_penalty_quadratic_coef: float = 0.0,
-                 gp_log_interval: int = 5):
+                 gp_log_interval: int = 5,
+                 gp_small_factor_penalty_coef: float = 0.0,
+                 gp_assumed_initial_capital: float = 1_000_000.0):
         super().__init__(
             instrument_type=instrument_type,
             instrument_id_list=instrument_id_list,
@@ -1614,6 +1616,8 @@ class GeneticFactorGenerator(FactorGenerator):
         self.gp_depth_penalty_linear_coef = float(gp_depth_penalty_linear_coef)
         self.gp_depth_penalty_quadratic_coef = float(gp_depth_penalty_quadratic_coef)
         self.gp_log_interval = gp_log_interval
+        self.gp_small_factor_penalty_coef = float(gp_small_factor_penalty_coef)
+        self.gp_assumed_initial_capital = float(gp_assumed_initial_capital)
 
         self.factor_tree_map: Dict[str, Any] = {}
 
@@ -1715,6 +1719,8 @@ class GeneticFactorGenerator(FactorGenerator):
             rolling_norm_min_periods=self.rolling_norm_min_periods,
             rolling_norm_eps=self.rolling_norm_eps,
             rolling_norm_clip=self.rolling_norm_clip,
+            small_factor_penalty_coef=self.gp_small_factor_penalty_coef,
+            assumed_initial_capital=self.gp_assumed_initial_capital,
         )
 
         if not candidates:
