@@ -8,8 +8,8 @@ import pandas as pd
 from joblib import Parallel, delayed
 
 from .factor_indicators import get_performance
-from .factor_utils import get_weighted_price, get_factor_value, get_future_ret, rolling_normalize_features
-from data import get_futures_continuous_contract_price
+from .factor_utils import get_weighted_price, get_future_ret, rolling_normalize_features
+from data import get_futures_continuous_contract_price, get_factor_value
 from utils.logging import log
 from error.errors import NotBackTestingError
 

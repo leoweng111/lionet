@@ -1,63 +1,7 @@
-from typing import Dict, Union
-from collections import Counter
+from typing import Union
 import numpy as np
 import pandas as pd
-from joblib import Parallel, delayed
-from data import get_factor_formula_map_by_version, get_risk_free_rate
-from .factor_ops import calc_formula_series
-
-
-def resolve_factor_formula(fc_name: str,
-                           formula_map: Dict[str, str]) -> str:
-    formula = formula_map.get(fc_name)
-    if not isinstance(formula, str) or not formula.strip():
-        available = sorted(formula_map.keys())
-        raise NameError(f'Factor `{fc_name}` formula is not available in DB. Available factors: {available}')
-    return formula.strip()
-
-
-def get_factor_value(Data: pd.DataFrame,
-                     fc_name_list: Union[str, list],
-                     version: str,
-                     n_jobs=5):
-    """
-    Calculate factor value.
-
-    :param Data:
-    :param fc_name_list:
-    :param n_jobs:
-    :return: original dataframe columns + factor values in fc_name_list
-    """
-    if isinstance(fc_name_list, str):
-        fc_name_list = [fc_name_list]
-    fc_name_counter = Counter(fc_name_list)
-    duplicated_fc_names = sorted([x for x, cnt in fc_name_counter.items() if cnt > 1])
-    if duplicated_fc_names:
-        raise ValueError(f'fc_name_list contains duplicated factor names: {duplicated_fc_names}')
-    for col in ['time', 'instrument_id']:
-        assert col in Data.columns, f'Data does not contain column {col}.'
-    df = Data.copy().sort_values(['instrument_id', 'time']).reset_index(drop=True)
-    formula_map = get_factor_formula_map_by_version(fc_name_list=fc_name_list, version=version)
-    missing = [name for name in fc_name_list if name not in formula_map]
-    if missing:
-        raise ValueError(f'No formula found in DB for factors: {missing}')
-
-    def _calc_one(fc_name: str) -> pd.DataFrame:
-        formula = resolve_factor_formula(fc_name, formula_map)
-        col = calc_formula_series(df=df, formula=formula)
-        return pd.DataFrame({'time': df['time'], 'instrument_id': df['instrument_id'], fc_name: col.values})
-
-    with Parallel(n_jobs=n_jobs) as parallel:
-        mapper_list = parallel(delayed(_calc_one)(fc_name) for fc_name in fc_name_list)
-
-    out = df.copy()
-    for mapper in mapper_list:
-        factor_col = [c for c in mapper.columns if c not in ['time', 'instrument_id']]
-        # factor_col[0]就是当前的fc_name，这里是为了避免同名因子列覆盖
-        if factor_col and factor_col[0] in out.columns:
-            out = out.drop(columns=[factor_col[0]])
-        out = out.merge(mapper, on=['time', 'instrument_id'], how='left', validate='1:1')
-    return out
+from data import get_risk_free_rate
 
 
 def join_fc_name_and_parameter(fc_name, parameter):

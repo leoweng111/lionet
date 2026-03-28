@@ -1,9 +1,11 @@
 """Utilities for factor-related database operations."""
 
 from datetime import datetime
-from typing import Dict, List, Optional, Sequence
+from collections import Counter
+from typing import Dict, List, Optional, Sequence, Union
 
 import pandas as pd
+from joblib import Parallel, delayed
 
 from mongo.mongify import (
     delete_data,
@@ -13,6 +15,55 @@ from mongo.mongify import (
     update_one_data,
 )
 from utils.logging import log
+
+
+def _resolve_factor_formula(fc_name: str, formula_map: Dict[str, str]) -> str:
+    formula = formula_map.get(fc_name)
+    if not isinstance(formula, str) or not formula.strip():
+        available = sorted(formula_map.keys())
+        raise NameError(f'Factor `{fc_name}` formula is not available in DB. Available factors: {available}')
+    return formula.strip()
+
+
+def get_factor_value(Data: pd.DataFrame,
+                     fc_name_list: Union[str, list],
+                     version: str,
+                     n_jobs: int = 5) -> pd.DataFrame:
+    """Calculate factor values and append them to input DataFrame.
+
+    :return: original dataframe columns + factor values in fc_name_list
+    """
+    if isinstance(fc_name_list, str):
+        fc_name_list = [fc_name_list]
+    fc_name_counter = Counter(fc_name_list)
+    duplicated_fc_names = sorted([x for x, cnt in fc_name_counter.items() if cnt > 1])
+    if duplicated_fc_names:
+        raise ValueError(f'fc_name_list contains duplicated factor names: {duplicated_fc_names}')
+    for col in ['time', 'instrument_id']:
+        assert col in Data.columns, f'Data does not contain column {col}.'
+
+    df = Data.copy().sort_values(['instrument_id', 'time']).reset_index(drop=True)
+    formula_map = get_factor_formula_map_by_version(fc_name_list=fc_name_list, version=version)
+    missing = [name for name in fc_name_list if name not in formula_map]
+    if missing:
+        raise ValueError(f'No formula found in DB for factors: {missing}')
+
+    def _calc_one(fc_name: str) -> pd.DataFrame:
+        from factors.factor_ops import calc_formula_series
+        formula = _resolve_factor_formula(fc_name, formula_map)
+        col = calc_formula_series(df=df, formula=formula)
+        return pd.DataFrame({'time': df['time'], 'instrument_id': df['instrument_id'], fc_name: col.values})
+
+    with Parallel(n_jobs=n_jobs) as parallel:
+        mapper_list = parallel(delayed(_calc_one)(fc_name) for fc_name in fc_name_list)
+
+    out = df.copy()
+    for mapper in mapper_list:
+        factor_col = [c for c in mapper.columns if c not in ['time', 'instrument_id']]
+        if factor_col and factor_col[0] in out.columns:
+            out = out.drop(columns=[factor_col[0]])
+        out = out.merge(mapper, on=['time', 'instrument_id'], how='left', validate='1:1')
+    return out
 
 
 def update_factor_info(selected_fc_name_list: Sequence[str],

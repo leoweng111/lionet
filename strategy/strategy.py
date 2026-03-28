@@ -14,9 +14,8 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
-from data import get_data, get_futures_continuous_contract_price
+from data import get_futures_continuous_contract_price, get_factor_value
 from factors.factor_indicators import get_performance
-from factors.factor_ops import calc_formula_series
 from factors.factor_utils import get_weighted_price, rolling_normalize_features
 from utils.logging import log
 from utils.params import FUTURES_CONTRACT_MULTIPLIER
@@ -43,6 +42,30 @@ class Strategy:
                  rolling_norm_eps: float = 1e-8,
                  rolling_norm_clip: float = 5.0,
                  signal_delay_days: int = 1):
+        """Initialize strategy simulation settings.
+
+        :param version: 因子版本号，用于在因子库中唯一定位公式。
+        :param factor_name: 因子名称，对应 DB 中的 `factor_name` 字段。
+        :param instrument_id: 回测标的，例如 `C0`。内部会统一映射为主力连续合约代码。
+        :param start_time: 回测开始日期，格式建议 `YYYYMMDD`。
+        :param end_time: 回测结束日期，格式建议 `YYYYMMDD`。
+        :param database: 因子公式所在数据库名，默认 `factors`。
+        :param collection: 因子公式所在集合名，默认 `genetic_programming`。
+        :param initial_capital: 初始资金。当前仓位目标按“单利口径”始终基于该初始资金计算。
+        :param margin_rate: 保证金比例，用于约束最大可开手数。
+            可开仓上限约为 equity / (open * multiplier * margin_rate)。
+        :param fee_per_lot: 每手固定手续费（开平合计按实际交易手数累计）。
+        :param slippage: 每手滑点（价格点数）。实际成本为 slippage * multiplier * trade_lots。
+        :param apply_rolling_norm: 是否对因子做滚动标准化，默认 True。
+            建议与 BackTester 保持一致，避免信号分布口径不一致。
+        :param rolling_norm_window: 滚动标准化窗口长度。
+        :param rolling_norm_min_periods: 滚动标准化最小样本数。
+        :param rolling_norm_eps: 标准化分母平滑项，防止除零。
+        :param rolling_norm_clip: 标准化后截断阈值（对 zscore 做 clip）。
+        :param signal_delay_days: 信号执行延迟天数。
+            例如 1 表示使用 T 日信号，在 T+1 开盘执行交易，
+            与“信号生成后下一交易日开盘执行”的常见研究口径一致。
+        """
         self.database = database
         self.collection = collection
         self.version = version
@@ -64,7 +87,6 @@ class Strategy:
 
         self.performance_detail: Optional[pd.DataFrame] = None
         self.performance_summary: Optional[pd.DataFrame] = None
-        self.formula: Optional[str] = None
 
         if self.initial_capital <= 0:
             raise ValueError('initial_capital must be positive.')
@@ -97,34 +119,6 @@ class Strategy:
         raw_target = (initial_capital * factor_value) / (open_price * float(multiplier))
         # keep truncation-toward-zero behavior for positive/negative factors
         return int(raw_target)
-
-    def _load_formula(self) -> str:
-        operator = {
-            '$and': [
-                {'version': self.version},
-                {'factor_name': self.factor_name},
-            ]
-        }
-        df = get_data(database=self.database, collection=self.collection, mongo_operator=operator)
-        if not isinstance(df, pd.DataFrame) or df.empty:
-            raise ValueError(
-                f'No factor record found in {self.database}.{self.collection} for '
-                f'version={self.version}, factor_name={self.factor_name}.'
-            )
-        formula_list = [
-            str(x).strip()
-            for x in df['formula'].tolist()
-            if isinstance(x, str) and str(x).strip()
-        ]
-        formula_set = sorted(set(formula_list))
-        if not formula_set:
-            raise ValueError('Factor formula is empty in DB records.')
-        if len(formula_set) > 1:
-            raise ValueError(
-                f'Multiple formulas found for one factor record: {formula_set}. '
-                'Please keep one unique formula per (version, factor_name).'
-            )
-        return formula_set[0]
 
     def _load_price_df(self) -> pd.DataFrame:
         main_id = self._main_instrument(self.instrument_id)
@@ -161,12 +155,16 @@ class Strategy:
             )
         multiplier = int(multiplier)
 
-        self.formula = self._load_formula()
         raw_df = self._load_price_df()
 
         # Factor must be calculated on weighted(adjusted) prices.
         factor_input = get_weighted_price(raw_df)
-        factor_input[self.factor_name] = calc_formula_series(df=factor_input, formula=self.formula)
+        factor_input = get_factor_value(
+            Data=factor_input,
+            fc_name_list=[self.factor_name],
+            version=self.version,
+            n_jobs=1,
+        )
         if self.apply_rolling_norm:
             factor_input = rolling_normalize_features(
                 df=factor_input,

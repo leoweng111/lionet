@@ -32,8 +32,8 @@ from sklearn.model_selection import GridSearchCV, RandomizedSearchCV, Predefined
 from sklearn.metrics import make_scorer
 
 from .params import RegressorParamGrid, DefaultParamDict
-from factors import get_factor_value, get_future_ret, BackTester
-from data import get_futures_continuous_contract_price
+from factors import get_future_ret, BackTester
+from data import get_futures_continuous_contract_price, get_factor_value
 from utils import generate_date_strings, OUTPUT_PATH, get_attribute_value
 
 warnings.filterwarnings("ignore")
