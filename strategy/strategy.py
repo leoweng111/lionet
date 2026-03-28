@@ -70,8 +70,9 @@ class Strategy:
             令 raw_target 为理论手数，trunc_target 为向0截断后的手数。
             若 |raw_target - trunc_target| >= min_open_ratio，则向远离0方向多开1手；
             否则保持 trunc_target。
+            e.g.
             - min_open_ratio=1: 完全向0截断（当前保守模式）
-            - min_open_ratio=0.5: 四舍五入到更激进的一手
+            - min_open_ratio=0.6: 大于等于0.6则加一手，到更激进的总手数
             - min_open_ratio=0: 只要非整数就向远离0方向取整
         """
         self.database = database
@@ -218,11 +219,13 @@ class Strategy:
         terminated = False
         terminate_reason = ''
 
+        # 对于T日的模拟
         for i, row in sim_df.iterrows():
-            t = pd.Timestamp(row['time'])
+            t = pd.Timestamp(row['time'])  # T日
             open_px = float(pd.to_numeric(row['open'], errors='coerce'))
             close_px = float(pd.to_numeric(row['close'], errors='coerce'))
             next_open_px = float(pd.to_numeric(row['next_open'], errors='coerce')) if pd.notna(row['next_open']) else np.nan
+            future_ret_t = ((next_open_px - open_px) / open_px) if (np.isfinite(next_open_px) and open_px > 0) else 0.0
             factor_val = float(pd.to_numeric(row[self.factor_name], errors='coerce')) if pd.notna(row[self.factor_name]) else 0.0
             symbol = row['symbol'] if 'symbol' in row.index else None
 
@@ -267,17 +270,20 @@ class Strategy:
                 log.warning(f'[Strategy] {msg}')
 
             delta_lots = int(target_lots - position_lots)
-            is_rebalanced = abs(delta_lots) >= 1
+            is_rebalanced = abs(delta_lots) >= 1  # 是否需要调仓
 
             fee = 0.0
             slippage_cost = 0.0
             if is_rebalanced:
+                # 开仓
                 if position_lots == 0:
                     close_lots = 0
                     open_lots = abs(target_lots)
+                # 平仓
                 elif target_lots == 0:
                     close_lots = abs(position_lots)
                     open_lots = 0
+                # 同向加仓
                 elif np.sign(position_lots) == np.sign(target_lots):
                     if abs(target_lots) >= abs(position_lots):
                         close_lots = 0
@@ -285,12 +291,15 @@ class Strategy:
                     else:
                         close_lots = abs(position_lots) - abs(target_lots)
                         open_lots = 0
+                # 先平仓后反向开仓
                 else:
                     close_lots = abs(position_lots)
                     open_lots = abs(target_lots)
 
                 trade_lots = close_lots + open_lots
                 fee = float(trade_lots) * float(self.fee_per_lot)
+                # 滑点成本 = 每价格滑点 * 合约乘数 * 交易手数
+                # 这里假设每手交易都会存在价格滑点（默认为一点）
                 slippage_cost = float(trade_lots) * float(self.slippage) * float(multiplier)
                 equity -= (fee + slippage_cost)
                 position_lots = target_lots
@@ -315,8 +324,7 @@ class Strategy:
                     'position': float(pd.to_numeric(row['position'], errors='coerce')),
                     'weighted_factor': float(pd.to_numeric(row['weighted_factor'], errors='coerce')),
                     'next_open': next_open_px,
-                    'gap_pnl': 0.0,
-                    'intraday_pnl': 0.0,
+                    'future_ret': future_ret_t,
                     'open_to_open_pnl': 0.0,
                     'daily_gross_pnl': 0.0,
                     'daily_net_pnl': -fee - slippage_cost,
@@ -327,8 +335,6 @@ class Strategy:
                     'available_cash': equity,
                     'is_rebalanced': is_rebalanced,
                     'warning': terminate_reason if not warning_text else f'{warning_text}; {terminate_reason}',
-                    'baseline_gap_pnl': 0.0,
-                    'baseline_intraday_pnl': 0.0,
                     'baseline_long_open_to_open_pnl': 0.0,
                     'baseline_short_open_to_open_pnl': 0.0,
                     'baseline_open_to_open_pnl': 0.0,
@@ -337,9 +343,27 @@ class Strategy:
                     'baseline_equity': baseline_long_equity,
                 })
                 break
+            
+            """
+            “equity 里包含期货头寸，不全是现金”，在股票模型里是对的；
+            但在期货逐日盯市模型里，头寸不是按“资产市值”记账，而是保证金占用 + 每日盈亏结算到权益，所以：
+            equity 可理解为账户净值（近似现金权益）
+            required_margin 是冻结保证金
+            available_cash = equity - required_margin 常用于表示可再开仓资金
+            """
+            
+            # Equity right after T-open rebalancing and transaction costs.
+            equity_t_open = equity
+
+            # T-open margin snapshot (used for available margin before T->T+1 holding PnL).
+            required_margin = abs(position_lots) * open_px * multiplier * self.margin_rate
+            available_cash = equity_t_open - required_margin
 
             # Open-to-open holding PnL: today open -> next trading day's open.
             if np.isfinite(next_open_px) and next_open_px > 0:
+                # T日根据T-1日的因子，开盘后交易使得持仓手数为position_lots，
+                # 那么T日open到T+1日open区间的open_to_open_pnl就等于position_lots * (T+1日open - T日open) * multiplier
+
                 open_to_open_pnl = position_lots * (next_open_px - open_px) * multiplier
                 baseline_long_open_to_open_pnl = baseline_long_lots * (next_open_px - open_px) * multiplier
                 baseline_short_open_to_open_pnl = baseline_short_lots * (next_open_px - open_px) * multiplier
@@ -348,12 +372,9 @@ class Strategy:
                 baseline_long_open_to_open_pnl = 0.0
                 baseline_short_open_to_open_pnl = 0.0
 
-            equity += open_to_open_pnl
+            equity += open_to_open_pnl  # 这里的equity指的是T+1日开盘后的瞬间，根据T+1日开盘价计算的总净值
             baseline_long_equity += baseline_long_open_to_open_pnl
             baseline_short_equity += baseline_short_open_to_open_pnl
-
-            required_margin = abs(position_lots) * open_px * multiplier * self.margin_rate
-            available_cash = equity - required_margin
 
             if equity <= 0:
                 terminated = True
@@ -369,35 +390,32 @@ class Strategy:
             )
 
             rows.append({
-                'time': t,
+                'time': t,  # T日
                 'instrument_id': self.instrument_id,
                 'symbol': symbol,
-                'factor_value': factor_val,
-                'position_lots': position_lots,
-                'target_lots': target_lots,
-                'delta_lots': delta_lots,
-                'open': open_px,
-                'high': float(pd.to_numeric(row['high'], errors='coerce')),
-                'low': float(pd.to_numeric(row['low'], errors='coerce')),
-                'close': close_px,
-                'volume': float(pd.to_numeric(row['volume'], errors='coerce')),
-                'position': float(pd.to_numeric(row['position'], errors='coerce')),
+                'factor_value': factor_val,  # T-1日的因子值（假设signal_delay_days=1）
+                'position_lots': position_lots,  # T日根据T-1的因子，得到的T日开盘后交易后，保持的持仓手数
+                'target_lots': target_lots,  # T日根据T-1的因子，得到的理论目标持仓手数（一般就等于position_lots）
+                'delta_lots': delta_lots,  # T日根据T-1的因子，得到的T日开盘后需要交易的手数
+                'open': open_px,  # T日开盘价
+                'high': float(pd.to_numeric(row['high'], errors='coerce')),  # T日最高价
+                'low': float(pd.to_numeric(row['low'], errors='coerce')),  # T日最低价
+                'close': close_px,  # T日收盘价
+                'volume': float(pd.to_numeric(row['volume'], errors='coerce')),  # T日市场成交量
+                'position': float(pd.to_numeric(row['position'], errors='coerce')),  # T日市场持仓量
                 'weighted_factor': float(pd.to_numeric(row['weighted_factor'], errors='coerce')),
-                'next_open': next_open_px,
-                'gap_pnl': 0.0,
-                'intraday_pnl': 0.0,
-                'open_to_open_pnl': open_to_open_pnl,
-                'daily_gross_pnl': open_to_open_pnl,
-                'daily_net_pnl': open_to_open_pnl - fee - slippage_cost,
+                'next_open': next_open_px,  # T+1日开盘价
+                'future_ret': future_ret_t,  # (next_open_px - open_px) / open_px)
+                'open_to_open_pnl': open_to_open_pnl,  # T日open到T+1日open这段时间内的收益。即T日根据T-1的因子，在T日开盘后交易，持续到T+1日开盘的这段时间内的收益。注意这里是为了保证和Backtester的逻辑一致。
+                'daily_gross_pnl': open_to_open_pnl,  # 目前按照open-to-open的逻辑模拟交易，每日的净pnl就等于open_to_open_pnl
+                'daily_net_pnl': open_to_open_pnl - fee - slippage_cost,  # 每日净pnl还要扣除手续费和滑点成本
                 'fee': fee,
                 'slippage_cost': slippage_cost,
-                'equity': equity,
-                'required_margin': required_margin,
-                'available_cash': available_cash,
-                'is_rebalanced': is_rebalanced,
+                'equity': equity,  # 这里的equity指的是T+1日开盘后的瞬间，根据T+1日开盘价计算的账户总净值。注意这里是为了保证和Backtester的逻辑一致。
+                'required_margin': required_margin,  # 根据T日开盘价、T日开盘交易后的持仓position_lots计算的保证金占用
+                'available_cash': available_cash,  # T日开盘后，根据T日开盘价计算的可用cash
+                'is_rebalanced': is_rebalanced,  # T日是否需要调仓
                 'warning': warning_text,
-                'baseline_gap_pnl': 0.0,
-                'baseline_intraday_pnl': 0.0,
                 'baseline_long_open_to_open_pnl': baseline_long_open_to_open_pnl,
                 'baseline_short_open_to_open_pnl': baseline_short_open_to_open_pnl,
                 # Keep legacy field as long-only baseline for backward compatibility.
@@ -415,6 +433,7 @@ class Strategy:
             raise ValueError('No simulation result generated.')
 
         detail = detail.sort_values('time').reset_index(drop=True)
+        # 单利计算
         detail['daily_gross_ret'] = detail['daily_gross_pnl'] / float(self.initial_capital)
         detail['daily_net_ret'] = detail['daily_net_pnl'] / float(self.initial_capital)
         detail['daily_turnover'] = detail['delta_lots'].abs()
@@ -422,7 +441,7 @@ class Strategy:
         detail['daily_net_nav'] = 1.0 + detail['daily_net_ret'].fillna(0.0).cumsum()
         detail['factor_name'] = self.factor_name
 
-        detail['nav'] = detail['equity'] / float(self.initial_capital)
+        detail['nav'] = detail['equity'] / float(self.initial_capital)  # 单利计算
         detail['baseline_nav'] = detail['baseline_equity'] / float(self.initial_capital)
         detail['baseline_nav_long'] = detail['baseline_long_equity'] / float(self.initial_capital)
         detail['baseline_nav_short'] = detail['baseline_short_equity'] / float(self.initial_capital)
@@ -440,11 +459,11 @@ class Strategy:
             how='left',
             validate='1:1',
         )
-        summary_input['future_ret'] = 0.0
-        nonzero_mask = summary_input[self.factor_name].abs() > 1e-12
-        summary_input.loc[nonzero_mask, 'future_ret'] = (
-            detail.loc[nonzero_mask, 'daily_gross_ret'].to_numpy() /
-            summary_input.loc[nonzero_mask, self.factor_name].to_numpy()
+        summary_input = summary_input.merge(
+            detail[['time', 'future_ret']],
+            on='time',
+            how='left',
+            validate='1:1',
         )
         if 'is_rollover' in sim_df.columns:
             summary_input = summary_input.merge(

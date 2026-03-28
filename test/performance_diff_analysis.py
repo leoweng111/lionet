@@ -134,6 +134,7 @@ def _prepare_strategy_detail(strategy: Strategy) -> pd.DataFrame:
     out = detail[[
         "time",
         "factor_value",
+        "future_ret",
         "daily_gross_ret",
         "daily_net_ret",
         "daily_turnover",
@@ -158,6 +159,7 @@ def _prepare_strategy_detail(strategy: Strategy) -> pd.DataFrame:
     ]].copy()
     out = out.rename(columns={
         "factor_value": "st_factor_value",
+        "future_ret": "st_future_ret",
         "daily_gross_ret": "st_daily_gross_ret",
         "daily_net_ret": "st_daily_net_ret",
         "daily_turnover": "st_daily_turnover",
@@ -187,6 +189,7 @@ def _build_daily_comparison(bt_detail: pd.DataFrame,
         raise ValueError(f"Missing multiplier for instrument root {root}.")
 
     # Keep raw Strategy return columns for diagnostics before timing alignment.
+    merged["st_future_ret_raw"] = merged["st_future_ret"]
     merged["st_daily_gross_ret_raw"] = merged["st_daily_gross_ret"]
     merged["st_daily_net_ret_raw"] = merged["st_daily_net_ret"]
     merged["st_daily_turnover_raw"] = merged["st_daily_turnover"]
@@ -209,6 +212,7 @@ def _build_daily_comparison(bt_detail: pd.DataFrame,
             )
         merged["st_factor_value_aligned"] = merged["st_factor_value"].shift(-delay)
         merged["st_notional_exposure_aligned"] = merged["st_notional_exposure"].shift(-delay)
+        merged["st_future_ret_aligned"] = merged["st_future_ret"].shift(-delay)
         merged["st_daily_gross_ret_aligned"] = merged["st_daily_gross_ret"].shift(-delay)
         merged["st_daily_net_ret_aligned"] = merged["st_daily_net_ret"].shift(-delay)
         merged["st_daily_turnover_aligned"] = merged["st_daily_turnover"].shift(-delay)
@@ -216,6 +220,7 @@ def _build_daily_comparison(bt_detail: pd.DataFrame,
     else:
         merged["st_factor_value_aligned"] = merged["st_factor_value"]
         merged["st_notional_exposure_aligned"] = merged["st_notional_exposure"]
+        merged["st_future_ret_aligned"] = merged["st_future_ret"]
         merged["st_daily_gross_ret_aligned"] = merged["st_daily_gross_ret"]
         merged["st_daily_net_ret_aligned"] = merged["st_daily_net_ret"]
         merged["st_daily_turnover_aligned"] = merged["st_daily_turnover"]
@@ -224,6 +229,15 @@ def _build_daily_comparison(bt_detail: pd.DataFrame,
     merged["st_daily_gross_ret"] = merged["st_daily_gross_ret_aligned"]
     merged["st_daily_net_ret"] = merged["st_daily_net_ret_aligned"]
     merged["st_daily_turnover"] = merged["st_daily_turnover_aligned"]
+    merged["st_future_ret"] = merged["st_future_ret_aligned"]
+
+    # Label-level consistency check: BT future_ret vs Strategy future_ret.
+    merged["future_ret_diff"] = merged["bt_future_ret"] - merged["st_future_ret"]
+    merged["future_ret_abs_diff"] = merged["future_ret_diff"].abs()
+    merged["sign_mismatch_future_ret"] = (
+        np.sign(merged["bt_future_ret"].fillna(0.0))
+        != np.sign(merged["st_future_ret"].fillna(0.0))
+    )
 
     merged["daily_net_ret_diff"] = merged["bt_daily_net_ret"] - merged["st_daily_net_ret"]
     merged["daily_gross_ret_diff"] = merged["bt_daily_gross_ret"] - merged["st_daily_gross_ret"]
@@ -352,6 +366,9 @@ def _summary_metrics(df: pd.DataFrame) -> Dict[str, float]:
         "strategy_total_net_return": st_total_ret,
         "total_return_gap_bt_minus_strategy": nav_gap,
         "daily_net_ret_corr": float(df[["bt_daily_net_ret", "st_daily_net_ret"]].corr().iloc[0, 1]),
+        "future_ret_corr": float(df[["bt_future_ret", "st_future_ret"]].corr().iloc[0, 1]),
+        "mean_abs_future_ret_diff": float(df["future_ret_abs_diff"].mean()),
+        "future_ret_sign_mismatch_ratio": float(df["sign_mismatch_future_ret"].mean()),
         "mean_abs_daily_net_ret_diff": float(df["abs_ret_diff"].mean()),
         "p95_abs_daily_net_ret_diff": float(df["abs_ret_diff"].quantile(0.95)),
         "sign_mismatch_net_ret_ratio": float(df["sign_mismatch_net_ret"].mean()),
@@ -370,6 +387,8 @@ def _reason_scoreboard(df: pd.DataFrame) -> pd.DataFrame:
         "metric": [
             "factor_value_mismatch_ratio(|bt_factor-st_factor_aligned|>0.1)",
             "exposure_mismatch_ratio(|bt_factor-st_exposure_aligned|>0.1)",
+            "future_ret_mismatch_ratio(|bt_future_ret-st_future_ret_aligned|>1e-6)",
+            "future_ret_sign_mismatch_ratio",
             "margin_constraint_ratio",
             "lot_size_floor_ratio",
             "ret_sign_mismatch_ratio",
@@ -378,6 +397,8 @@ def _reason_scoreboard(df: pd.DataFrame) -> pd.DataFrame:
         "value": [
             float((df["factor_diff"].abs() > 0.1).mean()),
             float((df["exposure_diff_vs_bt_factor"].abs() > 0.1).mean()),
+            float((df["future_ret_abs_diff"] > 1e-6).mean()),
+            float(df["sign_mismatch_future_ret"].mean()),
             float(df["warning"].astype(str).str.contains("target_lots_downgraded_by_margin", regex=False).mean()),
             float(df["warning"].astype(str).str.contains("cannot_open_min_one_lot", regex=False).mean()),
             float(df["sign_mismatch_net_ret"].mean()),
@@ -400,6 +421,12 @@ def _extract_bad_cases(df: pd.DataFrame,
         "daily_net_ret_diff",
         "bt_daily_net_nav",
         "st_daily_net_nav",
+        "bt_future_ret",
+        "st_future_ret",
+        "st_future_ret_raw",
+        "future_ret_diff",
+        "future_ret_abs_diff",
+        "sign_mismatch_future_ret",
         "bt_factor_value",
         "st_factor_value",
         "st_factor_value_aligned",
