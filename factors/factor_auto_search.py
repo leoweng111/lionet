@@ -1590,8 +1590,56 @@ class GeneticFactorGenerator(FactorGenerator):
                  gp_assumed_initial_capital: float = 1_000_000.0,
                  gp_elite_stagnation_generation_count: int = 5,
                  gp_max_shock_generation: int = 3):
-        """
+        """遗传规划因子生成器。
 
+        参数说明（中文）：
+        - instrument_type: 数据品种类型，目前仅支持期货连续合约。
+        - instrument_id_list: 合约列表（如 'C0' 或 ['C0','FG0']）。
+        - fc_freq: 因子频率（1m/5m/1d）。
+        - data: 直接传入的价格数据（优先使用）。
+        - start_time/end_time: 回测区间起止时间。
+        - portfolio_adjust_method: 收益对齐周期（min/1D/1M/1Q）。
+        - interest_method: 利息计算方式（simple/compound）。
+        - risk_free_rate: 是否加入无风险利率。
+        - calculate_baseline: 是否计算基准表现。
+        - apply_weighted_price: 是否对价格做复权处理。
+        - n_jobs: 并行进程/线程数。
+        - base_col_list: 可用基础字段列表（默认 OHLCV+position）。
+        - min_window_size: 最小窗口长度。
+        - max_factor_count: 最终返回的最大因子数量。
+        - apply_rolling_norm: 是否对因子做滚动标准化。
+        - rolling_norm_window: 滚动标准化窗口长度。
+        - rolling_norm_min_periods: 滚动标准化最小样本数。
+        - rolling_norm_eps: 标准化数值稳定项。
+        - rolling_norm_clip: 标准化后的截断范围。
+        - check_leakage_count: 泄露检查抽样次数。
+        - check_relative: 是否与历史库做相关性去重。
+        - relative_threshold: 相对相关性阈值（Spearman abs）。
+        - relative_check_version_list: 相对检查的版本白名单。
+        - version: 本次生成的版本标识。
+        - gp_generations: GP 演化代数。
+        - gp_population_size: 每代种群规模。
+        - gp_max_depth: 树的最大深度。
+        - gp_elite_size: 精英库最大容量。
+        - gp_elite_relative_threshold: 精英库同流派判定阈值。
+        - gp_tournament_size: 锦标赛选择规模。
+        - gp_crossover_prob: 交叉概率。
+        - gp_mutation_prob: 变异概率。
+        - gp_leaf_prob: 叶子生成概率。
+        - gp_const_prob: 常数叶子概率。
+        - gp_window_choices: 时序算子可用窗口集合。
+        - fitness_metric: 适应度指标（ic/sharpe）。
+        - random_seed: 随机种子。
+        - gp_early_stopping_generation_count: 连续多少代无提升则早停。
+        - gp_depth_penalty_coef: 深度惩罚系数（线性）。
+        - gp_depth_penalty_start_depth: 深度惩罚起始深度。
+        - gp_depth_penalty_linear_coef: 深度惩罚线性系数（超起始深度）。
+        - gp_depth_penalty_quadratic_coef: 深度惩罚二次系数。
+        - gp_log_interval: GP 日志输出间隔（代）。
+        - gp_small_factor_penalty_coef: 小因子惩罚系数。
+        - gp_assumed_initial_capital: 小因子惩罚的资金假设。
+        - gp_elite_stagnation_generation_count: 精英库连续停滞触发 Shock 的代数。
+        - gp_max_shock_generation: Shock 模式最长持续代数。
         """
         super().__init__(
             instrument_type=instrument_type,

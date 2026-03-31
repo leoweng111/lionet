@@ -803,18 +803,41 @@ def run_gp_evolution(
     elite_stagnation_generation_count: int = 5,
     max_shock_generation: int = 3,
 ) -> List[GPCandidate]:
-    """Run genetic programming evolution to discover alpha factors.
-
-    Parameters
-    ----------
-    elite_size : int
-        精英库（Elite Archive）的最大容量。每代结束后，精英库中的个体
-        会被直接注入下一代种群，保证优秀基因不丢失。
-    elite_relative_threshold : float, default 0.75
-        精英库内"同流派"判定阈值。当新因子与库内某精英的
-        ``|Pearson corr| > elite_relative_threshold`` 时，视为同流派，
-        直接进行适应度单挑，而非占用额外名额。详见 :class:`EliteArchive`。
-    """
+    """运行遗传规划（GP）进行因子挖掘。
++
++    参数说明（中文）：
++    - df: 用于 GP 评估的原始数据（含 time/instrument_id/OHLCV 等列）。
++    - data_fields: 叶子节点可用的字段名列表（如 open/high/low/close/volume/position）。
++    - fitness_metric: 适应度指标（ic 或 sharpe）。
++    - max_factor_count: 最终返回的因子数量上限。
++    - generations: 演化代数。
++    - population_size: 每代种群规模。
++    - max_depth: 树的最大深度。
++    - elite_size: 精英库最大容量（Elite Archive）。
++    - tournament_size: 锦标赛选择规模，越大越偏强者。
++    - crossover_prob: 交叉概率。
++    - mutation_prob: 变异概率。
++    - window_choices: 时序算子可用的窗口长度集合。
++    - const_prob: 叶子节点选常数的概率。
++    - leaf_prob: 生成叶子节点的概率（控制树的复杂度）。
++    - random_seed: 随机种子。
++    - early_stopping_generation_count: 连续多少代无提升则早停（<=0 表示关闭）。
++    - log_interval: 多少代输出一次汇总日志。
++    - depth_penalty_coef: 深度惩罚系数（线性部分）。
++    - depth_penalty_start_depth: 深度惩罚的起始深度。
++    - depth_penalty_linear_coef: 深度惩罚线性系数（超过起始深度后）。
++    - depth_penalty_quadratic_coef: 深度惩罚二次系数（超过起始深度后）。
++    - apply_rolling_norm: 是否对因子值做滚动归一化。
++    - rolling_norm_window: 滚动归一化窗口。
++    - rolling_norm_min_periods: 滚动归一化的最小样本数。
++    - rolling_norm_eps: 滚动归一化的数值稳定项。
++    - rolling_norm_clip: 滚动归一化后的截断范围。
++    - small_factor_penalty_coef: 小因子惩罚系数（越大越惩罚不可交易因子）。
++    - assumed_initial_capital: 小因子惩罚中的资金假设。
++    - elite_relative_threshold: 精英库“同流派”判定阈值（相关性）。
++    - elite_stagnation_generation_count: 连续多少代精英库无更新触发 Shock。
++    - max_shock_generation: Shock 模式最多持续代数（无更新则退出）。
++    """
     rng = random.Random(random_seed)
 
     if log_interval <= 0:
