@@ -85,6 +85,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument('--gp_depth_penalty_linear_coef', type=float, default=0.05)
     parser.add_argument('--gp_depth_penalty_quadratic_coef', type=float, default=0.0)
     parser.add_argument('--gp_log_interval', type=int, default=5)
+    parser.add_argument('--gp_elite_stagnation_generation_count', type=int, default=5,
+                        help='Enter shock mode when elite archive stagnates for N generations.')
+    parser.add_argument('--gp_max_shock_generation', type=int, default=3,
+                        help='Exit shock mode after N generations without elite updates.')
     parser.add_argument('--gp_attempt_time', type=int, default=3,
                         help='Total attempts for GP mining when persistence may fail.')
 
@@ -197,6 +201,8 @@ def run_daily_once(args) -> dict:
             gp_depth_penalty_linear_coef=args.gp_depth_penalty_linear_coef,
             gp_depth_penalty_quadratic_coef=args.gp_depth_penalty_quadratic_coef,
             gp_log_interval=args.gp_log_interval,
+            gp_elite_stagnation_generation_count=args.gp_elite_stagnation_generation_count,
+            gp_max_shock_generation=args.gp_max_shock_generation,
             attempt_time=args.gp_attempt_time,
             version=version,
         )

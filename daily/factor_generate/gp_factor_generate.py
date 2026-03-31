@@ -68,6 +68,8 @@ def run_gp_factor_generate(
     gp_depth_penalty_linear_coef: float = 0.0,
     gp_depth_penalty_quadratic_coef: float = 0.0,
     gp_log_interval: int = 5,
+    gp_elite_stagnation_generation_count: int = 5,
+    gp_max_shock_generation: int = 3,
     attempt_time: int = 3,
     version: Optional[str] = None,
 ):
@@ -118,6 +120,8 @@ def run_gp_factor_generate(
             gp_depth_penalty_linear_coef=gp_depth_penalty_linear_coef,
             gp_depth_penalty_quadratic_coef=gp_depth_penalty_quadratic_coef,
             gp_log_interval=gp_log_interval,
+            gp_elite_stagnation_generation_count=gp_elite_stagnation_generation_count,
+            gp_max_shock_generation=gp_max_shock_generation,
             version=version,
         )
         result = fg.auto_mine_select_and_save_fc(
@@ -213,6 +217,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument('--gp_depth_penalty_linear_coef', type=float, default=0.05)
     parser.add_argument('--gp_depth_penalty_quadratic_coef', type=float, default=0.0)
     parser.add_argument('--gp_log_interval', type=int, default=5)
+    parser.add_argument('--gp_elite_stagnation_generation_count', type=int, default=5,
+                        help='Enter shock mode when elite archive stagnates for N generations.')
+    parser.add_argument('--gp_max_shock_generation', type=int, default=3,
+                        help='Exit shock mode after N generations without elite updates.')
     parser.add_argument('--attempt_time', type=int, default=3,
                         help='Total attempts when mining GP factors. Must be >= 1.')
 
@@ -274,6 +282,8 @@ def main(argv: Optional[Sequence[str]] = None):
         gp_depth_penalty_linear_coef=args.gp_depth_penalty_linear_coef,
         gp_depth_penalty_quadratic_coef=args.gp_depth_penalty_quadratic_coef,
         gp_log_interval=args.gp_log_interval,
+        gp_elite_stagnation_generation_count=args.gp_elite_stagnation_generation_count,
+        gp_max_shock_generation=args.gp_max_shock_generation,
         attempt_time=args.attempt_time,
         version=args.version,
     )

@@ -1587,7 +1587,12 @@ class GeneticFactorGenerator(FactorGenerator):
                  gp_depth_penalty_quadratic_coef: float = 0.0,
                  gp_log_interval: int = 5,
                  gp_small_factor_penalty_coef: float = 0.0,
-                 gp_assumed_initial_capital: float = 1_000_000.0):
+                 gp_assumed_initial_capital: float = 1_000_000.0,
+                 gp_elite_stagnation_generation_count: int = 5,
+                 gp_max_shock_generation: int = 3):
+        """
+
+        """
         super().__init__(
             instrument_type=instrument_type,
             instrument_id_list=instrument_id_list,
@@ -1637,6 +1642,8 @@ class GeneticFactorGenerator(FactorGenerator):
         self.gp_log_interval = gp_log_interval
         self.gp_small_factor_penalty_coef = float(gp_small_factor_penalty_coef)
         self.gp_assumed_initial_capital = float(gp_assumed_initial_capital)
+        self.gp_elite_stagnation_generation_count = int(gp_elite_stagnation_generation_count)
+        self.gp_max_shock_generation = int(gp_max_shock_generation)
 
         self.factor_tree_map: Dict[str, Any] = {}
 
@@ -1745,6 +1752,8 @@ class GeneticFactorGenerator(FactorGenerator):
             rolling_norm_clip=self.rolling_norm_clip,
             small_factor_penalty_coef=self.gp_small_factor_penalty_coef,
             assumed_initial_capital=self.gp_assumed_initial_capital,
+            elite_stagnation_generation_count=self.gp_elite_stagnation_generation_count,
+            max_shock_generation=self.gp_max_shock_generation,
         )
 
         if not candidates:

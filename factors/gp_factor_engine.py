@@ -36,6 +36,13 @@ from .factor_ops import (
     infer_node_type,
 )
 
+# Shock mode hyper-parameters (higher exploration)
+SHOCK_CROSSOVER_PROB: float = 0.2
+SHOCK_MUTATION_PROB: float = 0.75
+SHOCK_TOURNAMENT_SIZE: int = 3
+SHOCK_ROOT_CUT_PROB: float = 0.25
+SHOCK_HOIST_PROB: float = 0.35
+
 
 def _generate_valid_random_tree(
     data_fields: Sequence[str],
@@ -193,6 +200,7 @@ def mutate_tree(
         rng,
         log_context=f'[GP][mutate_tree][gen={gen_idx}] subtree-mutation' if gen_idx is not None else '[GP][mutate_tree] subtree-mutation',
     )
+    old_child = None
     try:
         infer_node_type(new_branch)
         target_type = infer_node_type(target_node)
@@ -204,12 +212,100 @@ def mutate_tree(
         infer_node_type(new_root)
     except TypeError:
         # Restore old subtree when mutation breaks semantic constraints.
-        try:
-            setattr(parent, direction, old_child)
-        except Exception:
-            pass
+        if old_child is not None:
+            try:
+                setattr(parent, direction, old_child)
+            except Exception:
+                pass
         return new_root
     _ = target_node
+    return new_root
+
+
+def macro_subtree_mutation(
+    root_node: FactorNode,
+    data_fields: Sequence[str],
+    max_depth: int,
+    window_choices: Sequence[int],
+    const_prob: float,
+    leaf_prob: float,
+    rng: random.Random,
+    gen_idx: Optional[int] = None,
+) -> FactorNode:
+    """Macro subtree mutation: cut one child under the root and regrow a new subtree."""
+    new_root = copy.deepcopy(root_node)
+
+    if isinstance(new_root, (DataNode, ConstNode)):
+        return _generate_valid_random_tree(
+            data_fields,
+            max_depth,
+            0,
+            window_choices,
+            const_prob,
+            leaf_prob,
+            rng,
+            log_context=f'[GP][macro_mutation][gen={gen_idx}] root-leaf',
+        )
+
+    target_child_attr: Optional[str] = None
+    if isinstance(new_root, BINARY_CHILD_OPS):
+        target_child_attr = 'left' if rng.random() < 0.5 else 'right'
+    elif isinstance(new_root, UNARY_CHILD_OPS):
+        target_child_attr = 'child'
+
+    if target_child_attr is None:
+        return new_root
+
+    new_branch = _generate_valid_random_tree(
+        data_fields,
+        max_depth,
+        0,
+        window_choices,
+        const_prob,
+        leaf_prob,
+        rng,
+        log_context=f'[GP][macro_mutation][gen={gen_idx}] root-cut',
+    )
+
+    old_child = None
+    try:
+        old_child = getattr(new_root, target_child_attr)
+        setattr(new_root, target_child_attr, new_branch)
+        infer_node_type(new_root)
+    except TypeError:
+        if old_child is not None:
+            try:
+                setattr(new_root, target_child_attr, old_child)
+            except Exception:
+                pass
+        return root_node
+
+    return new_root
+
+
+def hoist_mutation(
+    root_node: FactorNode,
+    rng: random.Random,
+    gen_idx: Optional[int] = None,
+) -> FactorNode:
+    """Hoist mutation: promote a random subtree to be the new root."""
+    new_root = copy.deepcopy(root_node)
+    nodes_info = get_all_nodes_with_parents(new_root)
+    if not nodes_info:
+        return new_root
+
+    # Prefer non-root nodes to make the mutation effective.
+    for _ in range(10):
+        node, parent, _ = rng.choice(nodes_info)
+        if parent is not None:
+            try:
+                infer_node_type(node)
+                if gen_idx is not None:
+                    log.warning(f'[GP][hoist_mutation][gen={gen_idx}] hoisted subtree as new root.')
+                return copy.deepcopy(node)
+            except TypeError:
+                continue
+
     return new_root
 
 
@@ -704,6 +800,8 @@ def run_gp_evolution(
     small_factor_penalty_coef: float = 0.0,
     assumed_initial_capital: float = 1_000_000.0,
     elite_relative_threshold: float = 0.75,
+    elite_stagnation_generation_count: int = 5,
+    max_shock_generation: int = 3,
 ) -> List[GPCandidate]:
     """Run genetic programming evolution to discover alpha factors.
 
@@ -729,6 +827,8 @@ def run_gp_evolution(
         f'fitness_metric={fitness_metric}, generations={generations}, population_size={population_size}, '
         f'max_depth={max_depth}, elite_size={elite_size}, elite_relative_threshold={elite_relative_threshold}, '
         f'max_factor_count={max_factor_count}, '
+        f'elite_stagnation_generation_count={elite_stagnation_generation_count}, '
+        f'max_shock_generation={max_shock_generation}, '
         f'early_stopping_generation_count={early_stopping_generation_count}, '
         f'depth_penalty_coef={depth_penalty_coef}, '
         f'depth_penalty_start_depth={depth_penalty_start_depth}, '
@@ -767,6 +867,12 @@ def run_gp_evolution(
     best_round_fitness = -np.inf
     no_improve_generations = 0
 
+    elite_stagnation_generation_count = max(1, int(elite_stagnation_generation_count))
+    max_shock_generation = max(1, int(max_shock_generation))
+    mode = 'NORMAL'
+    stagnation_count = 0
+    shock_count = 0
+
     for gen_idx in range(generations):
         log.info(f'GP generation {gen_idx + 1}/{generations} scoring started.')
         scored_pop: List[Tuple[FactorNode, float]] = []
@@ -774,6 +880,7 @@ def run_gp_evolution(
         original_fitness_values: List[float] = []
         round_best = -np.inf
         round_best_original = -np.inf
+        elite_archive_updated = False
         tree_log_interval = max(1, int(population_size / 10))
         for tree_idx, tree in enumerate(population, start=1):  # 每棵树代表了一个因子
             penalized_fitness, original_fitness, sign = calc_fitness_and_sign(
@@ -833,7 +940,8 @@ def run_gp_evolution(
                 factor_values_for_archive = pd.to_numeric(
                     tree.calc(df), errors='coerce'
                 ).values.astype(float)
-                elite_archive.try_add(tree, penalized_fitness, factor_values_for_archive)
+                if elite_archive.try_add(tree, penalized_fitness, factor_values_for_archive):
+                    elite_archive_updated = True
             except Exception as e:
                 log.warning(f'GP generation {gen_idx + 1}/{generations} tree {tree_idx}/{population_size}: '
                             f'factor value calculation failed with error: {e}. Skipping EliteArchive insertion.')
@@ -854,6 +962,35 @@ def run_gp_evolution(
                 )
 
         scored_pop.sort(key=lambda x: x[1], reverse=True)
+
+        # -----------------------
+        # Shock state machine
+        # -----------------------
+        if mode == 'NORMAL':
+            if elite_archive_updated:
+                stagnation_count = 0
+            else:
+                stagnation_count += 1
+            if stagnation_count >= elite_stagnation_generation_count:
+                mode = 'SHOCK'
+                shock_count = 0
+                log.info(f'GP shock mode entered at generation {gen_idx + 1}: elite archive stagnated.')
+        else:
+            if elite_archive_updated:
+                mode = 'NORMAL'
+                stagnation_count = 0
+                shock_count = 0
+                log.info(f'GP shock mode exited at generation {gen_idx + 1}: elite archive updated.')
+            else:
+                shock_count += 1
+                if shock_count >= max_shock_generation:
+                    mode = 'NORMAL'
+                    stagnation_count = 0
+                    shock_count = 0
+                    log.info(
+                        f'GP shock mode exited at generation {gen_idx + 1}: '
+                        f'no update for {max_shock_generation} generations.'
+                    )
 
         if scored_pop:
             best_fitness_current = float(scored_pop[0][1])
@@ -902,40 +1039,75 @@ def run_gp_evolution(
         # 精英库（Elite Archive）中的个体优先注入下一代，保证优秀且多样
         # 的基因不丢失。剩余名额通过锦标赛选择 + 交叉/变异/复制填充。
         # ------------------------------------------------------------------
+        effective_crossover_prob = crossover_prob
+        effective_mutation_prob = mutation_prob
+        effective_tournament_size = tournament_size
+        if mode == 'SHOCK':
+            effective_crossover_prob = SHOCK_CROSSOVER_PROB
+            effective_mutation_prob = SHOCK_MUTATION_PROB
+            effective_tournament_size = SHOCK_TOURNAMENT_SIZE
+
         archive_elites = elite_archive.get_elites_sorted()
         next_gen: List[FactorNode] = [copy.deepcopy(node) for node, _ in archive_elites]
         next_gen_log_interval = max(1, int(population_size / 5))
         if next_gen:
             log.info(
-                f'GP generation {gen_idx + 1}/{generations} next_gen seeded from EliteArchive: '
+                f'[MODE={mode}] GP generation {gen_idx + 1}/{generations} next_gen seeded from EliteArchive: '
                 f'{len(next_gen)}/{population_size} ({elite_archive.summary_str()})'
             )
 
         while len(next_gen) < population_size:  # 把 next_gen 补满到 population_size。
             r = rng.random()
-            if r < crossover_prob and len(scored_pop) >= 2:  # 交叉分支
+            if r < effective_crossover_prob and len(scored_pop) >= 2:  # 交叉分支
                 # tournament_size 越大，越偏向强者；越小，随机性越强
-                p1 = _tournament_select(scored_pop, tournament_size, rng)
-                p2 = _tournament_select(scored_pop, tournament_size, rng)
+                p1 = _tournament_select(scored_pop, effective_tournament_size, rng)
+                p2 = _tournament_select(scored_pop, effective_tournament_size, rng)
                 c1, c2 = crossover_trees(p1, p2, rng)
                 next_gen.append(c1)
                 if len(next_gen) < population_size:
                     next_gen.append(c2)
-            elif r < crossover_prob + mutation_prob:  # 变异分支
-                p = _tournament_select(scored_pop, tournament_size, rng)
-                m = mutate_tree(
-                    p,
-                    data_fields,
-                    max_depth,
-                    window_choices,
-                    const_prob,
-                    leaf_prob,
-                    rng,
-                    gen_idx=gen_idx + 1,
-                )
+            elif r < effective_crossover_prob + effective_mutation_prob:  # 变异分支
+                p = _tournament_select(scored_pop, effective_tournament_size, rng)
+                if mode == 'SHOCK':
+                    shock_pick = rng.random()
+                    if shock_pick < SHOCK_ROOT_CUT_PROB:
+                        m = macro_subtree_mutation(
+                            p,
+                            data_fields,
+                            max_depth,
+                            window_choices,
+                            const_prob,
+                            leaf_prob,
+                            rng,
+                            gen_idx=gen_idx + 1,
+                        )
+                    elif shock_pick < SHOCK_ROOT_CUT_PROB + SHOCK_HOIST_PROB:
+                        m = hoist_mutation(p, rng, gen_idx=gen_idx + 1)
+                    else:
+                        m = mutate_tree(
+                            p,
+                            data_fields,
+                            max_depth,
+                            window_choices,
+                            const_prob,
+                            leaf_prob,
+                            rng,
+                            gen_idx=gen_idx + 1,
+                        )
+                else:
+                    m = mutate_tree(
+                        p,
+                        data_fields,
+                        max_depth,
+                        window_choices,
+                        const_prob,
+                        leaf_prob,
+                        rng,
+                        gen_idx=gen_idx + 1,
+                    )
                 next_gen.append(m)
             else:  # 复制分支
-                p = _tournament_select(scored_pop, tournament_size, rng)
+                p = _tournament_select(scored_pop, effective_tournament_size, rng)
                 next_gen.append(copy.deepcopy(p))
 
             if len(next_gen) % next_gen_log_interval == 0 or len(next_gen) == population_size:
