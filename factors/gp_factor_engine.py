@@ -392,8 +392,16 @@ def calc_fitness_and_sign(tree: FactorNode,
         eval_df_neg['factor'] = -eval_df_neg['factor']
         fit_neg = _metric_score(eval_df_neg, fitness_metric)
 
+        # Guard against NaN/inf from metric calculations.
+        if not np.isfinite(fit_pos):
+            fit_pos = 0.0
+        if not np.isfinite(fit_neg):
+            fit_neg = 0.0
+
         best_fit = fit_neg if fit_neg > fit_pos else fit_pos
         sign = -1 if fit_neg > fit_pos else 1
+        if not np.isfinite(best_fit):
+            best_fit = 0.0
         original_best_fit = float(best_fit)
 
         depth_penalty = _calc_depth_penalty(

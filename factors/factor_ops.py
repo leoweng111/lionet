@@ -161,8 +161,11 @@ def infer_node_type(node: FactorNode) -> FactorDataType:
     - Lt/Gt：左右必须同类型，输出 BOOLEAN
     - TsRank/TsArgmax/TsArgmin/Sig/Inv：输入任意，输出 RATIO
     - Return/LogReturn：输入必须是 PRICE，输出 RETURN
+    - Body/Upper/Lower/Shadows/StochasticK：输入 PRICE，输出 RATIO
+    - TypicalPrice：输入 PRICE，输出 PRICE
     - Volatility：输入 PRICE/RETURN，输出 VOLATILITY
     - VolumeStd/VolumeZScore/TurnoverShock：输入 VOLUME/OI，输出 VOLATILITY/RATIO
+    - Bias/RangePosition/PriceAcceleration/TrueAmplitude：输入 PRICE，输出 RATIO/RETURN
     - TsCorr/TsRankCorr/TsCov/TsBeta：左右必须同类型，输出 RATIO（TsCov 为 GENERIC）
     - OiTrendConviction：输入 (PRICE, OI)，输出 RETURN
     - Amihud：输入 (PRICE, VOLUME)，输出 RATIO
@@ -236,12 +239,60 @@ def infer_node_type(node: FactorNode) -> FactorDataType:
         node.data_type = FactorDataType.RETURN
         return node.data_type
 
+    if isinstance(node, (OpBodyRatio, OpUpperShadowRatio, OpLowerShadowRatio, OpStochasticK)):
+        # K线形态类：输入价格，输出无量纲比例
+        t = infer_node_type(node.child)
+        if t != FactorDataType.PRICE:
+            raise TypeError(f'{node.__class__.__name__} requires price input, got {t}.')
+        node.data_type = FactorDataType.RATIO
+        return node.data_type
+
+    if isinstance(node, OpTypicalPrice):
+        # 典型价格：输入价格，输出仍为价格类型
+        t = infer_node_type(node.child)
+        if t != FactorDataType.PRICE:
+            raise TypeError(f'OpTypicalPrice requires price input, got {t}.')
+        node.data_type = FactorDataType.PRICE
+        return node.data_type
+
     if isinstance(node, OpVolatility):
         # 价格/收益 -> 波动率
         t = infer_node_type(node.child)
         if t not in {FactorDataType.RETURN, FactorDataType.PRICE}:
             raise TypeError(f'OpVolatility requires return/price input, got {t}.')
         node.data_type = FactorDataType.VOLATILITY
+        return node.data_type
+
+    if isinstance(node, OpBias):
+        # 价格 -> 偏离度比例
+        t = infer_node_type(node.child)
+        if t != FactorDataType.PRICE:
+            raise TypeError(f'OpBias requires price input, got {t}.')
+        node.data_type = FactorDataType.RATIO
+        return node.data_type
+
+    if isinstance(node, OpRangePosition):
+        # 价格 -> 区间位置比例
+        t = infer_node_type(node.child)
+        if t != FactorDataType.PRICE:
+            raise TypeError(f'OpRangePosition requires price input, got {t}.')
+        node.data_type = FactorDataType.RATIO
+        return node.data_type
+
+    if isinstance(node, OpPriceAcceleration):
+        # 价格 -> 加速度（类似收益变化）
+        t = infer_node_type(node.child)
+        if t != FactorDataType.PRICE:
+            raise TypeError(f'OpPriceAcceleration requires price input, got {t}.')
+        node.data_type = FactorDataType.RETURN
+        return node.data_type
+
+    if isinstance(node, OpTrueAmplitude):
+        # 价格 -> 真实振幅比例
+        t = infer_node_type(node.child)
+        if t != FactorDataType.PRICE:
+            raise TypeError(f'OpTrueAmplitude requires price input, got {t}.')
+        node.data_type = FactorDataType.RATIO
         return node.data_type
 
     if isinstance(node, OpVolumeStd):
@@ -458,6 +509,94 @@ class OpSign(FactorNode):
         return f"Sign({self.child})"
 
 
+class OpBodyRatio(FactorNode):
+    """K线实体比例：(close-open)/(high-low+eps)，输出 [-1,1] 的无量纲比例。"""
+
+    def __init__(self, child: FactorNode):
+        # child 仅用于类型约束与公式一致性，实际计算使用 OHLC。
+        self.child = child
+
+    def calc(self, df: pd.DataFrame) -> pd.Series:
+        high = pd.to_numeric(df['high'], errors='coerce')
+        low = pd.to_numeric(df['low'], errors='coerce')
+        close = pd.to_numeric(df['close'], errors='coerce')
+        open_ = pd.to_numeric(df['open'], errors='coerce')
+        denom = (high - low + 1e-8)
+        return (close - open_) / denom
+
+    def to_formula(self) -> str:
+        return f"BodyRatio({self.child})"
+
+
+class OpUpperShadowRatio(FactorNode):
+    """K线上影线比例：(high-max(open,close))/(high-low+eps)。"""
+
+    def __init__(self, child: FactorNode):
+        self.child = child
+
+    def calc(self, df: pd.DataFrame) -> pd.Series:
+        high = pd.to_numeric(df['high'], errors='coerce')
+        low = pd.to_numeric(df['low'], errors='coerce')
+        close = pd.to_numeric(df['close'], errors='coerce')
+        open_ = pd.to_numeric(df['open'], errors='coerce')
+        denom = (high - low + 1e-8)
+        return (high - np.maximum(open_, close)) / denom
+
+    def to_formula(self) -> str:
+        return f"UpperShadowRatio({self.child})"
+
+
+class OpLowerShadowRatio(FactorNode):
+    """K线下影线比例：(min(open,close)-low)/(high-low+eps)。"""
+
+    def __init__(self, child: FactorNode):
+        self.child = child
+
+    def calc(self, df: pd.DataFrame) -> pd.Series:
+        high = pd.to_numeric(df['high'], errors='coerce')
+        low = pd.to_numeric(df['low'], errors='coerce')
+        close = pd.to_numeric(df['close'], errors='coerce')
+        open_ = pd.to_numeric(df['open'], errors='coerce')
+        denom = (high - low + 1e-8)
+        return (np.minimum(open_, close) - low) / denom
+
+    def to_formula(self) -> str:
+        return f"LowerShadowRatio({self.child})"
+
+
+class OpStochasticK(FactorNode):
+    """日内相对位置：(close-low)/(high-low+eps)。"""
+
+    def __init__(self, child: FactorNode):
+        self.child = child
+
+    def calc(self, df: pd.DataFrame) -> pd.Series:
+        high = pd.to_numeric(df['high'], errors='coerce')
+        low = pd.to_numeric(df['low'], errors='coerce')
+        close = pd.to_numeric(df['close'], errors='coerce')
+        denom = (high - low + 1e-8)
+        return (close - low) / denom
+
+    def to_formula(self) -> str:
+        return f"StochasticK({self.child})"
+
+
+class OpTypicalPrice(FactorNode):
+    """典型价格：(high+low+close)/3。"""
+
+    def __init__(self, child: FactorNode):
+        self.child = child
+
+    def calc(self, df: pd.DataFrame) -> pd.Series:
+        high = pd.to_numeric(df['high'], errors='coerce')
+        low = pd.to_numeric(df['low'], errors='coerce')
+        close = pd.to_numeric(df['close'], errors='coerce')
+        return (high + low + close) / 3.0
+
+    def to_formula(self) -> str:
+        return f"TypicalPrice({self.child})"
+
+
 class OpLt(FactorNode):
     # As requested: lt(X, Y) => 1 if X > Y else 0
     def __init__(self, left: FactorNode, right: FactorNode):
@@ -547,6 +686,88 @@ class OpTsPctDelta(FactorNode):
 
     def to_formula(self) -> str:
         return f"TsPctDelta({self.child}, {self.window})"
+
+
+class OpBias(FactorNode):
+    """均线偏离度：close / TsMean(close, d) - 1。"""
+
+    def __init__(self, child: FactorNode, window: int):
+        self.child = child
+        self.window = int(window)
+
+    def calc(self, df: pd.DataFrame) -> pd.Series:
+        close = _safe_series(self.child.calc(df))
+        if 'instrument_id' in df.columns:
+            mean = close.groupby(df['instrument_id']).transform(lambda x: x.rolling(self.window).mean())
+        else:
+            mean = close.rolling(self.window).mean()
+        return close / mean.replace(0, np.nan) - 1.0
+
+    def to_formula(self) -> str:
+        return f"Bias({self.child}, {self.window})"
+
+
+class OpRangePosition(FactorNode):
+    """区间位置：(close - TsMin(low, d)) / (TsMax(high, d) - TsMin(low, d) + eps)。"""
+
+    def __init__(self, child: FactorNode, window: int):
+        self.child = child
+        self.window = int(window)
+
+    def calc(self, df: pd.DataFrame) -> pd.Series:
+        close = _safe_series(self.child.calc(df))
+        high = pd.to_numeric(df['high'], errors='coerce')
+        low = pd.to_numeric(df['low'], errors='coerce')
+        if 'instrument_id' in df.columns:
+            high_max = high.groupby(df['instrument_id']).transform(lambda x: x.rolling(self.window).max())
+            low_min = low.groupby(df['instrument_id']).transform(lambda x: x.rolling(self.window).min())
+        else:
+            high_max = high.rolling(self.window).max()
+            low_min = low.rolling(self.window).min()
+        denom = (high_max - low_min + 1e-8)
+        return (close - low_min) / denom
+
+    def to_formula(self) -> str:
+        return f"RangePosition({self.child}, {self.window})"
+
+
+class OpPriceAcceleration(FactorNode):
+    """价格加速度：Delta(close, d) - Delay(Delta(close, d), d)。"""
+
+    def __init__(self, child: FactorNode, window: int):
+        self.child = child
+        self.window = int(window)
+
+    def calc(self, df: pd.DataFrame) -> pd.Series:
+        def _acc(x: pd.Series) -> pd.Series:
+            delta = x.diff(self.window)
+            return delta - delta.shift(self.window)
+
+        return _group_apply_series(df, self.child.calc(df), _acc)
+
+    def to_formula(self) -> str:
+        return f"PriceAcceleration({self.child}, {self.window})"
+
+
+class OpTrueAmplitude(FactorNode):
+    """真实中心振幅：(high-low)/Delay(close, 1)。"""
+
+    def __init__(self, child: FactorNode, window: int = 1):
+        self.child = child
+        self.window = int(window)
+
+    def calc(self, df: pd.DataFrame) -> pd.Series:
+        high = pd.to_numeric(df['high'], errors='coerce')
+        low = pd.to_numeric(df['low'], errors='coerce')
+        close = _safe_series(self.child.calc(df))
+        if 'instrument_id' in df.columns:
+            prev_close = close.groupby(df['instrument_id']).shift(self.window)
+        else:
+            prev_close = close.shift(self.window)
+        return (high - low) / prev_close.replace(0, np.nan)
+
+    def to_formula(self) -> str:
+        return f"TrueAmplitude({self.child}, {self.window})"
 
 
 class OpReturn(FactorNode):
@@ -1029,7 +1250,19 @@ class OpMaRibbon(FactorNode):
 
 
 BINARY_OPS = [OpAdd, OpSub, OpMul, OpDiv, OpMax, OpMin, OpLt, OpGt, OpOiTrendConviction]
-UNARY_OPS = [OpSqrtAbs, OpAbs, OpInv, OpSig, OpSign, OpDelta]
+UNARY_OPS = [
+    OpSqrtAbs,
+    OpAbs,
+    OpInv,
+    OpSig,
+    OpSign,
+    OpDelta,
+    OpBodyRatio,
+    OpUpperShadowRatio,
+    OpLowerShadowRatio,
+    OpStochasticK,
+    OpTypicalPrice,
+]
 UNARY_TS_OPS = [
     OpEma,
     OpTsDecayExp,
@@ -1043,6 +1276,10 @@ UNARY_TS_OPS = [
     OpVolumeStd,
     OpVolumeZScore,
     OpTurnoverShock,
+    OpBias,
+    OpRangePosition,
+    OpPriceAcceleration,
+    OpTrueAmplitude,
     OpTsDelay,
     OpTsSum,
     OpTsMax,
@@ -1073,6 +1310,15 @@ OP_ALIAS_BY_NAME: Dict[str, Type[Any]] = {
     'volume_std': OpVolumeStd,
     'volume_zscore': OpVolumeZScore,
     'turnover_shock': OpTurnoverShock,
+    'body_ratio': OpBodyRatio,
+    'upper_shadow_ratio': OpUpperShadowRatio,
+    'lower_shadow_ratio': OpLowerShadowRatio,
+    'stochastic_k': OpStochasticK,
+    'typical_price': OpTypicalPrice,
+    'bias': OpBias,
+    'range_position': OpRangePosition,
+    'price_acceleration': OpPriceAcceleration,
+    'true_amplitude': OpTrueAmplitude,
     'ema': OpEma,
     'ts_decay_exp': OpTsDecayExp,
     'ts_cov': OpTsCov,
