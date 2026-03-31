@@ -45,6 +45,7 @@ def _generate_valid_random_tree(
     const_prob: float,
     leaf_prob: float,
     rng: random.Random,
+    log_context: Optional[str] = None,
 ) -> FactorNode:
     """Generate a random GP tree and ensure it passes semantic type validation."""
 
@@ -93,15 +94,22 @@ def _generate_valid_random_tree(
         )
         return op_cls(left, right, int(rng.choice(list(window_choices))))
 
-    for _ in range(25):
+    max_attempts = 25
+    attempts = 0
+    for _ in range(max_attempts):
+        attempts += 1
         tree = _build()
         try:
             infer_node_type(tree)
+            if log_context and attempts > 8:
+                log.warning(f'{log_context} valid tree built after {attempts} attempts.')
             return tree
         except TypeError:
             continue
 
     # Fallback without validation to avoid deadlock in rare cases.
+    if log_context:
+        log.warning(f'{log_context} failed to build valid tree after {attempts} attempts, using fallback.')
     return _build()
 
 
@@ -157,15 +165,34 @@ def mutate_tree(
     const_prob: float,
     leaf_prob: float,
     rng: random.Random,
+    gen_idx: Optional[int] = None,
 ) -> FactorNode:
     new_root = copy.deepcopy(root_node)
     nodes_info = get_all_nodes_with_parents(new_root)
     target_node, parent, direction = rng.choice(nodes_info)
 
     if parent is None:
-        return _generate_valid_random_tree(data_fields, max_depth, 0, window_choices, const_prob, leaf_prob, rng)
+        return _generate_valid_random_tree(
+            data_fields,
+            max_depth,
+            0,
+            window_choices,
+            const_prob,
+            leaf_prob,
+            rng,
+            log_context=f'[GP][mutate_tree][gen={gen_idx}] root-mutation' if gen_idx is not None else '[GP][mutate_tree] root-mutation',
+        )
 
-    new_branch = _generate_valid_random_tree(data_fields, min(max_depth, 3), 0, window_choices, const_prob, leaf_prob, rng)
+    new_branch = _generate_valid_random_tree(
+        data_fields,
+        min(max_depth, 3),
+        0,
+        window_choices,
+        const_prob,
+        leaf_prob,
+        rng,
+        log_context=f'[GP][mutate_tree][gen={gen_idx}] subtree-mutation' if gen_idx is not None else '[GP][mutate_tree] subtree-mutation',
+    )
     try:
         infer_node_type(new_branch)
         target_type = infer_node_type(target_node)
@@ -223,7 +250,7 @@ class GPCandidate:
 
 
 def _collect_yearly_metric_values(metric_df: pd.DataFrame,
-                                  value_col: str) -> List[float]:
+                                   value_col: str) -> List[float]:
     values: List[float] = []
     if value_col not in metric_df.columns:
         return values
@@ -233,6 +260,7 @@ def _collect_yearly_metric_values(metric_df: pd.DataFrame,
         if pd.isna(val):
             # fill the nan with 0, this can be helpful when calculating sharpe with zero volatility
             values.append(0.0)
+            continue
         values.append(float(val))
     return values
 
@@ -637,7 +665,7 @@ def _tournament_select(scored_pop: List[Tuple[FactorNode, float]],
     """
     从 scored_pop 随机抽 k=min(tournament_size, len(scored_pop)) 个候选
     按 fitness 从高到低排序
-    返回这批里最好的那个
+    返回这批候选中最好的那个
 
     tournament_size 越大，越偏向强者；越小，随机性越强。
     """
@@ -720,10 +748,20 @@ def run_gp_evolution(
         elite_relative_threshold=elite_relative_threshold,
     )
 
-    population = [
-        _generate_valid_random_tree(data_fields, max_depth, 0, window_choices, const_prob, leaf_prob, rng)
-        for _ in range(population_size)
-    ]
+    population: List[FactorNode] = []
+    for i in range(population_size):
+        population.append(
+            _generate_valid_random_tree(
+                data_fields,
+                max_depth,
+                0,
+                window_choices,
+                const_prob,
+                leaf_prob,
+                rng,
+                log_context=f'[GP][init] seed tree {i + 1}/{population_size}',
+            )
+        )
 
     global_best: Dict[str, GPCandidate] = {}
     best_round_fitness = -np.inf
@@ -885,7 +923,16 @@ def run_gp_evolution(
                     next_gen.append(c2)
             elif r < crossover_prob + mutation_prob:  # 变异分支
                 p = _tournament_select(scored_pop, tournament_size, rng)
-                m = mutate_tree(p, data_fields, max_depth, window_choices, const_prob, leaf_prob, rng)
+                m = mutate_tree(
+                    p,
+                    data_fields,
+                    max_depth,
+                    window_choices,
+                    const_prob,
+                    leaf_prob,
+                    rng,
+                    gen_idx=gen_idx + 1,
+                )
                 next_gen.append(m)
             else:  # 复制分支
                 p = _tournament_select(scored_pop, tournament_size, rng)
