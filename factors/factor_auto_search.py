@@ -1571,6 +1571,7 @@ class GeneticFactorGenerator(FactorGenerator):
                  gp_population_size: int = 150,
                  gp_max_depth: int = 4,
                  gp_elite_size: int = 20,
+                 gp_elite_relative_threshold: float = 0.75,
                  gp_tournament_size: int = 6,
                  gp_crossover_prob: float = 0.7,
                  gp_mutation_prob: float = 0.25,
@@ -1619,6 +1620,7 @@ class GeneticFactorGenerator(FactorGenerator):
         self.gp_population_size = gp_population_size
         self.gp_max_depth = gp_max_depth
         self.gp_elite_size = gp_elite_size
+        self.gp_elite_relative_threshold = float(gp_elite_relative_threshold)
         self.gp_tournament_size = gp_tournament_size
         self.gp_crossover_prob = gp_crossover_prob
         self.gp_mutation_prob = gp_mutation_prob
@@ -1718,6 +1720,7 @@ class GeneticFactorGenerator(FactorGenerator):
             population_size=self.gp_population_size,
             max_depth=self.gp_max_depth,
             elite_size=self.gp_elite_size,
+            elite_relative_threshold=self.gp_elite_relative_threshold,
             tournament_size=self.gp_tournament_size,
             crossover_prob=self.gp_crossover_prob,
             mutation_prob=self.gp_mutation_prob,

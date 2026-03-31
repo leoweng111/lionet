@@ -69,6 +69,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument('--gp_population_size', type=int, default=150)
     parser.add_argument('--gp_max_depth', type=int, default=4)
     parser.add_argument('--gp_elite_size', type=int, default=20)
+    parser.add_argument('--gp_elite_relative_threshold', type=float, default=0.75,
+                        help='Elite archive correlation threshold for "same school" detection.')
     parser.add_argument('--gp_tournament_size', type=int, default=6)
     parser.add_argument('--gp_crossover_prob', type=float, default=0.7)
     parser.add_argument('--gp_mutation_prob', type=float, default=0.25)
@@ -180,6 +182,7 @@ def run_daily_once(args) -> dict:
             gp_population_size=args.gp_population_size,
             gp_max_depth=args.gp_max_depth,
             gp_elite_size=args.gp_elite_size,
+            gp_elite_relative_threshold=args.gp_elite_relative_threshold,
             gp_tournament_size=args.gp_tournament_size,
             gp_crossover_prob=args.gp_crossover_prob,
             gp_mutation_prob=args.gp_mutation_prob,

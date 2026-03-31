@@ -370,6 +370,207 @@ def calc_fitness_and_sign(tree: FactorNode,
         return 0.0, 0.0, 1
 
 
+class EliteArchive:
+    """精英库（Elite Archive）：维护一组低相关、高适应度的精英因子。
+
+    在 GP 进化过程中，每当一个新因子评分完毕，都会尝试加入精英库。
+    精英库通过相关性检测保证库内因子的多样性（低相关），同时通过
+    适应度比较保证每个"流派"只保留最强个体。
+
+    核心逻辑
+    --------
+    1. **查重**：计算新因子与库内所有精英的 Pearson 相关系数绝对值，
+       找出所有 ``|corr| > elite_relative_threshold`` 的"同流派"精英。
+    2. **同流派 PK（情况 A）**：若存在同流派精英——
+       - 新因子 fitness **高于所有** 同流派精英的最强者 → 删除全部同流派精英，
+         新因子入库（"合并抹杀"，去冗余 + 收敛）。
+       - 否则 → 新因子被淘汰（劣质克隆体）。
+    3. **全新流派（情况 B）**：若不存在同流派精英——
+       - 库未满 → 无条件入库（冷启动，收集多样性）。
+       - 库已满 → 与库内 fitness 最低的"垫底精英"比较：
+         * 新因子 > 垫底精英 → 踢掉垫底，新因子入库（门槛自动提升）。
+         * 否则 → 淘汰。
+
+    注意：合并抹杀可能使库容量短暂低于 ``max_size``，这属于正常的
+    "基因收敛与去冗余"，空出的名额会被后续全新流派填充。
+
+    Parameters
+    ----------
+    max_size : int
+        精英库最大容量（对应原 ``elite_size`` 参数）。
+    elite_relative_threshold : float, default 0.75
+        判定"同流派"的相关性阈值。若新因子与某精英的
+        ``|Pearson corr| > elite_relative_threshold``，则视为同流派。
+    min_corr_samples : int, default 10
+        计算相关系数时要求的最少有效（非 NaN / 非 Inf）样本数。
+        样本不足时视为不相关（corr = 0）。
+    """
+
+    def __init__(self,
+                 max_size: int,
+                 elite_relative_threshold: float = 0.75,
+                 min_corr_samples: int = 10):
+        self.max_size: int = max(1, int(max_size))
+        self.elite_relative_threshold: float = float(elite_relative_threshold)
+        self.min_corr_samples: int = max(2, int(min_corr_samples))
+        # 内部存储：每个精英为 (FactorNode, fitness, factor_values_ndarray)
+        self._elites: List[Tuple[FactorNode, float, np.ndarray]] = []
+
+    # ------------------------------------------------------------------
+    # 公共接口
+    # ------------------------------------------------------------------
+
+    def try_add(self,
+                node: FactorNode,
+                fitness: float,
+                factor_values: np.ndarray) -> bool:
+        """尝试将一个新因子加入精英库。
+
+        Parameters
+        ----------
+        node : FactorNode
+            新因子的 AST 节点（会被 deepcopy 后存入）。
+        fitness : float
+            新因子的适应度分数（penalized_fitness）。
+        factor_values : np.ndarray
+            新因子在全量数据上的因子值（一维数组），用于计算相关性。
+
+        Returns
+        -------
+        bool
+            ``True`` 表示新因子成功入库，``False`` 表示被拒绝。
+        """
+        # ---- 空库 → 直接入库 ----
+        if len(self._elites) == 0:
+            self._elites.append((copy.deepcopy(node), fitness, factor_values.copy()))
+            return True
+
+        # ---- 第一步：与库内所有精英计算相关系数绝对值 ----
+        correlations = np.array([
+            self._calc_abs_corr(factor_values, elite_vals)
+            for _, _, elite_vals in self._elites
+        ])
+
+        # ---- 找出所有"同流派"精英（相关系数 > 阈值）----
+        similar_mask = correlations > self.elite_relative_threshold
+        similar_indices = np.where(similar_mask)[0]
+
+        if len(similar_indices) > 0:
+            # ============================================================
+            # 情况 A：存在同流派精英 —— 直接 PK，无需看容量
+            # ============================================================
+            # 找出同流派中 fitness 最高的"最强者"
+            strongest_fitness = max(self._elites[i][1] for i in similar_indices)
+
+            if fitness > strongest_fitness:
+                # 新因子比所有同流派精英都强 → "合并抹杀"
+                # 从后往前删除，避免索引偏移
+                for idx in sorted(similar_indices, reverse=True):
+                    self._elites.pop(idx)
+                self._elites.append((copy.deepcopy(node), fitness, factor_values.copy()))
+                log.debug(
+                    f'[EliteArchive] 新因子(fitness={fitness:.6f})击败 '
+                    f'{len(similar_indices)} 个同流派精英，合并入库。'
+                    f'当前库容量: {len(self._elites)}/{self.max_size}'
+                )
+                return True
+            else:
+                # 新因子不如最强者 → 淘汰
+                return False
+        else:
+            # ============================================================
+            # 情况 B：全新流派（与所有精英的相关性均 <= 阈值）
+            # ============================================================
+            if len(self._elites) < self.max_size:
+                # 库未满 → 无条件入库（冷启动，收集多样性）
+                self._elites.append((copy.deepcopy(node), fitness, factor_values.copy()))
+                log.debug(
+                    f'[EliteArchive] 新流派因子(fitness={fitness:.6f})入库（冷启动）。'
+                    f'当前库容量: {len(self._elites)}/{self.max_size}'
+                )
+                return True
+            else:
+                # 库已满 → 和垫底精英 PK
+                worst_idx = min(range(len(self._elites)), key=lambda i: self._elites[i][1])
+                worst_fitness = self._elites[worst_idx][1]
+
+                if fitness > worst_fitness:
+                    # 踢掉垫底精英，新因子入库（准入门槛自动提升）
+                    self._elites.pop(worst_idx)
+                    self._elites.append((copy.deepcopy(node), fitness, factor_values.copy()))
+                    log.debug(
+                        f'[EliteArchive] 新流派因子(fitness={fitness:.6f})踢掉垫底精英'
+                        f'(fitness={worst_fitness:.6f})入库。'
+                        f'当前库容量: {len(self._elites)}/{self.max_size}'
+                    )
+                    return True
+                else:
+                    # 连垫底都不如 → 淘汰
+                    return False
+
+    def get_elites_sorted(self) -> List[Tuple[FactorNode, float]]:
+        """返回当前精英库中所有精英，按 fitness 从高到低排序。
+
+        Returns
+        -------
+        List[Tuple[FactorNode, float]]
+            ``(node, fitness)`` 列表，节点已做 deepcopy。
+        """
+        sorted_elites = sorted(self._elites, key=lambda x: x[1], reverse=True)
+        return [(copy.deepcopy(e[0]), e[1]) for e in sorted_elites]
+
+    @property
+    def size(self) -> int:
+        """当前精英库中的精英数量。"""
+        return len(self._elites)
+
+    def summary_str(self) -> str:
+        """返回精英库的摘要信息字符串，用于日志输出。"""
+        if not self._elites:
+            return f'EliteArchive(size=0/{self.max_size})'
+        fitnesses = [f for _, f, _ in self._elites]
+        return (
+            f'EliteArchive(size={len(self._elites)}/{self.max_size}, '
+            f'best={max(fitnesses):.6f}, worst={min(fitnesses):.6f}, '
+            f'mean={np.mean(fitnesses):.6f})'
+        )
+
+    # ------------------------------------------------------------------
+    # 内部方法
+    # ------------------------------------------------------------------
+
+    def _calc_abs_corr(self, values_a: np.ndarray, values_b: np.ndarray) -> float:
+        """计算两个因子值序列的 Pearson 相关系数的绝对值。
+
+        仅在共同非 NaN / 非 Inf 位置上计算。样本不足时返回 0.0。
+
+        Parameters
+        ----------
+        values_a, values_b : np.ndarray
+            等长的一维因子值数组。
+
+        Returns
+        -------
+        float
+            ``|Pearson r|``，范围 [0, 1]。无法计算时返回 0.0。
+        """
+        valid = np.isfinite(values_a) & np.isfinite(values_b)
+        n_valid = int(valid.sum())
+        if n_valid < self.min_corr_samples:
+            return 0.0
+        a = values_a[valid]
+        b = values_b[valid]
+        std_a = np.std(a)
+        std_b = np.std(b)
+        if std_a < 1e-12 or std_b < 1e-12:
+            # 常数序列视为不相关
+            return 0.0
+        corr = np.corrcoef(a, b)[0, 1]
+        if np.isnan(corr):
+            return 0.0
+        return abs(float(corr))
+
+
 def _tournament_select(scored_pop: List[Tuple[FactorNode, float]],
                        tournament_size: int,
                        rng: random.Random) -> FactorNode:
@@ -414,7 +615,20 @@ def run_gp_evolution(
     rolling_norm_clip: float = 10.0,
     small_factor_penalty_coef: float = 0.0,
     assumed_initial_capital: float = 1_000_000.0,
+    elite_relative_threshold: float = 0.75,
 ) -> List[GPCandidate]:
+    """Run genetic programming evolution to discover alpha factors.
+
+    Parameters
+    ----------
+    elite_size : int
+        精英库（Elite Archive）的最大容量。每代结束后，精英库中的个体
+        会被直接注入下一代种群，保证优秀基因不丢失。
+    elite_relative_threshold : float, default 0.75
+        精英库内"同流派"判定阈值。当新因子与库内某精英的
+        ``|Pearson corr| > elite_relative_threshold`` 时，视为同流派，
+        直接进行适应度单挑，而非占用额外名额。详见 :class:`EliteArchive`。
+    """
     rng = random.Random(random_seed)
 
     if log_interval <= 0:
@@ -425,7 +639,8 @@ def run_gp_evolution(
     log.info(
         'GP start: '
         f'fitness_metric={fitness_metric}, generations={generations}, population_size={population_size}, '
-        f'max_depth={max_depth}, elite_size={elite_size}, max_factor_count={max_factor_count}, '
+        f'max_depth={max_depth}, elite_size={elite_size}, elite_relative_threshold={elite_relative_threshold}, '
+        f'max_factor_count={max_factor_count}, '
         f'early_stopping_generation_count={early_stopping_generation_count}, '
         f'depth_penalty_coef={depth_penalty_coef}, '
         f'depth_penalty_start_depth={depth_penalty_start_depth}, '
@@ -434,6 +649,15 @@ def run_gp_evolution(
         f'apply_rolling_norm={apply_rolling_norm}, '
         f'small_factor_penalty_coef={small_factor_penalty_coef}, '
         f'assumed_initial_capital={assumed_initial_capital}'
+    )
+
+    # ------------------------------------------------------------------
+    # 初始化精英库（Elite Archive）
+    # 精英库在整个进化过程中持续维护，跨代累积优秀且多样的因子。
+    # ------------------------------------------------------------------
+    elite_archive = EliteArchive(
+        max_size=elite_size,
+        elite_relative_threshold=elite_relative_threshold,
     )
 
     population = [
@@ -502,6 +726,21 @@ def run_gp_evolution(
                     penalized_fitness=penalized_fitness,
                 )
 
+            # ----------------------------------------------------------
+            # 尝试将当前因子加入精英库（Elite Archive）
+            # 使用原始（未取向）的因子值进行相关性比较，因为 |corr| 对
+            # 符号翻转不变，无需使用 oriented_node。
+            # ----------------------------------------------------------
+            try:
+                factor_values_for_archive = pd.to_numeric(
+                    tree.calc(df), errors='coerce'
+                ).values.astype(float)
+                elite_archive.try_add(tree, penalized_fitness, factor_values_for_archive)
+            except Exception as e:
+                log.warning(f'GP generation {gen_idx + 1}/{generations} tree {tree_idx}/{population_size}: '
+                            f'factor value calculation failed with error: {e}. Skipping EliteArchive insertion.')
+                pass  # 因子值计算异常时跳过，不影响主流程
+
             """
             当前树进度：tree i/population_size
             当前树 fitness：fitness=...
@@ -542,7 +781,8 @@ def run_gp_evolution(
                 f'current_avg_original={avg_original_fitness_current:.6f}, '
                 f'global_best_penalized={global_best_fitness:.6f}, '
                 f'global_best_original={global_best_original_fitness:.6f}, '
-                f'unique_formulas={len(global_best)}'
+                f'unique_formulas={len(global_best)}, '
+                f'{elite_archive.summary_str()}'
             )
 
         if best_fitness_current > best_round_fitness:
@@ -558,14 +798,19 @@ def run_gp_evolution(
                 f'best_round_fitness={best_round_fitness:.6f}'
             )
             break
-        # scored_pop：当前代全部个体和 fitness（已排序）
-        # next_gen先放入精英保留（elite_size 个，直接复制）
-        next_gen: List[FactorNode] = [copy.deepcopy(x[0]) for x in scored_pop[:min(elite_size, len(scored_pop))]]
+
+        # ------------------------------------------------------------------
+        # 构建下一代种群（next_gen）
+        # 精英库（Elite Archive）中的个体优先注入下一代，保证优秀且多样
+        # 的基因不丢失。剩余名额通过锦标赛选择 + 交叉/变异/复制填充。
+        # ------------------------------------------------------------------
+        archive_elites = elite_archive.get_elites_sorted()
+        next_gen: List[FactorNode] = [copy.deepcopy(node) for node, _ in archive_elites]
         next_gen_log_interval = max(1, int(population_size / 5))
         if next_gen:
             log.info(
-                f'GP generation {gen_idx + 1}/{generations} next_gen initialized with elites: '
-                f'{len(next_gen)}/{population_size}'
+                f'GP generation {gen_idx + 1}/{generations} next_gen seeded from EliteArchive: '
+                f'{len(next_gen)}/{population_size} ({elite_archive.summary_str()})'
             )
 
         while len(next_gen) < population_size:  # 把 next_gen 补满到 population_size。
