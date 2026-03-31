@@ -607,7 +607,7 @@ class EliteArchive:
     def try_add(self,
                 node: FactorNode,
                 fitness: float,
-                factor_values: np.ndarray) -> bool:
+                factor_values: np.ndarray) -> Tuple[bool, int]:
         """尝试将一个新因子加入精英库。
 
         Parameters
@@ -621,13 +621,15 @@ class EliteArchive:
 
         Returns
         -------
-        bool
-            ``True`` 表示新因子成功入库，``False`` 表示被拒绝。
+        Tuple[bool, int]
+            (added, removed_count)
+            - added: True 表示新因子成功入库
+            - removed_count: 被踢出的精英数量（用于统计变动规模）
         """
         # ---- 空库 → 直接入库 ----
         if len(self._elites) == 0:
             self._elites.append((copy.deepcopy(node), fitness, factor_values.copy()))
-            return True
+            return True, 0
 
         # ---- 第一步：与库内所有精英计算相关系数绝对值 ----
         correlations = np.array([
@@ -657,10 +659,10 @@ class EliteArchive:
                     f'{len(similar_indices)} 个同流派精英，合并入库。'
                     f'当前库容量: {len(self._elites)}/{self.max_size}'
                 )
-                return True
+                return True, int(len(similar_indices))
             else:
                 # 新因子不如最强者 → 淘汰
-                return False
+                return False, 0
         else:
             # ============================================================
             # 情况 B：全新流派（与所有精英的相关性均 <= 阈值）
@@ -672,7 +674,7 @@ class EliteArchive:
                     f'[EliteArchive] 新流派因子(fitness={fitness:.6f})入库（冷启动）。'
                     f'当前库容量: {len(self._elites)}/{self.max_size}'
                 )
-                return True
+                return True, 0
             else:
                 # 库已满 → 和垫底精英 PK
                 worst_idx = min(range(len(self._elites)), key=lambda i: self._elites[i][1])
@@ -687,10 +689,10 @@ class EliteArchive:
                         f'(fitness={worst_fitness:.6f})入库。'
                         f'当前库容量: {len(self._elites)}/{self.max_size}'
                     )
-                    return True
+                    return True, 1
                 else:
                     # 连垫底都不如 → 淘汰
-                    return False
+                    return False, 0
 
     def get_elites_sorted(self) -> List[Tuple[FactorNode, float]]:
         """返回当前精英库中所有精英，按 fitness 从高到低排序。
@@ -904,6 +906,8 @@ def run_gp_evolution(
         round_best = -np.inf
         round_best_original = -np.inf
         elite_archive_updated = False
+        elite_add_count = 0
+        elite_remove_count = 0
         tree_log_interval = max(1, int(population_size / 10))
         for tree_idx, tree in enumerate(population, start=1):  # 每棵树代表了一个因子
             penalized_fitness, original_fitness, sign = calc_fitness_and_sign(
@@ -963,8 +967,11 @@ def run_gp_evolution(
                 factor_values_for_archive = pd.to_numeric(
                     tree.calc(df), errors='coerce'
                 ).values.astype(float)
-                if elite_archive.try_add(tree, penalized_fitness, factor_values_for_archive):
+                added, removed_count = elite_archive.try_add(tree, penalized_fitness, factor_values_for_archive)
+                if added or removed_count > 0:
                     elite_archive_updated = True
+                elite_add_count += int(added)
+                elite_remove_count += int(removed_count)
             except Exception as e:
                 log.warning(f'GP generation {gen_idx + 1}/{generations} tree {tree_idx}/{population_size}: '
                             f'factor value calculation failed with error: {e}. Skipping EliteArchive insertion.')
