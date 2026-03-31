@@ -231,7 +231,8 @@ def _collect_yearly_metric_values(metric_df: pd.DataFrame,
         if str(idx) == 'all':
             continue
         if pd.isna(val):
-            continue
+            # fill the nan with 0, this can be helpful when calculating sharpe with zero volatility
+            values.append(0.0)
         values.append(float(val))
     return values
 
