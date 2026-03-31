@@ -37,3 +37,11 @@ Basic tests.
 ### 9. notebook
 
 Guidance notebooks.
+
+### 10. quick checks
+
+Run the typed GP smoke test with derived leaf features:
+
+```bash
+python -u test/typed_gp_smoke.py
+```

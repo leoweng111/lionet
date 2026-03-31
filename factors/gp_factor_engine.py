@@ -33,10 +33,11 @@ from .factor_ops import (
     DataNode,
     FactorNode,
     OpNeg,
+    infer_node_type,
 )
 
 
-def generate_random_tree(
+def _generate_valid_random_tree(
     data_fields: Sequence[str],
     max_depth: int,
     current_depth: int,
@@ -45,37 +46,63 @@ def generate_random_tree(
     leaf_prob: float,
     rng: random.Random,
 ) -> FactorNode:
-    if current_depth >= max_depth:
-        if rng.random() < const_prob:
-            return ConstNode(rng.uniform(-2.0, 2.0))
-        return DataNode(rng.choice(list(data_fields)))
+    """Generate a random GP tree and ensure it passes semantic type validation."""
 
-    if rng.random() < leaf_prob:
-        if rng.random() < const_prob:
-            return ConstNode(rng.uniform(-2.0, 2.0))
-        return DataNode(rng.choice(list(data_fields)))
+    def _build() -> FactorNode:
+        if current_depth >= max_depth:
+            if rng.random() < const_prob:
+                return ConstNode(rng.uniform(-2.0, 2.0))
+            return DataNode(rng.choice(list(data_fields)))
 
-    op_pick = rng.random()
-    if op_pick < 0.5:
-        op_cls = rng.choice(BINARY_OPS)
-        left = generate_random_tree(data_fields, max_depth, current_depth + 1, window_choices, const_prob, leaf_prob, rng)
-        right = generate_random_tree(data_fields, max_depth, current_depth + 1, window_choices, const_prob, leaf_prob, rng)
-        return op_cls(left, right)
+        if rng.random() < leaf_prob:
+            if rng.random() < const_prob:
+                return ConstNode(rng.uniform(-2.0, 2.0))
+            return DataNode(rng.choice(list(data_fields)))
 
-    if op_pick < 0.75:
-        op_cls = rng.choice(UNARY_OPS)
-        child = generate_random_tree(data_fields, max_depth, current_depth + 1, window_choices, const_prob, leaf_prob, rng)
-        return op_cls(child)
+        op_pick = rng.random()
+        if op_pick < 0.5:
+            op_cls = rng.choice(BINARY_OPS)
+            left = _generate_valid_random_tree(
+                data_fields, max_depth, current_depth + 1, window_choices, const_prob, leaf_prob, rng
+            )
+            right = _generate_valid_random_tree(
+                data_fields, max_depth, current_depth + 1, window_choices, const_prob, leaf_prob, rng
+            )
+            return op_cls(left, right)
 
-    if op_pick < 0.9:
-        op_cls = rng.choice(UNARY_TS_OPS)
-        child = generate_random_tree(data_fields, max_depth, current_depth + 1, window_choices, const_prob, leaf_prob, rng)
-        return op_cls(child, int(rng.choice(list(window_choices))))
+        if op_pick < 0.75:
+            op_cls = rng.choice(UNARY_OPS)
+            child = _generate_valid_random_tree(
+                data_fields, max_depth, current_depth + 1, window_choices, const_prob, leaf_prob, rng
+            )
+            return op_cls(child)
 
-    op_cls = rng.choice(BINARY_TS_OPS)
-    left = generate_random_tree(data_fields, max_depth, current_depth + 1, window_choices, const_prob, leaf_prob, rng)
-    right = generate_random_tree(data_fields, max_depth, current_depth + 1, window_choices, const_prob, leaf_prob, rng)
-    return op_cls(left, right, int(rng.choice(list(window_choices))))
+        if op_pick < 0.9:
+            op_cls = rng.choice(UNARY_TS_OPS)
+            child = _generate_valid_random_tree(
+                data_fields, max_depth, current_depth + 1, window_choices, const_prob, leaf_prob, rng
+            )
+            return op_cls(child, int(rng.choice(list(window_choices))))
+
+        op_cls = rng.choice(BINARY_TS_OPS)
+        left = _generate_valid_random_tree(
+            data_fields, max_depth, current_depth + 1, window_choices, const_prob, leaf_prob, rng
+        )
+        right = _generate_valid_random_tree(
+            data_fields, max_depth, current_depth + 1, window_choices, const_prob, leaf_prob, rng
+        )
+        return op_cls(left, right, int(rng.choice(list(window_choices))))
+
+    for _ in range(25):
+        tree = _build()
+        try:
+            infer_node_type(tree)
+            return tree
+        except TypeError:
+            continue
+
+    # Fallback without validation to avoid deadlock in rare cases.
+    return _build()
 
 
 def get_all_nodes_with_parents(node: FactorNode, parent=None, direction: Optional[str] = None):
@@ -136,10 +163,25 @@ def mutate_tree(
     target_node, parent, direction = rng.choice(nodes_info)
 
     if parent is None:
-        return generate_random_tree(data_fields, max_depth, 0, window_choices, const_prob, leaf_prob, rng)
+        return _generate_valid_random_tree(data_fields, max_depth, 0, window_choices, const_prob, leaf_prob, rng)
 
-    new_branch = generate_random_tree(data_fields, min(max_depth, 3), 0, window_choices, const_prob, leaf_prob, rng)
-    setattr(parent, direction, new_branch)
+    new_branch = _generate_valid_random_tree(data_fields, min(max_depth, 3), 0, window_choices, const_prob, leaf_prob, rng)
+    try:
+        infer_node_type(new_branch)
+        target_type = infer_node_type(target_node)
+        if new_branch.data_type != target_type:
+            # If type mismatch, keep original subtree to avoid invalid mix.
+            return new_root
+        old_child = getattr(parent, direction)
+        setattr(parent, direction, new_branch)
+        infer_node_type(new_root)
+    except TypeError:
+        # Restore old subtree when mutation breaks semantic constraints.
+        try:
+            setattr(parent, direction, old_child)
+        except Exception:
+            pass
+        return new_root
     _ = target_node
     return new_root
 
@@ -148,17 +190,26 @@ def crossover_trees(tree_a: FactorNode, tree_b: FactorNode, rng: random.Random):
     child_a = copy.deepcopy(tree_a)
     child_b = copy.deepcopy(tree_b)
 
+    try:
+        infer_node_type(child_a)
+        infer_node_type(child_b)
+    except TypeError:
+        return child_a, child_b
+
     nodes_a = get_all_nodes_with_parents(child_a)
     nodes_b = get_all_nodes_with_parents(child_b)
 
-    node_a, parent_a, dir_a = rng.choice(nodes_a)
-    node_b, parent_b, dir_b = rng.choice(nodes_b)
-
-    if parent_a is None or parent_b is None:
+    for _ in range(20):
+        node_a, parent_a, dir_a = rng.choice(nodes_a)
+        node_b, parent_b, dir_b = rng.choice(nodes_b)
+        if parent_a is None or parent_b is None:
+            continue
+        if getattr(node_a, 'data_type', None) != getattr(node_b, 'data_type', None):
+            continue
+        setattr(parent_a, dir_a, node_b)
+        setattr(parent_b, dir_b, node_a)
         return child_a, child_b
 
-    setattr(parent_a, dir_a, node_b)
-    setattr(parent_b, dir_b, node_a)
     return child_a, child_b
 
 
@@ -661,7 +712,7 @@ def run_gp_evolution(
     )
 
     population = [
-        generate_random_tree(data_fields, max_depth, 0, window_choices, const_prob, leaf_prob, rng)
+        _generate_valid_random_tree(data_fields, max_depth, 0, window_choices, const_prob, leaf_prob, rng)
         for _ in range(population_size)
     ]
 

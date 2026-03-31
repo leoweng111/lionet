@@ -1705,7 +1705,11 @@ class GeneticFactorGenerator(FactorGenerator):
             missing = [x for x in selected_fc_names if x not in formula_map]
             if missing:
                 raise ValueError(f'GP formulas not found in DB for factors: {missing}')
-            return calc_formula_df(df=df_eval, formula_map={k: formula_map[k] for k in selected_fc_names}, data_fields=self.base_col_list)
+            return calc_formula_df(
+                df=df_eval,
+                formula_map={k: formula_map[k] for k in selected_fc_names},
+                data_fields=self.base_col_list,
+            )
 
         limit = int(self.max_factor_count or 0)
         if limit <= 0:

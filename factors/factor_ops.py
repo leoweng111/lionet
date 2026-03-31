@@ -5,14 +5,79 @@ backtest can share the same operator space.
 """
 
 import ast
+from enum import Enum
 from typing import Any, Dict, Optional, Sequence, Type
 
 import numpy as np
 import pandas as pd
 
 
+class FactorDataType(str, Enum):
+    """Semantic types for GP nodes to prevent invalid operator mixes."""
+
+    PRICE = 'price'
+    VOLUME = 'volume'
+    OI = 'oi'
+    RETURN = 'return'
+    VOLATILITY = 'volatility'
+    RATIO = 'ratio'
+    BOOLEAN = 'boolean'
+    GENERIC = 'generic'
+
+
+_BASE_FIELD_TYPE_MAP: Dict[str, FactorDataType] = {
+    'open': FactorDataType.PRICE,
+    'high': FactorDataType.PRICE,
+    'low': FactorDataType.PRICE,
+    'close': FactorDataType.PRICE,
+    'volume': FactorDataType.VOLUME,
+    'position': FactorDataType.OI,
+    'oi': FactorDataType.OI,
+}
+
+
+def infer_field_type(field: str) -> FactorDataType:
+    """Infer semantic type from raw or derived field name."""
+    key = str(field).strip().lower()
+    if key in _BASE_FIELD_TYPE_MAP:
+        return _BASE_FIELD_TYPE_MAP[key]
+    if key.startswith('ret_') or key.startswith('log_ret_') or key.startswith('oi_chg_'):
+        return FactorDataType.RETURN
+    if key.startswith('volatility_') or key.startswith('volume_std_'):
+        return FactorDataType.VOLATILITY
+    if key.endswith('_ratio') or key.startswith('volume_zscore_') or key.startswith('turnover_shock_'):
+        return FactorDataType.RATIO
+    return FactorDataType.GENERIC
+
+
+def _is_valid_mul(left_type: FactorDataType, right_type: FactorDataType) -> bool:
+    # Only allow scaling by unitless ratio to avoid meaningless mixes like Price * Volume.
+    return left_type == FactorDataType.RATIO or right_type == FactorDataType.RATIO
+
+
+def _infer_mul_type(left_type: FactorDataType, right_type: FactorDataType) -> FactorDataType:
+    if left_type == FactorDataType.RATIO:
+        return right_type
+    if right_type == FactorDataType.RATIO:
+        return left_type
+    return FactorDataType.RATIO
+
+
+def _is_valid_div(left_type: FactorDataType, right_type: FactorDataType) -> bool:
+    # Division is valid for same-unit ratio or dividing by ratio.
+    return left_type == right_type or right_type == FactorDataType.RATIO
+
+
+def _infer_div_type(left_type: FactorDataType, right_type: FactorDataType) -> FactorDataType:
+    if right_type == FactorDataType.RATIO:
+        return left_type
+    return FactorDataType.RATIO
+
+
 class FactorNode:
     """Base class for AST nodes."""
+
+    data_type: FactorDataType = FactorDataType.GENERIC
 
     def calc(self, df: pd.DataFrame) -> pd.Series:
         raise NotImplementedError
@@ -27,6 +92,7 @@ class FactorNode:
 class DataNode(FactorNode):
     def __init__(self, field: str):
         self.field = field
+        self.data_type = infer_field_type(field)
 
     def calc(self, df: pd.DataFrame) -> pd.Series:
         if self.field in df.columns:
@@ -45,6 +111,8 @@ class DataNode(FactorNode):
 class ConstNode(FactorNode):
     def __init__(self, value: float):
         self.value = float(value)
+        # Constant is treated as unitless scaling factor by default.
+        self.data_type = FactorDataType.RATIO
 
     def calc(self, df: pd.DataFrame) -> pd.Series:
         return pd.Series(self.value, index=df.index, dtype=float)
@@ -80,6 +148,171 @@ def _rolling_argext_distance(arr: np.ndarray, mode: str) -> float:
         return np.nan
 
     return float((len(values) - 1) - int(hit_idx[-1]))
+
+
+
+def infer_node_type(node: FactorNode) -> FactorDataType:
+    """Infer and validate semantic type for AST recursively.
+
+    规则摘要（类型约束）：
+    - Add/Sub/Max/Min：左右必须同类型，且不能是 BOOLEAN
+    - Mul：只允许与 RATIO 相乘（防止 price * volume 等无意义组合）
+    - Div：同类型相除，或除以 RATIO
+    - Lt/Gt：左右必须同类型，输出 BOOLEAN
+    - TsRank/TsArgmax/TsArgmin/Sig/Inv：输入任意，输出 RATIO
+    - Return/LogReturn：输入必须是 PRICE，输出 RETURN
+    - Volatility：输入 PRICE/RETURN，输出 VOLATILITY
+    - VolumeStd/VolumeZScore/TurnoverShock：输入 VOLUME/OI，输出 VOLATILITY/RATIO
+    - TsCorr/TsRankCorr/TsCov/TsBeta：左右必须同类型，输出 RATIO（TsCov 为 GENERIC）
+    - OiTrendConviction：输入 (PRICE, OI)，输出 RETURN
+    - Amihud：输入 (PRICE, VOLUME)，输出 RATIO
+    - MaRibbon：输入 PRICE，输出 RATIO
+    """
+    if isinstance(node, (DataNode, ConstNode)):
+        return node.data_type
+
+    if isinstance(node, (OpAdd, OpSub, OpMax, OpMin)):
+        # 同类型加减/极值，禁止 BOOLEAN
+        lt = infer_node_type(node.left)
+        rt = infer_node_type(node.right)
+        if lt != rt:
+            raise TypeError(f'{node.__class__.__name__} requires same type, got {lt} and {rt}.')
+        if lt == FactorDataType.BOOLEAN:
+            raise TypeError(f'{node.__class__.__name__} does not accept boolean operands.')
+        node.data_type = lt
+        return node.data_type
+
+    if isinstance(node, OpMul):
+        # 只允许与 RATIO 相乘（unitless scaling）
+        lt = infer_node_type(node.left)
+        rt = infer_node_type(node.right)
+        if not _is_valid_mul(lt, rt):
+            raise TypeError(f'OpMul forbids multiplying incompatible types: {lt} * {rt}.')
+        node.data_type = _infer_mul_type(lt, rt)
+        return node.data_type
+
+    if isinstance(node, OpDiv):
+        # 同类型相除或除以 RATIO
+        lt = infer_node_type(node.left)
+        rt = infer_node_type(node.right)
+        if not _is_valid_div(lt, rt):
+            raise TypeError(f'OpDiv forbids dividing incompatible types: {lt} / {rt}.')
+        node.data_type = _infer_div_type(lt, rt)
+        return node.data_type
+
+    if isinstance(node, (OpLt, OpGt)):
+        # 同类型比较，输出 BOOLEAN
+        lt = infer_node_type(node.left)
+        rt = infer_node_type(node.right)
+        if lt != rt:
+            raise TypeError(f'{node.__class__.__name__} comparison requires same type, got {lt} and {rt}.')
+        node.data_type = FactorDataType.BOOLEAN
+        return node.data_type
+
+    if isinstance(node, OpNeg):
+        node.data_type = infer_node_type(node.child)
+        return node.data_type
+
+    if isinstance(node, (OpSqrtAbs, OpAbs, OpDelta, OpTsMean, OpTsDelta, OpTsDelay, OpTsSum, OpTsMax, OpTsMin,
+                         OpTsTimeWeightedMean, OpEma, OpTsDecayExp)):
+        node.data_type = infer_node_type(node.child)
+        return node.data_type
+
+    if isinstance(node, OpTsStd):
+        _ = infer_node_type(node.child)
+        node.data_type = FactorDataType.VOLATILITY
+        return node.data_type
+
+    if isinstance(node, OpTsPctDelta):
+        _ = infer_node_type(node.child)
+        node.data_type = FactorDataType.RETURN
+        return node.data_type
+
+    if isinstance(node, (OpReturn, OpLogReturn)):
+        # 价格序列 -> 收益
+        t = infer_node_type(node.child)
+        if t != FactorDataType.PRICE:
+            raise TypeError(f'{node.__class__.__name__} requires price input, got {t}.')
+        node.data_type = FactorDataType.RETURN
+        return node.data_type
+
+    if isinstance(node, OpVolatility):
+        # 价格/收益 -> 波动率
+        t = infer_node_type(node.child)
+        if t not in {FactorDataType.RETURN, FactorDataType.PRICE}:
+            raise TypeError(f'OpVolatility requires return/price input, got {t}.')
+        node.data_type = FactorDataType.VOLATILITY
+        return node.data_type
+
+    if isinstance(node, OpVolumeStd):
+        # 成交量/持仓量 -> 波动率
+        t = infer_node_type(node.child)
+        if t not in {FactorDataType.VOLUME, FactorDataType.OI}:
+            raise TypeError(f'OpVolumeStd requires volume/oi input, got {t}.')
+        node.data_type = FactorDataType.VOLATILITY
+        return node.data_type
+
+    if isinstance(node, (OpVolumeZScore, OpTurnoverShock)):
+        # 成交量/持仓量 -> 比例类
+        t = infer_node_type(node.child)
+        if t not in {FactorDataType.VOLUME, FactorDataType.OI}:
+            raise TypeError(f'{node.__class__.__name__} requires volume/oi input, got {t}.')
+        node.data_type = FactorDataType.RATIO
+        return node.data_type
+
+    if isinstance(node, (OpTsArgmax, OpTsArgmin, OpTsRank, OpSig, OpSign, OpInv)):
+        # 任意输入，输出 RATIO
+        _ = infer_node_type(node.child)
+        node.data_type = FactorDataType.RATIO
+        return node.data_type
+
+    if isinstance(node, (OpTsCorr, OpTsRankCorr, OpTsCov, OpTsBeta)):
+        # 同类型相关/协方差/贝塔
+        lt = infer_node_type(node.left)
+        rt = infer_node_type(node.right)
+        if lt != rt:
+            raise TypeError(f'{node.__class__.__name__} requires same type inputs, got {lt} and {rt}.')
+        node.data_type = FactorDataType.RATIO if not isinstance(node, OpTsCov) else FactorDataType.GENERIC
+        return node.data_type
+
+    if isinstance(node, OpVpDivergence):
+        # (price/return/ratio, volume/oi)
+        lt = infer_node_type(node.left)
+        rt = infer_node_type(node.right)
+        if lt not in {FactorDataType.PRICE, FactorDataType.RETURN, FactorDataType.RATIO}:
+            raise TypeError(f'OpVpDivergence left input must be price/return/ratio, got {lt}.')
+        if rt not in {FactorDataType.VOLUME, FactorDataType.OI}:
+            raise TypeError(f'OpVpDivergence right input must be volume/oi, got {rt}.')
+        node.data_type = FactorDataType.RATIO
+        return node.data_type
+
+    if isinstance(node, OpAmihud):
+        # (price, volume)
+        lt = infer_node_type(node.left)
+        rt = infer_node_type(node.right)
+        if lt != FactorDataType.PRICE or rt != FactorDataType.VOLUME:
+            raise TypeError(f'OpAmihud requires (price, volume), got ({lt}, {rt}).')
+        node.data_type = FactorDataType.RATIO
+        return node.data_type
+
+    if isinstance(node, OpOiTrendConviction):
+        # (price, oi)
+        lt = infer_node_type(node.left)
+        rt = infer_node_type(node.right)
+        if lt != FactorDataType.PRICE or rt != FactorDataType.OI:
+            raise TypeError(f'OpOiTrendConviction requires (price, oi), got ({lt}, {rt}).')
+        node.data_type = FactorDataType.RETURN
+        return node.data_type
+
+    if isinstance(node, OpMaRibbon):
+        # price -> ratio
+        t = infer_node_type(node.child)
+        if t != FactorDataType.PRICE:
+            raise TypeError(f'OpMaRibbon requires price input, got {t}.')
+        node.data_type = FactorDataType.RATIO
+        return node.data_type
+
+    raise TypeError(f'Unsupported node type for semantic typing: {type(node).__name__}')
 
 
 class OpAdd(FactorNode):
@@ -314,6 +547,111 @@ class OpTsPctDelta(FactorNode):
 
     def to_formula(self) -> str:
         return f"TsPctDelta({self.child}, {self.window})"
+
+
+class OpReturn(FactorNode):
+    """Rolling return over window (pct change)."""
+
+    def __init__(self, child: FactorNode, window: int):
+        self.child = child
+        self.window = int(window)
+
+    def calc(self, df: pd.DataFrame) -> pd.Series:
+        return _group_apply_series(df, self.child.calc(df), lambda x: x.pct_change(self.window))
+
+    def to_formula(self) -> str:
+        return f"Return({self.child}, {self.window})"
+
+
+class OpLogReturn(FactorNode):
+    """Rolling log-return over window."""
+
+    def __init__(self, child: FactorNode, window: int):
+        self.child = child
+        self.window = int(window)
+
+    def calc(self, df: pd.DataFrame) -> pd.Series:
+        def _logret(x: pd.Series) -> pd.Series:
+            s = pd.to_numeric(x, errors='coerce').replace(0, np.nan)
+            return np.log(s).diff(self.window)
+
+        return _group_apply_series(df, self.child.calc(df), _logret)
+
+    def to_formula(self) -> str:
+        return f"LogReturn({self.child}, {self.window})"
+
+
+class OpVolatility(FactorNode):
+    """Rolling volatility (std) over window."""
+
+    def __init__(self, child: FactorNode, window: int):
+        self.child = child
+        self.window = int(window)
+
+    def calc(self, df: pd.DataFrame) -> pd.Series:
+        def _vol(x: pd.Series) -> pd.Series:
+            s = pd.to_numeric(x, errors='coerce')
+            if getattr(self.child, 'data_type', None) == FactorDataType.PRICE:
+                s = s.pct_change(1)
+            return s.rolling(self.window).std()
+
+        return _group_apply_series(df, self.child.calc(df), _vol)
+
+    def to_formula(self) -> str:
+        return f"Volatility({self.child}, {self.window})"
+
+
+class OpVolumeStd(FactorNode):
+    """Rolling std of volume/open interest."""
+
+    def __init__(self, child: FactorNode, window: int):
+        self.child = child
+        self.window = int(window)
+
+    def calc(self, df: pd.DataFrame) -> pd.Series:
+        return _group_apply_series(df, self.child.calc(df), lambda x: x.rolling(self.window).std())
+
+    def to_formula(self) -> str:
+        return f"VolumeStd({self.child}, {self.window})"
+
+
+class OpVolumeZScore(FactorNode):
+    """Rolling z-score of volume/open interest."""
+
+    def __init__(self, child: FactorNode, window: int):
+        self.child = child
+        self.window = int(window)
+
+    def calc(self, df: pd.DataFrame) -> pd.Series:
+        def _zscore(x: pd.Series) -> pd.Series:
+            s = pd.to_numeric(x, errors='coerce')
+            mean = s.rolling(self.window).mean()
+            std = s.rolling(self.window).std().replace(0, np.nan)
+            return (s - mean) / std
+
+        return _group_apply_series(df, self.child.calc(df), _zscore)
+
+    def to_formula(self) -> str:
+        return f"VolumeZScore({self.child}, {self.window})"
+
+
+class OpTurnoverShock(FactorNode):
+    """Rolling turnover shock: volume / rolling mean - 1."""
+
+    def __init__(self, child: FactorNode, window: int):
+        self.child = child
+        self.window = int(window)
+
+    def calc(self, df: pd.DataFrame) -> pd.Series:
+        def _shock(x: pd.Series) -> pd.Series:
+            s = pd.to_numeric(x, errors='coerce')
+            mean = s.rolling(self.window).mean().replace(0, np.nan)
+            return s / mean - 1.0
+
+        return _group_apply_series(df, self.child.calc(df), _shock)
+
+    def to_formula(self) -> str:
+        return f"TurnoverShock({self.child}, {self.window})"
 
 
 class OpTsDelay(FactorNode):
@@ -699,6 +1037,12 @@ UNARY_TS_OPS = [
     OpTsStd,
     OpTsDelta,
     OpTsPctDelta,
+    OpReturn,
+    OpLogReturn,
+    OpVolatility,
+    OpVolumeStd,
+    OpVolumeZScore,
+    OpTurnoverShock,
     OpTsDelay,
     OpTsSum,
     OpTsMax,
@@ -723,6 +1067,12 @@ OP_ALIAS_BY_NAME: Dict[str, Type[Any]] = {
     # Case-insensitive aliases.
     **{k.lower(): v for k, v in OP_CLASS_BY_NAME.items()},
     # Snake-case aliases expected from quant literature.
+    'return': OpReturn,
+    'log_return': OpLogReturn,
+    'volatility': OpVolatility,
+    'volume_std': OpVolumeStd,
+    'volume_zscore': OpVolumeZScore,
+    'turnover_shock': OpTurnoverShock,
     'ema': OpEma,
     'ts_decay_exp': OpTsDecayExp,
     'ts_cov': OpTsCov,
@@ -823,7 +1173,12 @@ def parse_formula_to_node(formula: str,
 
         raise ValueError(f'Unsupported formula node: {ast.dump(node)}')
 
-    return _build(expr)
+    root = _build(expr)
+    try:
+        infer_node_type(root)
+    except TypeError as exc:
+        raise ValueError(f'Formula type violation: {exc}') from exc
+    return root
 
 
 def calc_formula_series(df: pd.DataFrame,
