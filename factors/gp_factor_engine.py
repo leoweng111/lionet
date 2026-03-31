@@ -993,16 +993,16 @@ def run_gp_evolution(
 
         scored_pop.sort(key=lambda x: x[1], reverse=True)
 
-        if elite_add_count > 0 or elite_remove_count > 0:
-            merged_count = max(0, elite_remove_count - elite_add_count)
-            log.info(
-                '[EliteArchive][Update] '
-                f'gen={gen_idx + 1}, '
-                f'added={elite_add_count}, '
-                f'removed={elite_remove_count}, '
-                f'merged_removed={merged_count}, '
-                f'current_size={elite_archive.size}/{elite_archive.max_size}'
-            )
+        # if elite_add_count > 0 or elite_remove_count > 0:
+        merged_count = max(0, elite_remove_count - elite_add_count)
+        log.info(
+            '[EliteArchive][Update] '
+            f'gen={gen_idx + 1}, '
+            f'added={elite_add_count}, '
+            f'removed={elite_remove_count}, '
+            f'merged_removed={merged_count}, '
+            f'current_size={elite_archive.size}/{elite_archive.max_size}'
+        )
 
         # -----------------------
         # Shock state machine
