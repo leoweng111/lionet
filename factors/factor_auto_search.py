@@ -1280,6 +1280,7 @@ class FactorGenerator:
             calculate_baseline=self.calculate_baseline,
             # FactorGenerator data path already handles price adjustment in load_base_data.
             # Keep BackTester from applying weighted-price preprocessing again.
+            # 这样设计是因为generate_factor_df需要使用到复权后的价格进行fitness计算。因此，不能只在backtest时才进行复权。
             apply_weighted_price=False,
             apply_rolling_norm=self.apply_rolling_norm,
             rolling_norm_window=self.rolling_norm_window,
