@@ -1060,6 +1060,16 @@ class FactorGenerator:
 
         candidate_df = generated_df[['time', 'instrument_id'] + list(selected_fc_name_list)].copy()
         candidate_df = candidate_df.sort_values(['instrument_id', 'time']).reset_index(drop=True)
+        if self.apply_rolling_norm:
+            candidate_df = rolling_normalize_features(
+                df=candidate_df,
+                factor_cols=list(selected_fc_name_list),
+                rolling_norm_window=self.rolling_norm_window,
+                rolling_norm_min_periods=self.rolling_norm_min_periods,
+                rolling_norm_eps=self.rolling_norm_eps,
+                rolling_norm_clip=self.rolling_norm_clip,
+                instrument_col='instrument_id',
+            )
 
         raw_records = get_factor_formula_records(
             collections=None,
