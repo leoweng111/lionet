@@ -25,6 +25,14 @@ def _resolve_factor_formula(fc_name: str, formula_map: Dict[str, str]) -> str:
     return formula.strip()
 
 
+def _calc_one_factor_value(df: pd.DataFrame, fc_name: str, formula_map: Dict[str, str]) -> pd.DataFrame:
+    """Calculate one factor column with a picklable helper for joblib."""
+    from factors.factor_ops import calc_formula_series
+    formula = _resolve_factor_formula(fc_name, formula_map)
+    col = calc_formula_series(df=df, formula=formula)
+    return pd.DataFrame({'time': df['time'], 'instrument_id': df['instrument_id'], fc_name: col.values})
+
+
 def get_factor_value(Data: pd.DataFrame,
                      fc_name_list: Union[str, list],
                      version: str,
@@ -48,14 +56,10 @@ def get_factor_value(Data: pd.DataFrame,
     if missing:
         raise ValueError(f'No formula found in DB for factors: {missing}')
 
-    def _calc_one(fc_name: str) -> pd.DataFrame:
-        from factors.factor_ops import calc_formula_series
-        formula = _resolve_factor_formula(fc_name, formula_map)
-        col = calc_formula_series(df=df, formula=formula)
-        return pd.DataFrame({'time': df['time'], 'instrument_id': df['instrument_id'], fc_name: col.values})
-
     with Parallel(n_jobs=n_jobs) as parallel:
-        mapper_list = parallel(delayed(_calc_one)(fc_name) for fc_name in fc_name_list)
+        mapper_list = parallel(
+            delayed(_calc_one_factor_value)(df, fc_name, formula_map) for fc_name in fc_name_list
+        )
 
     out = df.copy()
     for mapper in mapper_list:
@@ -422,5 +426,4 @@ def change_factor_version(database: Optional[str] = None,
         f'collection_count={len(target_collections)}, matched_total={matched_total}, '
         f'modified_total={modified_total}, collections={target_collections}'
     )
-
 
