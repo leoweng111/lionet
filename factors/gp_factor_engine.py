@@ -1051,6 +1051,7 @@ def run_gp_evolution(
         should_log = ((gen_idx + 1) % log_interval == 0) or (gen_idx == 0) or (gen_idx == generations - 1)
         if should_log:
             log.info(
+                '=' * 100,
                 f'GP generation {gen_idx + 1}/{generations}: '
                 f'current_best_penalized={best_fitness_current:.6f}, current_avg_penalized={avg_fitness_current:.6f}, '
                 f'current_best_original={best_original_fitness_current:.6f}, '
@@ -1058,7 +1059,8 @@ def run_gp_evolution(
                 f'global_best_penalized={global_best_fitness:.6f}, '
                 f'global_best_original={global_best_original_fitness:.6f}, '
                 f'unique_formulas={len(global_best)}, '
-                f'{elite_archive.summary_str()}'
+                f'{elite_archive.summary_str()}',
+                '=' * 100
             )
 
         if best_fitness_current > best_round_fitness:
