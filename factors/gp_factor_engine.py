@@ -889,7 +889,7 @@ def run_gp_evolution(
         )
 
     global_best: Dict[str, GPCandidate] = {}
-    best_round_fitness = -np.inf
+    best_global_fitness = -np.inf
     no_improve_generations = 0
 
     elite_stagnation_generation_count = max(1, int(elite_stagnation_generation_count))
@@ -1038,6 +1038,7 @@ def run_gp_evolution(
             avg_fitness_current = float(np.mean(penalized_fitness_values))
             best_original_fitness_current = float(max(original_fitness_values))
             avg_original_fitness_current = float(np.mean(original_fitness_values))
+            # global_best_fitness取的是penalized_fitness
             global_best_fitness = float(max(x.fitness for x in global_best.values())) if global_best else 0.0
             global_best_original_fitness = float(max(x.original_fitness for x in global_best.values())) if global_best else 0.0
         else:
@@ -1050,8 +1051,8 @@ def run_gp_evolution(
 
         should_log = ((gen_idx + 1) % log_interval == 0) or (gen_idx == 0) or (gen_idx == generations - 1)
         if should_log:
+            log.info('=' * 100)
             log.info(
-                '=' * 100 +
                 f'GP generation {gen_idx + 1}/{generations}: '
                 f'current_best_penalized={best_fitness_current:.6f}, current_avg_penalized={avg_fitness_current:.6f}, '
                 f'current_best_original={best_original_fitness_current:.6f}, '
@@ -1059,12 +1060,13 @@ def run_gp_evolution(
                 f'global_best_penalized={global_best_fitness:.6f}, '
                 f'global_best_original={global_best_original_fitness:.6f}, '
                 f'unique_formulas={len(global_best)}, '
-                f'{elite_archive.summary_str()}' +
-                '=' * 100
+                f'{elite_archive.summary_str()}'
             )
+            log.info('=' * 100)
 
-        if best_fitness_current > best_round_fitness:
-            best_round_fitness = best_fitness_current
+        # 这里best_global_fitness其实是滞后了一代的global_best_fitness，用于辅助判断早停
+        if global_best_fitness > best_global_fitness:
+            best_global_fitness = global_best_fitness
             no_improve_generations = 0
         else:
             no_improve_generations += 1
@@ -1072,8 +1074,8 @@ def run_gp_evolution(
         if 0 < early_stopping_generation_count <= no_improve_generations:
             log.info(
                 f'GP early stopping triggered at generation {gen_idx + 1}/{generations}: '
-                f'no improvement in round_best for {no_improve_generations} consecutive generations. '
-                f'best_round_fitness={best_round_fitness:.6f}'
+                f'no improvement in global best for {no_improve_generations} consecutive generations. '
+                f'best_global_fitness={best_global_fitness:.6f}'
             )
             break
 
