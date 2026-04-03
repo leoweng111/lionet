@@ -1195,4 +1195,5 @@ def run_gp_evolution(
         f'GP finished: total_elites={len(elite_candidates)}, '
         f'return_top_n={min(max_factor_count, len(elite_candidates))}'
     )
+    # 此时返回的因子之间相关性从理论上说，上限就是elite_relative_threshold
     return elite_candidates[:max_factor_count]
