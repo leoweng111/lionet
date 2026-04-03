@@ -597,8 +597,8 @@ class EliteArchive:
         self.max_size: int = max(1, int(max_size))
         self.elite_relative_threshold: float = float(elite_relative_threshold)
         self.min_corr_samples: int = max(2, int(min_corr_samples))
-        # 内部存储：每个精英为 (FactorNode, fitness, factor_values_ndarray)
-        self._elites: List[Tuple[FactorNode, float, np.ndarray]] = []
+        # 内部存储：每个精英为 (FactorNode, fitness, factor_values_ndarray, GPCandidate)
+        self._elites: List[Tuple[FactorNode, float, np.ndarray, GPCandidate]] = []
 
     # ------------------------------------------------------------------
     # 公共接口
@@ -607,7 +607,9 @@ class EliteArchive:
     def try_add(self,
                 node: FactorNode,
                 fitness: float,
-                factor_values: np.ndarray) -> Tuple[bool, int]:
+                factor_values: np.ndarray,
+                original_fitness: float,
+                sign: int) -> Tuple[bool, int]:
         """尝试将一个新因子加入精英库。
 
         Parameters
@@ -618,6 +620,10 @@ class EliteArchive:
             新因子的适应度分数（penalized_fitness）。
         factor_values : np.ndarray
             新因子在全量数据上的因子值（一维数组），用于计算相关性。
+        original_fitness : float
+            新因子的原始适应度分数（未惩罚）。
+        sign : int
+            方向选择，-1 表示负号翻转，+1 表示保持。
 
         Returns
         -------
@@ -626,15 +632,25 @@ class EliteArchive:
             - added: True 表示新因子成功入库
             - removed_count: 被踢出的精英数量（用于统计变动规模）
         """
+        oriented_node = copy.deepcopy(node) if sign > 0 else OpNeg(copy.deepcopy(node))
+        formula = oriented_node.to_formula()
+        candidate = GPCandidate(
+            node=oriented_node,
+            formula=formula,
+            fitness=float(fitness),
+            original_fitness=float(original_fitness),
+            penalized_fitness=float(fitness),
+        )
+
         # ---- 空库 → 直接入库 ----
         if len(self._elites) == 0:
-            self._elites.append((copy.deepcopy(node), fitness, factor_values.copy()))
+            self._elites.append((copy.deepcopy(node), float(fitness), factor_values.copy(), candidate))
             return True, 0
 
         # ---- 第一步：与库内所有精英计算相关系数绝对值 ----
         correlations = np.array([
             self._calc_abs_corr(factor_values, elite_vals)
-            for _, _, elite_vals in self._elites
+            for _, _, elite_vals, _ in self._elites
         ])
 
         # ---- 找出所有"同流派"精英（相关系数 > 阈值）----
@@ -653,7 +669,7 @@ class EliteArchive:
                 # 从后往前删除，避免索引偏移
                 for idx in sorted(similar_indices, reverse=True):
                     self._elites.pop(idx)
-                self._elites.append((copy.deepcopy(node), fitness, factor_values.copy()))
+                self._elites.append((copy.deepcopy(node), float(fitness), factor_values.copy(), candidate))
                 log.debug(
                     f'[EliteArchive] 新因子(fitness={fitness:.6f})击败 '
                     f'{len(similar_indices)} 个同流派精英，合并入库。'
@@ -669,7 +685,7 @@ class EliteArchive:
             # ============================================================
             if len(self._elites) < self.max_size:
                 # 库未满 → 无条件入库（冷启动，收集多样性）
-                self._elites.append((copy.deepcopy(node), fitness, factor_values.copy()))
+                self._elites.append((copy.deepcopy(node), float(fitness), factor_values.copy(), candidate))
                 log.debug(
                     f'[EliteArchive] 新流派因子(fitness={fitness:.6f})入库（冷启动）。'
                     f'当前库容量: {len(self._elites)}/{self.max_size}'
@@ -683,7 +699,7 @@ class EliteArchive:
                 if fitness > worst_fitness:
                     # 踢掉垫底精英，新因子入库（准入门槛自动提升）
                     self._elites.pop(worst_idx)
-                    self._elites.append((copy.deepcopy(node), fitness, factor_values.copy()))
+                    self._elites.append((copy.deepcopy(node), float(fitness), factor_values.copy(), candidate))
                     log.debug(
                         f'[EliteArchive] 新流派因子(fitness={fitness:.6f})踢掉垫底精英'
                         f'(fitness={worst_fitness:.6f})入库。'
@@ -705,6 +721,11 @@ class EliteArchive:
         sorted_elites = sorted(self._elites, key=lambda x: x[1], reverse=True)
         return [(copy.deepcopy(e[0]), e[1]) for e in sorted_elites]
 
+    def get_elite_candidates_sorted(self) -> List[GPCandidate]:
+        """返回精英库中的候选因子，按 fitness 从高到低排序。"""
+        sorted_elites = sorted(self._elites, key=lambda x: x[1], reverse=True)
+        return [copy.deepcopy(e[3]) for e in sorted_elites]
+
     @property
     def size(self) -> int:
         """当前精英库中的精英数量。"""
@@ -714,7 +735,7 @@ class EliteArchive:
         """返回精英库的摘要信息字符串，用于日志输出。"""
         if not self._elites:
             return f'EliteArchive(size=0/{self.max_size})'
-        fitnesses = [f for _, f, _ in self._elites]
+        fitnesses = [f for _, f, _, _ in self._elites]
         return (
             f'EliteArchive(size={len(self._elites)}/{self.max_size}, '
             f'best={max(fitnesses):.6f}, worst={min(fitnesses):.6f}, '
@@ -967,7 +988,13 @@ def run_gp_evolution(
                 factor_values_for_archive = pd.to_numeric(
                     tree.calc(df), errors='coerce'
                 ).values.astype(float)
-                added, removed_count = elite_archive.try_add(tree, penalized_fitness, factor_values_for_archive)
+                added, removed_count = elite_archive.try_add(
+                    tree,
+                    penalized_fitness,
+                    factor_values_for_archive,
+                    original_fitness,
+                    sign,
+                )
                 if added or removed_count > 0:
                     elite_archive_updated = True
                 elite_add_count += int(added)
@@ -1163,10 +1190,9 @@ def run_gp_evolution(
 
         population = next_gen[:population_size]
 
-    candidates = sorted(global_best.values(), key=lambda x: x.fitness, reverse=True)
+    elite_candidates = elite_archive.get_elite_candidates_sorted()
     log.info(
-        f'GP finished: total_unique_formulas={len(global_best)}, '
-        f'return_top_n={min(max_factor_count, len(candidates))}'
+        f'GP finished: total_elites={len(elite_candidates)}, '
+        f'return_top_n={min(max_factor_count, len(elite_candidates))}'
     )
-    return candidates[:max_factor_count]
-
+    return elite_candidates[:max_factor_count]
