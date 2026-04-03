@@ -793,7 +793,8 @@ class OpLogReturn(FactorNode):
 
     def calc(self, df: pd.DataFrame) -> pd.Series:
         def _logret(x: pd.Series) -> pd.Series:
-            s = pd.to_numeric(x, errors='coerce').replace(0, np.nan)
+            s = pd.to_numeric(x, errors='coerce')
+            s = s.mask(s <= 0, np.nan)
             return np.log(s).diff(self.window)
 
         return _group_apply_series(df, self.child.calc(df), _logret)
