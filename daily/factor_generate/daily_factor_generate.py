@@ -32,8 +32,8 @@ def build_parser() -> argparse.ArgumentParser:
                         help='One instrument id (C0) or comma-separated ids (C0,FG0).')
     parser.add_argument('--start_time', type=str, default='20200101', help='Backtest start time in YYYYMMDD.')
     parser.add_argument('--end_time', type=str, default='20241231', help='Backtest end time in YYYYMMDD.')
-    parser.add_argument('--version', type=str, default=None,
-                        help='Version suffix. Default: today YYYYMMDD.')
+    parser.add_argument('--version', type=str, default='20260407_gp_test_1',
+                        help='Version suffix. Default: 20260407_gp_test_1.')
     parser.add_argument('--n_jobs', type=int, default=5)
 
     parser.add_argument('--instrument_type', type=str, default='futures_continuous_contract',
@@ -50,7 +50,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument('--rolling_norm_window', type=int, default=30)
     parser.add_argument('--rolling_norm_min_periods', type=int, default=20)
     parser.add_argument('--rolling_norm_eps', type=float, default=1e-8)
-    parser.add_argument('--rolling_norm_clip', type=float, default=10.0)
+    parser.add_argument('--rolling_norm_clip', type=float, default=5.0)
     parser.add_argument('--check_relative', action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument('--relative_threshold', type=float, default=0.7)
     parser.add_argument('--relative_check_version_list', type=str, default=None,
@@ -65,27 +65,29 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument('--llm_user_requirement', type=str, default='生成期货的日频量价因子')
 
     parser.add_argument('--gp_max_factor_count', type=int, default=50)
-    parser.add_argument('--gp_generations', type=int, default=30)
-    parser.add_argument('--gp_population_size', type=int, default=150)
-    parser.add_argument('--gp_max_depth', type=int, default=4)
-    parser.add_argument('--gp_elite_size', type=int, default=20)
-    parser.add_argument('--gp_elite_relative_threshold', type=float, default=0.75,
+    parser.add_argument('--gp_generations', type=int, default=60)
+    parser.add_argument('--gp_population_size', type=int, default=500)
+    parser.add_argument('--gp_max_depth', type=int, default=6)
+    parser.add_argument('--gp_elite_size', type=int, default=50)
+    parser.add_argument('--gp_elite_relative_threshold', type=float, default=0.65,
                         help='Elite archive correlation threshold for "same school" detection.')
-    parser.add_argument('--gp_tournament_size', type=int, default=6)
-    parser.add_argument('--gp_crossover_prob', type=float, default=0.7)
-    parser.add_argument('--gp_mutation_prob', type=float, default=0.25)
+    parser.add_argument('--gp_tournament_size', type=int, default=3)
+    parser.add_argument('--gp_crossover_prob', type=float, default=0.3)
+    parser.add_argument('--gp_mutation_prob', type=float, default=0.7)
     parser.add_argument('--gp_leaf_prob', type=float, default=0.2)
     parser.add_argument('--gp_const_prob', type=float, default=0.02)
-    parser.add_argument('--gp_window_choices', type=str, default='5,10,20')
+    parser.add_argument('--gp_window_choices', type=str, default='3,5,10,20,30')
     parser.add_argument('--fitness_metric', type=str, default='ic', choices=['ic', 'sharpe'])
     parser.add_argument('--random_seed', type=int, default=None)
-    parser.add_argument('--gp_early_stopping_generation_count', type=int, default=8)
+    parser.add_argument('--gp_early_stopping_generation_count', type=int, default=20)
     parser.add_argument('--gp_depth_penalty_coef', type=float, default=0.0)
-    parser.add_argument('--gp_depth_penalty_start_depth', type=int, default=4)
-    parser.add_argument('--gp_depth_penalty_linear_coef', type=float, default=0.05)
+    parser.add_argument('--gp_depth_penalty_start_depth', type=int, default=6)
+    parser.add_argument('--gp_depth_penalty_linear_coef', type=float, default=0.03)
     parser.add_argument('--gp_depth_penalty_quadratic_coef', type=float, default=0.0)
     parser.add_argument('--gp_log_interval', type=int, default=5)
-    parser.add_argument('--gp_elite_stagnation_generation_count', type=int, default=5,
+    parser.add_argument('--gp_small_factor_penalty_coef', type=float, default=0.0)
+    parser.add_argument('--gp_assumed_initial_capital', type=float, default=100000.0)
+    parser.add_argument('--gp_elite_stagnation_generation_count', type=int, default=4,
                         help='Enter shock mode when elite archive stagnates for N generations.')
     parser.add_argument('--gp_max_shock_generation', type=int, default=3,
                         help='Exit shock mode after N generations without elite updates.')
@@ -201,6 +203,8 @@ def run_daily_once(args) -> dict:
             gp_depth_penalty_linear_coef=args.gp_depth_penalty_linear_coef,
             gp_depth_penalty_quadratic_coef=args.gp_depth_penalty_quadratic_coef,
             gp_log_interval=args.gp_log_interval,
+            gp_small_factor_penalty_coef=args.gp_small_factor_penalty_coef,
+            gp_assumed_initial_capital=args.gp_assumed_initial_capital,
             gp_elite_stagnation_generation_count=args.gp_elite_stagnation_generation_count,
             gp_max_shock_generation=args.gp_max_shock_generation,
             attempt_time=args.gp_attempt_time,
@@ -238,5 +242,4 @@ def main(argv: Optional[Sequence[str]] = None):
 
 if __name__ == '__main__':
     main()
-
 

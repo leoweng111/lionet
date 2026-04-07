@@ -36,8 +36,8 @@ def run_llm_prompt_factor_generate(
     instrument_id_list='C0',
     fc_freq: str = '1d',
     data: Optional[pd.DataFrame] = None,
-    start_time: Optional[str] = None,
-    end_time: Optional[str] = None,
+    start_time: Optional[str] = '20200101',
+    end_time: Optional[str] = '20241231',
     portfolio_adjust_method: str = '1D',
     interest_method: str = 'simple',
     risk_free_rate: bool = False,
@@ -50,7 +50,7 @@ def run_llm_prompt_factor_generate(
     rolling_norm_window: int = 30,
     rolling_norm_min_periods: int = 20,
     rolling_norm_eps: float = 1e-8,
-    rolling_norm_clip: float = 10.0,
+    rolling_norm_clip: float = 5.0,
     check_leakage_count: int = 20,
     check_relative: bool = True,
     relative_threshold: float = 0.7,
@@ -60,7 +60,7 @@ def run_llm_prompt_factor_generate(
     llm_factor_count: int = 5,
     llm_early_stopping_round: int = 20,
     llm_user_requirement: str = '生成期货的日频量价因子',
-    version: Optional[str] = None,
+    version: Optional[str] = '20260407_gp_test_1',
 ):
     version = version or datetime.now().strftime('%Y%m%d')
     fg = LLMPromptFactorGenerator(
@@ -110,8 +110,8 @@ def build_parser() -> argparse.ArgumentParser:
                         help='One instrument id (C0) or comma-separated ids (C0,FG0).')
     parser.add_argument('--start_time', type=str, default='20200101', help='Backtest start time in YYYYMMDD.')
     parser.add_argument('--end_time', type=str, default='20241231', help='Backtest end time in YYYYMMDD.')
-    parser.add_argument('--version', type=str, default=None,
-                        help='Config version suffix. Default: today YYYYMMDD.')
+    parser.add_argument('--version', type=str, default='20260407_gp_test_1',
+                        help='Config version suffix. Default: 20260407_gp_test_1.')
 
     parser.add_argument('--instrument_type', type=str, default='futures_continuous_contract',
                         choices=['futures_continuous_contract'])
@@ -131,7 +131,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument('--rolling_norm_window', type=int, default=30)
     parser.add_argument('--rolling_norm_min_periods', type=int, default=20)
     parser.add_argument('--rolling_norm_eps', type=float, default=1e-8)
-    parser.add_argument('--rolling_norm_clip', type=float, default=10.0)
+    parser.add_argument('--rolling_norm_clip', type=float, default=5.0)
     parser.add_argument('--check_leakage_count', type=int, default=20)
     parser.add_argument('--check_relative', action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument('--relative_threshold', type=float, default=0.7)
