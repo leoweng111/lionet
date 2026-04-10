@@ -36,6 +36,7 @@ def _calc_one_factor_value(df: pd.DataFrame, fc_name: str, formula_map: Dict[str
 def get_factor_value(Data: pd.DataFrame,
                      fc_name_list: Union[str, list],
                      version: str,
+                     collection: Union[str, Sequence[str]] = 'genetic_programming',
                      n_jobs: int = 5) -> pd.DataFrame:
     """Calculate factor values and append them to input DataFrame.
 
@@ -51,10 +52,25 @@ def get_factor_value(Data: pd.DataFrame,
         assert col in Data.columns, f'Data does not contain column {col}.'
 
     df = Data.copy().sort_values(['instrument_id', 'time']).reset_index(drop=True)
-    formula_map = get_factor_formula_map_by_version(fc_name_list=fc_name_list, version=version)
+    if isinstance(collection, str):
+        collection_list = [collection]
+    else:
+        collection_list = list(collection)
+    collection_list = [str(x).strip() for x in collection_list if str(x).strip()]
+    if not collection_list:
+        raise ValueError('`collection` cannot be empty in get_factor_value.')
+
+    formula_map = get_factor_formula_map_by_version(
+        fc_name_list=fc_name_list,
+        version=version,
+        collections=collection_list,
+    )
     missing = [name for name in fc_name_list if name not in formula_map]
     if missing:
-        raise ValueError(f'No formula found in DB for factors: {missing}')
+        raise ValueError(
+            f'No formula found in DB for factors: {missing}. '
+            f'version={version}, collections={collection_list}'
+        )
 
     with Parallel(n_jobs=n_jobs) as parallel:
         mapper_list = parallel(

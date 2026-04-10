@@ -181,6 +181,7 @@ class Strategy:
             Data=factor_input,
             fc_name_list=[self.factor_name],
             version=self.version,
+            collection=self.collection,
             n_jobs=1,
         )
         if self.apply_rolling_norm:

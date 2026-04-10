@@ -22,6 +22,7 @@ class BackTester:
     def __init__(self,
                  fc_name_list: Union[str, List],
                  version: str,
+                 collection: Union[str, List] = 'genetic_programming',
                  instrument_type: str = 'futures_continuous_contract',
                  instrument_id_list: Union[str, List] = 'C0',
                  fc_freq: str = '1d',
@@ -52,6 +53,7 @@ class BackTester:
         :param data: data should be a dataframe with high, open, low, close, volume, position columns 
             for one instrument in each bar.
         :param fc_name_list: factor names persisted in factors DB, or existing columns when data is preprocessed.
+        :param collection: factor collection(s) in factors DB used with `version` + `fc_name_list` to locate formulas.
         :param start_time: backtesting start time,
             default is the earliest price data that can be found on database
         :param end_time: backtesting end time,
@@ -68,6 +70,7 @@ class BackTester:
         self.instrument_type = instrument_type
         self.fc_name_list = fc_name_list
         self.version = version
+        self.collection = collection
         self.instrument_id_list = instrument_id_list
         self.start_time = start_time
         self.end_time = end_time
@@ -94,6 +97,11 @@ class BackTester:
 
         if not isinstance(self.version, str) or not self.version.strip():
             raise ValueError('BackTester requires a non-empty `version` to resolve factor formulas precisely.')
+        if isinstance(self.collection, str):
+            self.collection = [self.collection]
+        self.collection = [str(x).strip() for x in self.collection if str(x).strip()]
+        if not self.collection:
+            raise ValueError('BackTester requires non-empty `collection` to resolve factor formulas precisely.')
 
         assert self.fc_freq in ['1m', '5m', '1d'], f'Only support 1m, 5m or 1d fc_freq, but got {fc_freq} instead.'
         assert self.portfolio_adjust_method in ['min', '1D', '1M', '1Q'], \
@@ -183,7 +191,13 @@ class BackTester:
         if self.apply_weighted_price:
             self.data = get_weighted_price(self.data)
 
-        self.data = get_factor_value(self.data, self.fc_name_list, version=self.version, n_jobs=self.n_jobs)
+        self.data = get_factor_value(
+            self.data,
+            self.fc_name_list,
+            version=self.version,
+            collection=self.collection,
+            n_jobs=self.n_jobs,
+        )
 
         if self.apply_rolling_norm:
             self.data = rolling_normalize_features(

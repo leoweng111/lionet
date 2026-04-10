@@ -2248,10 +2248,12 @@ class FactorFusioner:
             f'raw_factor_dict_provided={self.raw_factor_dict is not None}'
         )
 
+        # 1) 准备融合评估所需基础数据（行情 + future_ret）以及候选因子元信息。
         base_df = self._load_base_data()
         factor_records = self._load_candidate_records()
         log.info(f'Fusion candidate pool size={len(factor_records)}')
 
+        # 2) 计算候选因子的数值列，并与基础评估表按(time, instrument_id)对齐。
         factor_df = self._calc_candidate_factor_df(base_df=base_df, factor_records=factor_records)
         eval_df = base_df[['time', 'instrument_id', 'future_ret']].merge(
             factor_df,
@@ -2260,10 +2262,13 @@ class FactorFusioner:
             validate='1:1',
         )
 
+        # factor_keys: 形如 "version::factor_name" 的候选因子唯一键列表。
         factor_keys = factor_records['factor_key'].astype(str).tolist()
         if not factor_keys:
             raise ValueError('No available factors for fusion.')
 
+        # single_metric_map: 每个单因子的总体评估指标（例如 ic/sharpe）。
+        # 这些 metrics 用于初始化排序与后续比较基线，不是逐年指标。
         single_metric_map: Dict[str, Dict[str, float]] = {}
         for factor_key in factor_keys:
             signal_df = eval_df[['time', 'instrument_id', 'future_ret', factor_key]].copy()
@@ -2271,13 +2276,18 @@ class FactorFusioner:
             single_metric_map[factor_key] = metrics
             log.info(f'[Fusion][Init] factor={factor_key}, {self._format_metrics(metrics)}')
 
+        # sorted_factor_keys: 按 fusion_metrics 优先级从高到低排序后的候选池。
+        # 若 fusion_metrics=['ic','sharpe']，则先比较 ic，再比较 sharpe。
         sorted_factor_keys = sorted(
             factor_keys,
             key=lambda x: self._metric_sort_key(single_metric_map[x]),
             reverse=True,
         )
+        # 排名第一的单因子作为初始基石因子（Base Factor）。
         base_factor_key = sorted_factor_keys[0]
+        # selected_factor_keys: 当前已被接纳进融合组合的因子键。
         selected_factor_keys: List[str] = [base_factor_key]
+        # base_metrics: 当前“基线组合”的指标；只有全指标严格提升才会被新组合替代。
         base_metrics = dict(single_metric_map[base_factor_key])
         log.info(
             '[Fusion][Init] base factor selected: '
@@ -2288,6 +2298,7 @@ class FactorFusioner:
 
         max_count = min(self.max_fusion_count, len(sorted_factor_keys))
         for round_idx in range(2, max_count + 1):
+            # 每一轮从未入选因子里挑一个最好的，与当前基线组合做“加一因子”对比。
             candidate_keys = [x for x in sorted_factor_keys if x not in selected_factor_keys]
             if not candidate_keys:
                 log.info(f'[Fusion][Round {round_idx}] no candidate left, stop.')
@@ -2303,8 +2314,10 @@ class FactorFusioner:
             round_best_metrics: Optional[Dict[str, float]] = None
 
             for cand_key in candidate_keys:
+                # trial_keys: 本轮待评估组合 = 已选组合 + 当前候选。
                 trial_keys = selected_factor_keys + [cand_key]
                 if self.fusion_method == 'avg_weight':
+                    # 等权融合：对组合内每个因子截面值直接取均值。
                     fused_series = eval_df[trial_keys].mean(axis=1)
                 else:
                     raise ValueError(f'Unsupported fusion_method={self.fusion_method}')
@@ -2312,8 +2325,10 @@ class FactorFusioner:
                 trial_df = eval_df[['time', 'instrument_id', 'future_ret']].copy()
                 trial_df[fusion_col] = pd.to_numeric(fused_series, errors='coerce')
 
+                # trial_metrics: 该组合在整个回测区间上的总体指标。
                 trial_metrics = self._evaluate_metrics(trial_df, fusion_col)
 
+                # is_better=True 表示 fusion_metrics 中每一项都严格优于当前基线。
                 is_better = self._is_strictly_better(trial_metrics, base_metrics)
                 log.info(
                     f'[Fusion][Round {round_idx}] candidate={cand_key}, '
@@ -2333,12 +2348,14 @@ class FactorFusioner:
                     round_best_metrics = trial_metrics
 
             if round_best_key is None or round_best_metrics is None:
+                # 本轮没有任何“全指标严格提升”的候选，提前停止融合。
                 log.info(
                     f'[Fusion][Round {round_idx}] no better candidate found. '
                     f'base_factors={selected_factor_keys}, base_metrics={self._format_metrics(base_metrics)}'
                 )
                 break
 
+            # 接纳本轮最佳候选，并将其指标更新为下一轮基线。
             selected_factor_keys.append(round_best_key)
             base_metrics = round_best_metrics
             log.info(
@@ -2348,11 +2365,13 @@ class FactorFusioner:
                 f'new_base_metrics={self._format_metrics(base_metrics)}'
             )
 
+        # 3) 生成最终融合信号，并进行一次完整回测用于落库与返回。
         final_fused_df = eval_df[['time', 'instrument_id', 'future_ret']].copy()
         final_fused_df[fusion_col] = pd.to_numeric(eval_df[selected_factor_keys].mean(axis=1), errors='coerce')
         final_bt = self._run_backtest_for_signal(final_fused_df, fusion_col)
         final_metrics = self._evaluate_metrics(final_fused_df, fusion_col)
 
+        # 4) 组装入选因子的元信息，便于后续追踪来源与公式。
         meta_df = factor_records.set_index('factor_key')
         selected_factors_detail = [
             {
@@ -2365,6 +2384,7 @@ class FactorFusioner:
             for key in selected_factor_keys
         ]
 
+        # 5) 构建融合后的公式表达式，并将结果写入 factors.fusion_factor。
         fusion_formula = self._build_fusion_formula(selected_factor_keys, factor_records)
         fusion_version = datetime.now().strftime('%Y%m%d_%H%M%S')
         fusion_factor_name = f'fusion_{self.fusion_method}_{fusion_version}'

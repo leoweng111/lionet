@@ -41,6 +41,7 @@ def run_backtester(args: argparse.Namespace) -> BackTester:
     bt = BackTester(
         fc_name_list=[args.factor_name],
         version=args.version,
+        collection=args.collection,
         instrument_type="futures_continuous_contract",
         instrument_id_list=[args.instrument_id],
         fc_freq="1d",

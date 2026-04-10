@@ -86,6 +86,7 @@ class BaseModel:
                  backtest: bool = False,
                  interest_method: str = 'simple',
                  fee: float = 0.00025,
+                 collection: Union[str, list] = 'genetic_programming',
                  n_jobs: int = 5):
         """
         Params to be initialized for models.
@@ -111,10 +112,12 @@ class BaseModel:
         :param rolling_range: data range for rolling training, unit is month.
         :param save: If True, saving the predict result of the model.
         :param backtest: If True, backtesting the performance of the predict result (i.e. factor value) of the model.
+        :param collection: 因子公式所在集合名（或集合列表），与 version 和 fc_name_list 一起精确定位因子。
         """
 
         self.best_model_name = None
         self.fc_name_list = fc_name_list
+        self.collection = collection
         self.param_dc = param_dc
         self.param_grid = param_grid
         self.search_type = search_type
@@ -202,7 +205,13 @@ class BaseModel:
         if not isinstance(self.version, str) or not self.version.strip():
             raise ValueError('BaseModel requires non-empty `version` to load factor formulas from DB.')
         # get factor value
-        self.data = get_factor_value(self.data, self.fc_name_list, version=self.version, n_jobs=self.n_jobs)
+        self.data = get_factor_value(
+            self.data,
+            self.fc_name_list,
+            version=self.version,
+            collection=self.collection,
+            n_jobs=self.n_jobs,
+        )
         # get return as label
         self.data = get_future_ret(self.data, portfolio_adjust_method='1D', rfr=self.rfr)
 
@@ -446,6 +455,7 @@ class BaseModel:
         instrument_id_list = sorted(self.predict_result['instrument_id'].dropna().unique().tolist())
         bt = BackTester(fc_name_list=[self.signal_name],
                         version=self.version or 'external_input',
+                        collection=self.collection,
                         instrument_id_list=instrument_id_list,
                         data=self.predict_result,
                         fc_freq=self.fc_freq,
