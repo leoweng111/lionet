@@ -23,6 +23,13 @@ from utils.logging import log
 from utils.params import SUPPORTED_FILTER_INDICATORS
 
 from .backtest import BackTester
+from .factor_indicators import (
+    get_annualized_ret,
+    get_annualized_sharpe,
+    get_annualized_ts_ic_and_t_corr,
+    get_annualized_volatility,
+    get_ts_ret_and_turnover,
+)
 from .factor_ops import available_operator_prompt_text, calc_formula_df, calc_formula_series
 from .factor_utils import get_future_ret, get_weighted_price, rolling_normalize_features
 from .gp_factor_engine import GPCandidate, run_gp_evolution
@@ -1302,6 +1309,8 @@ class FactorGenerator:
         bt.backtest()
         self.bt = bt
         return bt
+
+
 class LLMPromptFactorGenerator(FactorGenerator):
     """LLM-based formula generator. LLM outputs formulas, not class code."""
 
@@ -1823,5 +1832,575 @@ class GeneticFactorGenerator(FactorGenerator):
         base_df = self.load_base_data()
         factor_df = self.generate_factor_df(base_df, selected_fc_names=selected_fc_name_list)
         return self._finalize_generated_data(base_df, factor_df)
+
+
+class FactorFusioner:
+    """Fuse existing DB factors with stepwise forward selection."""
+
+    _SUPPORTED_METHODS = {'avg_weight'}
+    _SUPPORTED_METRICS = {'ic', 'sharpe'}
+
+    def __init__(
+        self,
+        fusion_method: str = 'avg_weight',
+        raw_factor_dict: Optional[Dict[str, Union[str, Sequence[str]]]] = None,
+        collection: Union[str, Sequence[str]] = 'genetic_programming',
+        instrument_type: str = 'futures_continuous_contract',
+        instrument_id_list: Union[str, Sequence[str]] = 'C0',
+        fc_freq: str = '1d',
+        data: Optional[pd.DataFrame] = None,
+        start_time: Optional[str] = '20200101',
+        end_time: Optional[str] = '20241231',
+        portfolio_adjust_method: str = '1D',
+        interest_method: str = 'simple',
+        risk_free_rate: bool = False,
+        apply_weighted_price: bool = True,
+        apply_rolling_norm: bool = True,
+        rolling_norm_window: int = 30,
+        rolling_norm_min_periods: int = 20,
+        rolling_norm_eps: float = 1e-8,
+        rolling_norm_clip: float = 5.0,
+        max_fusion_count: int = 5,
+        fusion_metrics: Union[str, Sequence[str]] = 'ic',
+        n_jobs: int = 5,
+        database: str = 'factors',
+        base_col_list: Optional[Sequence[str]] = None,
+    ):
+        self.fusion_method = str(fusion_method).strip()
+        if self.fusion_method not in self._SUPPORTED_METHODS:
+            raise ValueError(f'Unsupported fusion_method={self.fusion_method}, use {sorted(self._SUPPORTED_METHODS)}.')
+
+        self.raw_factor_dict = self._normalize_raw_factor_dict(raw_factor_dict)
+        self.collection_list = self._normalize_str_or_seq(collection, name='collection')
+        self.instrument_type = instrument_type
+        self.instrument_id_list = self._normalize_str_or_seq(instrument_id_list, name='instrument_id_list')
+        self.fc_freq = fc_freq
+        self.data = data
+        self.start_time = start_time
+        self.end_time = end_time
+        self.portfolio_adjust_method = portfolio_adjust_method
+        self.interest_method = interest_method
+        self.risk_free_rate = bool(risk_free_rate)
+        self.apply_weighted_price = bool(apply_weighted_price)
+        self.apply_rolling_norm = bool(apply_rolling_norm)
+        self.rolling_norm_window = int(rolling_norm_window)
+        self.rolling_norm_min_periods = int(rolling_norm_min_periods)
+        self.rolling_norm_eps = float(rolling_norm_eps)
+        self.rolling_norm_clip = float(rolling_norm_clip)
+        self.max_fusion_count = int(max_fusion_count)
+        self.fusion_metrics = self._normalize_fusion_metrics(fusion_metrics)
+        self.n_jobs = int(n_jobs)
+        self.database = str(database).strip() or 'factors'
+        self.base_col_list = list(base_col_list) if base_col_list else ['open', 'high', 'low', 'close', 'volume', 'position']
+
+        if self.max_fusion_count <= 0:
+            raise ValueError(f'max_fusion_count must be positive, got {self.max_fusion_count}.')
+        if self.fc_freq not in ['1m', '5m', '1d']:
+            raise ValueError(f'Only support 1m, 5m or 1d fc_freq, got {self.fc_freq}.')
+        if self.portfolio_adjust_method not in ['min', '1D', '1M', '1Q']:
+            raise ValueError(
+                f'Only support min, 1D, 1M or 1Q portfolio_adjust_method, got {self.portfolio_adjust_method}.'
+            )
+        if len(self.instrument_id_list) != 1:
+            raise ValueError(
+                'FactorFusioner currently supports exactly one instrument_id for TS metric consistency, '
+                f'got {self.instrument_id_list}.'
+            )
+
+    @staticmethod
+    def _normalize_str_or_seq(value: Union[str, Sequence[str]], name: str) -> List[str]:
+        if isinstance(value, str):
+            out = [value]
+        else:
+            out = list(value)
+        out = [str(x).strip() for x in out if str(x).strip()]
+        if not out:
+            raise ValueError(f'`{name}` cannot be empty.')
+        return out
+
+    @staticmethod
+    def _normalize_raw_factor_dict(
+        raw_factor_dict: Optional[Dict[str, Union[str, Sequence[str]]]]
+    ) -> Optional[Dict[str, List[str]]]:
+        if raw_factor_dict is None:
+            return None
+        if not isinstance(raw_factor_dict, dict) or not raw_factor_dict:
+            raise ValueError('raw_factor_dict must be a non-empty dict when provided.')
+
+        out: Dict[str, List[str]] = {}
+        for version, factor_value in raw_factor_dict.items():
+            version_text = str(version).strip()
+            if not version_text:
+                raise ValueError(f'Invalid raw_factor_dict version key: {version}')
+            if isinstance(factor_value, str):
+                fc_names = [factor_value]
+            else:
+                fc_names = list(factor_value)
+            fc_names = [str(x).strip() for x in fc_names if str(x).strip()]
+            if not fc_names:
+                raise ValueError(f'raw_factor_dict[{version_text}] must contain at least one factor_name.')
+            duplicated = sorted([x for x in set(fc_names) if fc_names.count(x) > 1])
+            if duplicated:
+                raise ValueError(f'raw_factor_dict[{version_text}] contains duplicated factor_name: {duplicated}')
+            out[version_text] = fc_names
+        return out
+
+    def _normalize_fusion_metrics(self, fusion_metrics: Union[str, Sequence[str]]) -> List[str]:
+        if isinstance(fusion_metrics, str):
+            metrics = [fusion_metrics]
+        else:
+            metrics = list(fusion_metrics)
+        metrics = [str(x).strip().lower() for x in metrics if str(x).strip()]
+        if not metrics:
+            raise ValueError('fusion_metrics cannot be empty.')
+        invalid = [x for x in metrics if x not in self._SUPPORTED_METRICS]
+        if invalid:
+            raise ValueError(
+                f'Unsupported fusion_metrics={invalid}. Available metrics: {sorted(self._SUPPORTED_METRICS)}.'
+            )
+        duplicated = sorted([x for x in set(metrics) if metrics.count(x) > 1])
+        if duplicated:
+            raise ValueError(f'fusion_metrics contains duplicated metric(s): {duplicated}')
+        return metrics
+
+    @staticmethod
+    def _factor_key(version: str, factor_name: str) -> str:
+        return f'{version}::{factor_name}'
+
+    @staticmethod
+    def _safe_metric_value(value: Any) -> float:
+        try:
+            f = float(value)
+        except Exception:
+            return float('-inf')
+        if np.isnan(f):
+            return float('-inf')
+        return f
+
+    def _metric_sort_key(self, metrics: Dict[str, float]) -> Tuple[float, ...]:
+        return tuple(self._safe_metric_value(metrics.get(m)) for m in self.fusion_metrics)
+
+    def _is_strictly_better(self,
+                            new_metrics: Dict[str, float],
+                            base_metrics: Dict[str, float]) -> bool:
+        return all(
+            self._safe_metric_value(new_metrics.get(m)) > self._safe_metric_value(base_metrics.get(m))
+            for m in self.fusion_metrics
+        )
+
+    def _load_base_data(self) -> pd.DataFrame:
+        if isinstance(self.data, pd.DataFrame):
+            df = self.data.copy()
+        else:
+            if self.instrument_type != 'futures_continuous_contract':
+                raise ValueError(f'Unsupported instrument type: {self.instrument_type}.')
+            df = get_futures_continuous_contract_price(
+                instrument_id=self.instrument_id_list,
+                start_date=self.start_time,
+                end_date=self.end_time,
+                from_database=True,
+            )
+
+        optional_cols = [c for c in ['weighted_factor', 'cur_weighted_factor', 'is_rollover', 'symbol'] if c in df.columns]
+        required_cols = ['time', 'instrument_id'] + self.base_col_list + optional_cols
+        for col in required_cols:
+            if col not in df.columns:
+                raise ValueError(f'Input data does not contain required column: {col}')
+
+        df = df[required_cols].copy()
+        df['time'] = pd.to_datetime(df['time'])
+        df = df.sort_values(['instrument_id', 'time']).reset_index(drop=True)
+
+        available_instruments = df['instrument_id'].dropna().unique().tolist()
+        invalid_instruments = [x for x in self.instrument_id_list if x not in available_instruments]
+        if invalid_instruments:
+            raise ValueError(
+                f'Invalid instrument_id_list: {invalid_instruments}. Available instruments: {available_instruments}'
+            )
+
+        if self.apply_weighted_price:
+            if 'weighted_factor' not in df.columns:
+                raise ValueError(
+                    'apply_weighted_price=True requires `weighted_factor` in source data. '
+                    'Set apply_weighted_price=False to use raw prices.'
+                )
+            df = get_weighted_price(df)
+
+        df = get_future_ret(
+            df,
+            portfolio_adjust_method=self.portfolio_adjust_method,
+            rfr=self.risk_free_rate,
+        )
+        return df.sort_values(['instrument_id', 'time']).reset_index(drop=True)
+
+    def _load_candidate_records(self) -> pd.DataFrame:
+        if self.raw_factor_dict is None:
+            records = get_factor_formula_records(
+                collections=self.collection_list,
+                versions=None,
+                database=self.database,
+            )
+            if records.empty:
+                raise ValueError(
+                    f'No factor formulas found in DB for collections={self.collection_list}, database={self.database}.'
+                )
+            records = records[['collection', 'version', 'factor_name', 'formula']].copy()
+        else:
+            target_versions = sorted(self.raw_factor_dict.keys())
+            records = get_factor_formula_records(
+                collections=self.collection_list,
+                versions=target_versions,
+                database=self.database,
+            )
+            if records.empty:
+                raise ValueError(
+                    'No factor formulas found in DB for raw_factor_dict request. '
+                    f'collections={self.collection_list}, versions={target_versions}.'
+                )
+
+            records = records[['collection', 'version', 'factor_name', 'formula']].copy()
+            expected_pairs = {
+                (version, factor_name)
+                for version, fc_list in self.raw_factor_dict.items()
+                for factor_name in fc_list
+            }
+            records = records[
+                records.apply(lambda x: (str(x['version']), str(x['factor_name'])) in expected_pairs, axis=1)
+            ].copy()
+
+            found_pairs = {
+                (str(x['version']), str(x['factor_name']))
+                for _, x in records.iterrows()
+            }
+            missing_pairs = sorted(expected_pairs - found_pairs)
+            if missing_pairs:
+                raise ValueError(
+                    'Some factors specified by raw_factor_dict are not found in DB: '
+                    f'{missing_pairs}. collections={self.collection_list}, database={self.database}.'
+                )
+
+        records['version'] = records['version'].astype(str)
+        records['factor_name'] = records['factor_name'].astype(str)
+        records['formula'] = records['formula'].astype(str).str.strip()
+        records = records[records['formula'] != ''].copy()
+        if records.empty:
+            raise ValueError('No non-empty factor formula found for fusion.')
+
+        # Strictly avoid ambiguous records with same (version, factor_name) but different formulas.
+        ambiguous_pairs: List[Tuple[str, str]] = []
+        dedup_rows: List[pd.Series] = []
+        for (_, _), group in records.groupby(['version', 'factor_name'], sort=False):
+            formula_set = {str(x).strip() for x in group['formula'].tolist() if str(x).strip()}
+            if len(formula_set) > 1:
+                sample_row = group.iloc[0]
+                ambiguous_pairs.append((str(sample_row['version']), str(sample_row['factor_name'])))
+                continue
+            dedup_rows.append(group.iloc[-1])
+
+        if ambiguous_pairs:
+            raise ValueError(
+                'Ambiguous formulas found in DB for (version, factor_name): '
+                f'{ambiguous_pairs}. Please specify a unique source or clean DB records.'
+            )
+
+        out = pd.DataFrame(dedup_rows).reset_index(drop=True)
+        out['factor_key'] = out.apply(lambda x: self._factor_key(str(x['version']), str(x['factor_name'])), axis=1)
+        return out[['collection', 'version', 'factor_name', 'factor_key', 'formula']].copy()
+
+    def _calc_candidate_factor_df(self,
+                                  base_df: pd.DataFrame,
+                                  factor_records: pd.DataFrame) -> pd.DataFrame:
+        out = base_df[['time', 'instrument_id']].copy()
+        calc_df = base_df[['time', 'instrument_id'] + self.base_col_list].copy()
+        for _, row in factor_records.iterrows():
+            factor_key = str(row['factor_key'])
+            formula = str(row['formula'])
+            try:
+                col = calc_formula_series(df=calc_df, formula=formula, data_fields=self.base_col_list)
+            except Exception as e:
+                raise ValueError(
+                    f'Failed to calculate factor={factor_key} from DB formula={formula}. Error: {e}'
+                ) from e
+            out[factor_key] = pd.to_numeric(col, errors='coerce')
+
+        if self.apply_rolling_norm:
+            out = rolling_normalize_features(
+                df=out,
+                factor_cols=factor_records['factor_key'].astype(str).tolist(),
+                rolling_norm_window=self.rolling_norm_window,
+                rolling_norm_min_periods=self.rolling_norm_min_periods,
+                rolling_norm_eps=self.rolling_norm_eps,
+                rolling_norm_clip=self.rolling_norm_clip,
+                instrument_col='instrument_id',
+            )
+
+        return out.sort_values(['instrument_id', 'time']).reset_index(drop=True)
+
+    def _evaluate_metrics(self,
+                          eval_df: pd.DataFrame,
+                          factor_col: str) -> Dict[str, float]:
+        data_i = eval_df[['time', 'instrument_id', 'future_ret', factor_col]].copy()
+        gross_ret_df, _, _ = get_ts_ret_and_turnover(data_i, factor_col)
+        gross_ret_df = gross_ret_df.reset_index()
+
+        annual_ret = get_annualized_ret(gross_ret_df, factor_col, self.interest_method)
+        annual_vol = get_annualized_volatility(gross_ret_df, factor_col)
+        annual_sharpe = get_annualized_sharpe(annual_ret, annual_vol)
+        ic_df, _ = get_annualized_ts_ic_and_t_corr(
+            data_i,
+            fc_col=factor_col,
+            fc_freq=self.fc_freq,
+            portfolio_adjust_method=self.portfolio_adjust_method,
+        )
+
+        ic_value = float(pd.to_numeric(ic_df.loc['all', 'TS IC'], errors='coerce')) if 'all' in ic_df.index else float('nan')
+        sharpe_value = float(pd.to_numeric(annual_sharpe.loc['all', factor_col], errors='coerce')) \
+            if 'all' in annual_sharpe.index else float('nan')
+        return {'ic': ic_value, 'sharpe': sharpe_value}
+
+    def _run_backtest_for_signal(self,
+                                 eval_df: pd.DataFrame,
+                                 factor_col: str) -> BackTester:
+        bt = BackTester(
+            fc_name_list=[factor_col],
+            version='fusion_runtime',
+            instrument_type=self.instrument_type,
+            instrument_id_list=self.instrument_id_list,
+            fc_freq=self.fc_freq,
+            data=eval_df[['time', 'instrument_id', 'future_ret', factor_col]].copy(),
+            start_time=self.start_time,
+            end_time=self.end_time,
+            portfolio_adjust_method=self.portfolio_adjust_method,
+            interest_method=self.interest_method,
+            risk_free_rate=self.risk_free_rate,
+            calculate_baseline=False,
+            apply_weighted_price=False,
+            apply_rolling_norm=False,
+            n_jobs=max(1, self.n_jobs),
+        )
+        bt.backtest()
+        return bt
+
+    def _format_metrics(self,
+                        metrics: Dict[str, float]) -> str:
+        return ', '.join([f'{k}={self._safe_metric_value(metrics.get(k)):.6f}' for k in self.fusion_metrics])
+
+    @staticmethod
+    def _build_add_formula(formula_list: Sequence[str]) -> str:
+        cleaned = [str(x).strip() for x in formula_list if str(x).strip()]
+        if not cleaned:
+            raise ValueError('Cannot build fusion formula from empty formula_list.')
+        formula = cleaned[0]
+        for item in cleaned[1:]:
+            formula = f'Add({formula}, {item})'
+        return formula
+
+    def _build_fusion_formula(self,
+                              selected_factor_keys: Sequence[str],
+                              factor_records: pd.DataFrame) -> str:
+        formula_map = {
+            str(row['factor_key']): str(row['formula'])
+            for _, row in factor_records.iterrows()
+        }
+        selected_formulas = [formula_map.get(key, '').strip() for key in selected_factor_keys]
+        if any(not f for f in selected_formulas):
+            missing_keys = [k for k, f in zip(selected_factor_keys, selected_formulas) if not f]
+            raise ValueError(f'Missing formulas for fusion factor keys: {missing_keys}')
+
+        add_formula = self._build_add_formula(selected_formulas)
+        if self.fusion_method == 'avg_weight' and len(selected_formulas) > 1:
+            return f'Div({add_formula}, {len(selected_formulas)})'
+        return add_formula
+
+    def fuse(self) -> Dict[str, Any]:
+        """Run stepwise forward-selection fusion and return fusion artifacts."""
+        log.info(
+            'Fusion started: '
+            f'method={self.fusion_method}, '
+            f'collections={self.collection_list}, '
+            f'fusion_metrics={self.fusion_metrics}, '
+            f'max_fusion_count={self.max_fusion_count}, '
+            f'raw_factor_dict_provided={self.raw_factor_dict is not None}'
+        )
+
+        base_df = self._load_base_data()
+        factor_records = self._load_candidate_records()
+        log.info(f'Fusion candidate pool size={len(factor_records)}')
+
+        factor_df = self._calc_candidate_factor_df(base_df=base_df, factor_records=factor_records)
+        eval_df = base_df[['time', 'instrument_id', 'future_ret']].merge(
+            factor_df,
+            on=['time', 'instrument_id'],
+            how='left',
+            validate='1:1',
+        )
+
+        factor_keys = factor_records['factor_key'].astype(str).tolist()
+        if not factor_keys:
+            raise ValueError('No available factors for fusion.')
+
+        single_metric_map: Dict[str, Dict[str, float]] = {}
+        for factor_key in factor_keys:
+            signal_df = eval_df[['time', 'instrument_id', 'future_ret', factor_key]].copy()
+            _ = self._run_backtest_for_signal(signal_df, factor_key)
+            metrics = self._evaluate_metrics(signal_df, factor_key)
+            single_metric_map[factor_key] = metrics
+            log.info(f'[Fusion][Init] factor={factor_key}, {self._format_metrics(metrics)}')
+
+        sorted_factor_keys = sorted(
+            factor_keys,
+            key=lambda x: self._metric_sort_key(single_metric_map[x]),
+            reverse=True,
+        )
+        base_factor_key = sorted_factor_keys[0]
+        selected_factor_keys: List[str] = [base_factor_key]
+        base_metrics = dict(single_metric_map[base_factor_key])
+        log.info(
+            '[Fusion][Init] base factor selected: '
+            f'base_factor={base_factor_key}, {self._format_metrics(base_metrics)}'
+        )
+
+        fusion_col = '__fused_factor__'
+        best_bt = self._run_backtest_for_signal(
+            eval_df[['time', 'instrument_id', 'future_ret', base_factor_key]].rename(columns={base_factor_key: fusion_col}),
+            fusion_col,
+        )
+
+        max_count = min(self.max_fusion_count, len(sorted_factor_keys))
+        for round_idx in range(2, max_count + 1):
+            candidate_keys = [x for x in sorted_factor_keys if x not in selected_factor_keys]
+            if not candidate_keys:
+                log.info(f'[Fusion][Round {round_idx}] no candidate left, stop.')
+                break
+
+            log.info(
+                f'[Fusion][Round {round_idx}] start. '
+                f'base_factors={selected_factor_keys}, base_metrics={self._format_metrics(base_metrics)}, '
+                f'candidate_count={len(candidate_keys)}'
+            )
+
+            round_best_key: Optional[str] = None
+            round_best_metrics: Optional[Dict[str, float]] = None
+            round_best_bt: Optional[BackTester] = None
+
+            for cand_key in candidate_keys:
+                trial_keys = selected_factor_keys + [cand_key]
+                if self.fusion_method == 'avg_weight':
+                    fused_series = eval_df[trial_keys].mean(axis=1)
+                else:
+                    raise ValueError(f'Unsupported fusion_method={self.fusion_method}')
+
+                trial_df = eval_df[['time', 'instrument_id', 'future_ret']].copy()
+                trial_df[fusion_col] = pd.to_numeric(fused_series, errors='coerce')
+
+                bt_trial = self._run_backtest_for_signal(trial_df, fusion_col)
+                trial_metrics = self._evaluate_metrics(trial_df, fusion_col)
+
+                is_better = self._is_strictly_better(trial_metrics, base_metrics)
+                log.info(
+                    f'[Fusion][Round {round_idx}] candidate={cand_key}, '
+                    f'trial_factors={trial_keys}, '
+                    f'{self._format_metrics(trial_metrics)}, '
+                    f'better_than_base={is_better}'
+                )
+
+                if not is_better:
+                    continue
+                if round_best_metrics is None:
+                    round_best_key = cand_key
+                    round_best_metrics = trial_metrics
+                    round_best_bt = bt_trial
+                    continue
+                if self._metric_sort_key(trial_metrics) > self._metric_sort_key(round_best_metrics):
+                    round_best_key = cand_key
+                    round_best_metrics = trial_metrics
+                    round_best_bt = bt_trial
+
+            if round_best_key is None or round_best_metrics is None or round_best_bt is None:
+                log.info(
+                    f'[Fusion][Round {round_idx}] no better candidate found. '
+                    f'base_factors={selected_factor_keys}, base_metrics={self._format_metrics(base_metrics)}'
+                )
+                break
+
+            selected_factor_keys.append(round_best_key)
+            base_metrics = round_best_metrics
+            best_bt = round_best_bt
+            log.info(
+                f'[Fusion][Round {round_idx}] improved. '
+                f'new_base_factors={selected_factor_keys}, '
+                f'added_factor={round_best_key}, '
+                f'new_base_metrics={self._format_metrics(base_metrics)}'
+            )
+
+        final_fused_df = eval_df[['time', 'instrument_id', 'future_ret']].copy()
+        final_fused_df[fusion_col] = pd.to_numeric(eval_df[selected_factor_keys].mean(axis=1), errors='coerce')
+        final_bt = self._run_backtest_for_signal(final_fused_df, fusion_col)
+        final_metrics = self._evaluate_metrics(final_fused_df, fusion_col)
+
+        meta_df = factor_records.set_index('factor_key')
+        selected_factors_detail = [
+            {
+                'factor_key': key,
+                'version': str(meta_df.loc[key, 'version']),
+                'factor_name': str(meta_df.loc[key, 'factor_name']),
+                'collection': str(meta_df.loc[key, 'collection']),
+                'formula': str(meta_df.loc[key, 'formula']),
+            }
+            for key in selected_factor_keys
+        ]
+
+        fusion_formula = self._build_fusion_formula(selected_factor_keys, factor_records)
+        fusion_version = datetime.now().strftime('%Y%m%d_%H%M%S')
+        fusion_factor_name = f'fusion_{self.fusion_method}_{fusion_version}'
+        fitness_payload = {
+            metric: {'value': float(final_metrics.get(metric, float('nan')))}
+            for metric in self.fusion_metrics
+        }
+
+        perf_summary = final_bt.performance_summary.copy()
+        if 'Factor Name' in perf_summary.columns:
+            perf_summary['Factor Name'] = fusion_factor_name
+
+        update_factor_info(
+            selected_fc_name_list=[fusion_factor_name],
+            performance_summary=perf_summary,
+            factor_formula_map={fusion_factor_name: fusion_formula},
+            factor_fitness_map={fusion_factor_name: fitness_payload},
+            instrument_id_list=self.instrument_id_list,
+            method='fusion',
+            version=fusion_version,
+            start_date=self.start_time,
+            end_date=self.end_time,
+            database='factors',
+            collection='fusion_factor',
+        )
+        log.info(
+            '[Fusion][Persist] '
+            f'database=factors, collection=fusion_factor, '
+            f'version={fusion_version}, factor_name={fusion_factor_name}, '
+            f'selected_factor_keys={selected_factor_keys}, '
+            f'formula={fusion_formula}, '
+            f'fitness={fitness_payload}'
+        )
+
+        log.info(
+            'Fusion finished: '
+            f'selected_count={len(selected_factor_keys)}, '
+            f'selected_factor_keys={selected_factor_keys}, '
+            f'final_metrics={self._format_metrics(final_metrics)}'
+        )
+        return {
+            'fusion_method': self.fusion_method,
+            'fusion_metrics': list(self.fusion_metrics),
+            'selected_factor_keys': selected_factor_keys,
+            'selected_factors_detail': selected_factors_detail,
+            'final_metrics': final_metrics,
+            'single_factor_metrics': single_metric_map,
+            'fused_col': fusion_col,
+            'fused_data': final_fused_df,
+            'bt': final_bt,
+            'round_base_metrics': base_metrics,
+        }
 
 
