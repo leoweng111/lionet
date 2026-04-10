@@ -20,7 +20,7 @@ from data import (
 )
 from mongo.mongify import get_data
 from utils.logging import log
-from utils.params import SUPPORTED_FILTER_INDICATORS
+from utils.params import FusionSupportedMethods, FusionSupportedMetrics, SUPPORTED_FILTER_INDICATORS
 
 from .backtest import BackTester
 from .factor_indicators import (
@@ -1837,9 +1837,6 @@ class GeneticFactorGenerator(FactorGenerator):
 class FactorFusioner:
     """Fuse existing DB factors with stepwise forward selection."""
 
-    _SUPPORTED_METHODS = {'avg_weight'}
-    _SUPPORTED_METRICS = {'ic', 'sharpe'}
-
     def __init__(
         self,
         fusion_method: str = 'avg_weight',
@@ -1866,9 +1863,37 @@ class FactorFusioner:
         database: str = 'factors',
         base_col_list: Optional[Sequence[str]] = None,
     ):
+        """初始化因子融合器。
+
+        参数说明：
+        - fusion_method: 融合方式。当前仅支持 `avg_weight`（等权平均融合）。
+        - raw_factor_dict: 手动指定待融合因子池。格式为 `{version: [factor_name, ...]}`；
+          若为 None，则自动从 `collection` 指定的集合中拉取候选因子。
+        - collection: 候选因子来源集合名，支持字符串或字符串列表。
+        - instrument_type: 行情数据类型，当前仅支持期货连续合约场景。
+        - instrument_id_list: 回测与评估使用的标的列表；当前实现要求仅一个标的。
+        - fc_freq: 因子频率，支持 `1m`、`5m`、`1d`。
+        - data: 可直接传入已准备好的行情数据；为空时自动从数据层拉取。
+        - start_time: 融合评估起始日期（含），如 `20200101`。
+        - end_time: 融合评估结束日期（含），如 `20241231`。
+        - portfolio_adjust_method: 组合调仓频率，支持 `min`、`1D`、`1M`、`1Q`。
+        - interest_method: 收益累计方式（如 `simple`/`compound`），传递给回测器。
+        - risk_free_rate: 是否在绩效计算中考虑无风险利率。
+        - apply_weighted_price: 是否先对价格进行复权，再计算收益与因子。
+        - apply_rolling_norm: 是否对候选因子做滚动标准化后再参与融合。
+        - rolling_norm_window: 滚动标准化窗口长度。
+        - rolling_norm_min_periods: 滚动标准化最小有效样本数。
+        - rolling_norm_eps: 标准化分母的数值稳定项，避免除零。
+        - rolling_norm_clip: 标准化后截断阈值，抑制极端值。
+        - max_fusion_count: 最多融合因子数量（包含首个基石因子）。
+        - fusion_metrics: 融合优化目标，可为 `ic`、`sharpe` 或其列表。
+        - n_jobs: 并行任务数，用于候选因子计算等并行流程。
+        - database: 因子公式读取与融合结果写入的数据库名。
+        - base_col_list: 计算因子时需要保留的基础字段列表（默认 OHLCV+position）。
+        """
         self.fusion_method = str(fusion_method).strip()
-        if self.fusion_method not in self._SUPPORTED_METHODS:
-            raise ValueError(f'Unsupported fusion_method={self.fusion_method}, use {sorted(self._SUPPORTED_METHODS)}.')
+        if self.fusion_method not in FusionSupportedMethods:
+            raise ValueError(f'Unsupported fusion_method={self.fusion_method}, use {sorted(FusionSupportedMethods)}.')
 
         self.raw_factor_dict = self._normalize_raw_factor_dict(raw_factor_dict)
         self.collection_list = self._normalize_str_or_seq(collection, name='collection')
@@ -1953,10 +1978,10 @@ class FactorFusioner:
         metrics = [str(x).strip().lower() for x in metrics if str(x).strip()]
         if not metrics:
             raise ValueError('fusion_metrics cannot be empty.')
-        invalid = [x for x in metrics if x not in self._SUPPORTED_METRICS]
+        invalid = [x for x in metrics if x not in FusionSupportedMetrics]
         if invalid:
             raise ValueError(
-                f'Unsupported fusion_metrics={invalid}. Available metrics: {sorted(self._SUPPORTED_METRICS)}.'
+                f'Unsupported fusion_metrics={invalid}. Available metrics: {sorted(FusionSupportedMetrics)}.'
             )
         duplicated = sorted([x for x in set(metrics) if metrics.count(x) > 1])
         if duplicated:
@@ -2242,7 +2267,6 @@ class FactorFusioner:
         single_metric_map: Dict[str, Dict[str, float]] = {}
         for factor_key in factor_keys:
             signal_df = eval_df[['time', 'instrument_id', 'future_ret', factor_key]].copy()
-            _ = self._run_backtest_for_signal(signal_df, factor_key)
             metrics = self._evaluate_metrics(signal_df, factor_key)
             single_metric_map[factor_key] = metrics
             log.info(f'[Fusion][Init] factor={factor_key}, {self._format_metrics(metrics)}')
@@ -2261,10 +2285,6 @@ class FactorFusioner:
         )
 
         fusion_col = '__fused_factor__'
-        best_bt = self._run_backtest_for_signal(
-            eval_df[['time', 'instrument_id', 'future_ret', base_factor_key]].rename(columns={base_factor_key: fusion_col}),
-            fusion_col,
-        )
 
         max_count = min(self.max_fusion_count, len(sorted_factor_keys))
         for round_idx in range(2, max_count + 1):
@@ -2281,7 +2301,6 @@ class FactorFusioner:
 
             round_best_key: Optional[str] = None
             round_best_metrics: Optional[Dict[str, float]] = None
-            round_best_bt: Optional[BackTester] = None
 
             for cand_key in candidate_keys:
                 trial_keys = selected_factor_keys + [cand_key]
@@ -2293,7 +2312,6 @@ class FactorFusioner:
                 trial_df = eval_df[['time', 'instrument_id', 'future_ret']].copy()
                 trial_df[fusion_col] = pd.to_numeric(fused_series, errors='coerce')
 
-                bt_trial = self._run_backtest_for_signal(trial_df, fusion_col)
                 trial_metrics = self._evaluate_metrics(trial_df, fusion_col)
 
                 is_better = self._is_strictly_better(trial_metrics, base_metrics)
@@ -2309,14 +2327,12 @@ class FactorFusioner:
                 if round_best_metrics is None:
                     round_best_key = cand_key
                     round_best_metrics = trial_metrics
-                    round_best_bt = bt_trial
                     continue
                 if self._metric_sort_key(trial_metrics) > self._metric_sort_key(round_best_metrics):
                     round_best_key = cand_key
                     round_best_metrics = trial_metrics
-                    round_best_bt = bt_trial
 
-            if round_best_key is None or round_best_metrics is None or round_best_bt is None:
+            if round_best_key is None or round_best_metrics is None:
                 log.info(
                     f'[Fusion][Round {round_idx}] no better candidate found. '
                     f'base_factors={selected_factor_keys}, base_metrics={self._format_metrics(base_metrics)}'
@@ -2325,7 +2341,6 @@ class FactorFusioner:
 
             selected_factor_keys.append(round_best_key)
             base_metrics = round_best_metrics
-            best_bt = round_best_bt
             log.info(
                 f'[Fusion][Round {round_idx}] improved. '
                 f'new_base_factors={selected_factor_keys}, '

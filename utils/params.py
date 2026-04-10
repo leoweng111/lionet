@@ -71,3 +71,7 @@ SUPPORTED_FILTER_INDICATORS = [
     'Turnover', 'TS IC', 'TS RankIC', 'T-corr', 'count',
 ]
 
+# Supported options for factor fusion.
+FusionSupportedMethods = {'avg_weight'}
+FusionSupportedMetrics = {'ic', 'sharpe'}
+
