@@ -1285,6 +1285,7 @@ class FactorGenerator:
         bt = BackTester(
             fc_name_list=fc_name_list,
             version=self.version,
+            collection=self.method if self.method in ['genetic_programming', 'llm_prompt', 'fusion_factor'] else 'genetic_programming',
             instrument_type=self.instrument_type,
             instrument_id_list=self.instrument_id_list,
             fc_freq=self.fc_freq,
@@ -1299,11 +1300,6 @@ class FactorGenerator:
             # Keep BackTester from applying weighted-price preprocessing again.
             # 这样设计是因为generate_factor_df需要使用到复权后的价格进行fitness计算。因此，不能只在backtest时才进行复权。
             apply_weighted_price=False,
-            apply_rolling_norm=self.apply_rolling_norm,
-            rolling_norm_window=self.rolling_norm_window,
-            rolling_norm_min_periods=self.rolling_norm_min_periods,
-            rolling_norm_eps=self.rolling_norm_eps,
-            rolling_norm_clip=self.rolling_norm_clip,
             n_jobs=n_jobs or self.n_jobs,
         )
         bt.backtest()
@@ -1363,7 +1359,7 @@ class LLMPromptFactorGenerator(FactorGenerator):
             base_col_list=base_col_list,
             min_window_size=min_window_size,
             max_factor_count=max_factor_count,
-            apply_rolling_norm=apply_rolling_norm,
+            apply_rolling_norm=False,
             rolling_norm_window=rolling_norm_window,
             rolling_norm_min_periods=rolling_norm_min_periods,
             rolling_norm_eps=rolling_norm_eps,
@@ -1711,6 +1707,8 @@ class GeneticFactorGenerator(FactorGenerator):
         self.gp_assumed_initial_capital = float(gp_assumed_initial_capital)
         self.gp_elite_stagnation_generation_count = int(gp_elite_stagnation_generation_count)
         self.gp_max_shock_generation = int(gp_max_shock_generation)
+        # GP 阶段将滚动标准化固化到公式 OpRollNorm 中，避免后续流程重复标准化。
+        self.apply_formula_rolling_norm = bool(apply_rolling_norm)
 
         self.factor_tree_map: Dict[str, Any] = {}
 
@@ -1812,7 +1810,7 @@ class GeneticFactorGenerator(FactorGenerator):
             depth_penalty_start_depth=self.gp_depth_penalty_start_depth,
             depth_penalty_linear_coef=self.gp_depth_penalty_linear_coef,
             depth_penalty_quadratic_coef=self.gp_depth_penalty_quadratic_coef,
-            apply_rolling_norm=self.apply_rolling_norm,
+            apply_rolling_norm=self.apply_formula_rolling_norm,
             rolling_norm_window=self.rolling_norm_window,
             rolling_norm_min_periods=self.rolling_norm_min_periods,
             rolling_norm_eps=self.rolling_norm_eps,
@@ -1852,11 +1850,6 @@ class FactorFusioner:
         interest_method: str = 'simple',
         risk_free_rate: bool = False,
         apply_weighted_price: bool = True,
-        apply_rolling_norm: bool = True,
-        rolling_norm_window: int = 30,
-        rolling_norm_min_periods: int = 20,
-        rolling_norm_eps: float = 1e-8,
-        rolling_norm_clip: float = 5.0,
         max_fusion_count: int = 5,
         fusion_metrics: Union[str, Sequence[str]] = 'ic',
         n_jobs: int = 5,
@@ -1880,11 +1873,6 @@ class FactorFusioner:
         - interest_method: 收益累计方式（如 `simple`/`compound`），传递给回测器。
         - risk_free_rate: 是否在绩效计算中考虑无风险利率。
         - apply_weighted_price: 是否先对价格进行复权，再计算收益与因子。
-        - apply_rolling_norm: 是否对候选因子做滚动标准化后再参与融合。
-        - rolling_norm_window: 滚动标准化窗口长度。
-        - rolling_norm_min_periods: 滚动标准化最小有效样本数。
-        - rolling_norm_eps: 标准化分母的数值稳定项，避免除零。
-        - rolling_norm_clip: 标准化后截断阈值，抑制极端值。
         - max_fusion_count: 最多融合因子数量（包含首个基石因子）。
         - fusion_metrics: 融合优化目标，可为 `ic`、`sharpe` 或其列表。
         - n_jobs: 并行任务数，用于候选因子计算等并行流程。
@@ -1907,11 +1895,6 @@ class FactorFusioner:
         self.interest_method = interest_method
         self.risk_free_rate = bool(risk_free_rate)
         self.apply_weighted_price = bool(apply_weighted_price)
-        self.apply_rolling_norm = bool(apply_rolling_norm)
-        self.rolling_norm_window = int(rolling_norm_window)
-        self.rolling_norm_min_periods = int(rolling_norm_min_periods)
-        self.rolling_norm_eps = float(rolling_norm_eps)
-        self.rolling_norm_clip = float(rolling_norm_clip)
         self.max_fusion_count = int(max_fusion_count)
         self.fusion_metrics = self._normalize_fusion_metrics(fusion_metrics)
         self.n_jobs = int(n_jobs)
@@ -2148,17 +2131,6 @@ class FactorFusioner:
                 ) from e
             out[factor_key] = pd.to_numeric(col, errors='coerce')
 
-        if self.apply_rolling_norm:
-            out = rolling_normalize_features(
-                df=out,
-                factor_cols=factor_records['factor_key'].astype(str).tolist(),
-                rolling_norm_window=self.rolling_norm_window,
-                rolling_norm_min_periods=self.rolling_norm_min_periods,
-                rolling_norm_eps=self.rolling_norm_eps,
-                rolling_norm_clip=self.rolling_norm_clip,
-                instrument_col='instrument_id',
-            )
-
         return out.sort_values(['instrument_id', 'time']).reset_index(drop=True)
 
     def _evaluate_metrics(self,
@@ -2189,6 +2161,7 @@ class FactorFusioner:
         bt = BackTester(
             fc_name_list=[factor_col],
             version='fusion_runtime',
+            collection='fusion_runtime',
             instrument_type=self.instrument_type,
             instrument_id_list=self.instrument_id_list,
             fc_freq=self.fc_freq,
@@ -2200,7 +2173,6 @@ class FactorFusioner:
             risk_free_rate=self.risk_free_rate,
             calculate_baseline=False,
             apply_weighted_price=False,
-            apply_rolling_norm=False,
             n_jobs=max(1, self.n_jobs),
         )
         bt.backtest()

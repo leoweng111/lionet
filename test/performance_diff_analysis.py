@@ -52,11 +52,6 @@ def run_backtester(args: argparse.Namespace) -> BackTester:
         risk_free_rate=False,
         calculate_baseline=True,
         apply_weighted_price=True,
-        apply_rolling_norm=args.apply_rolling_norm,
-        rolling_norm_window=args.rolling_norm_window,
-        rolling_norm_min_periods=args.rolling_norm_min_periods,
-        rolling_norm_eps=args.rolling_norm_eps,
-        rolling_norm_clip=args.rolling_norm_clip,
         n_jobs=args.n_jobs,
     )
     bt.backtest()

@@ -60,7 +60,6 @@ def main() -> None:
         max_fusion_count=args.max_fusion_count,
         fusion_metrics=fusion_metrics,
         apply_weighted_price=True,
-        apply_rolling_norm=True,
         n_jobs=1,
     )
 

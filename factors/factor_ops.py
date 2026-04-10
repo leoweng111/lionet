@@ -317,6 +317,12 @@ def infer_node_type(node: FactorNode) -> FactorDataType:
         node.data_type = FactorDataType.RATIO
         return node.data_type
 
+    if isinstance(node, OpRollNorm):
+        # 归一化输出为无量纲比例。
+        _ = infer_node_type(node.child)
+        node.data_type = FactorDataType.RATIO
+        return node.data_type
+
     if isinstance(node, (OpTsCorr, OpTsRankCorr, OpTsCov, OpTsBeta)):
         # 同类型相关/协方差/贝塔
         lt = infer_node_type(node.left)
@@ -998,6 +1004,39 @@ class OpTsRank(FactorNode):
         return f"TsRank({self.child}, {self.window})"
 
 
+class OpRollNorm(FactorNode):
+    """Rolling z-score normalization without look-ahead leakage."""
+
+    def __init__(self,
+                 child: FactorNode,
+                 window: int,
+                 min_periods: int,
+                 eps: float,
+                 clip: float):
+        self.child = child
+        self.window = int(window)
+        self.min_periods = int(min_periods)
+        self.eps = float(eps)
+        self.clip = float(clip)
+
+    def _norm_one(self, x: pd.Series) -> pd.Series:
+        s = pd.to_numeric(x, errors='coerce')
+        hist = s.shift(1)
+        rolling_mean = hist.rolling(self.window, min_periods=self.min_periods).mean()
+        rolling_std = hist.rolling(self.window, min_periods=self.min_periods).std()
+        z = (s - rolling_mean) / (rolling_std + self.eps)
+        return z.clip(-self.clip, self.clip)
+
+    def calc(self, df: pd.DataFrame) -> pd.Series:
+        s = _safe_series(self.child.calc(df))
+        if 'instrument_id' in df.columns:
+            return s.groupby(df['instrument_id']).transform(self._norm_one)
+        return self._norm_one(s)
+
+    def to_formula(self) -> str:
+        return f"OpRollNorm({self.child}, {self.window}, {self.min_periods}, {self.eps:.10g}, {self.clip:.10g})"
+
+
 class OpTsCorr(FactorNode):
     def __init__(self, left: FactorNode, right: FactorNode, window: int):
         self.left = left
@@ -1300,6 +1339,8 @@ OP_CLASS_BY_NAME: Dict[str, Type[Any]] = {
     cls.__name__.replace('Op', ''): cls
     for cls in (BINARY_OPS + UNARY_OPS + UNARY_TS_OPS + BINARY_TS_OPS + TERNARY_WINDOW_TS_OPS + [OpNeg])
 }
+OP_CLASS_BY_NAME['OpRollNorm'] = OpRollNorm
+OP_CLASS_BY_NAME['RollNorm'] = OpRollNorm
 
 OP_ALIAS_BY_NAME: Dict[str, Type[Any]] = {
     # Case-insensitive aliases.
@@ -1356,6 +1397,26 @@ def _parse_window_arg(node: ast.AST) -> int:
     if w <= 0:
         raise ValueError(f'Window argument must be positive, got {w}.')
     return w
+
+
+def _parse_positive_int_arg(node: ast.AST, name: str) -> int:
+    if isinstance(node, ast.Constant) and isinstance(node.value, (int, float)):
+        value = int(node.value)
+    else:
+        raise ValueError(f'{name} argument must be a numeric literal.')
+    if value <= 0:
+        raise ValueError(f'{name} argument must be positive, got {value}.')
+    return value
+
+
+def _parse_positive_float_arg(node: ast.AST, name: str) -> float:
+    if isinstance(node, ast.Constant) and isinstance(node.value, (int, float)):
+        value = float(node.value)
+    else:
+        raise ValueError(f'{name} argument must be a numeric literal.')
+    if value <= 0:
+        raise ValueError(f'{name} argument must be positive, got {value}.')
+    return value
 
 
 def parse_formula_to_node(formula: str,
@@ -1416,6 +1477,16 @@ def parse_formula_to_node(formula: str,
                     _parse_window_arg(node.args[1]),
                     _parse_window_arg(node.args[2]),
                     _parse_window_arg(node.args[3]),
+                )
+            if op_cls is OpRollNorm:
+                if len(node.args) != 5:
+                    raise ValueError(f'{op_name} expects 5 args (X, window, min_periods, eps, clip).')
+                return OpRollNorm(
+                    _build(node.args[0]),
+                    _parse_positive_int_arg(node.args[1], 'window'),
+                    _parse_positive_int_arg(node.args[2], 'min_periods'),
+                    _parse_positive_float_arg(node.args[3], 'eps'),
+                    _parse_positive_float_arg(node.args[4], 'clip'),
                 )
 
         raise ValueError(f'Unsupported formula node: {ast.dump(node)}')

@@ -1,5 +1,6 @@
 """Daily open-to-open futures trading simulation based on one stored factor formula."""
 
+import ast
 import sys
 from pathlib import Path
 
@@ -14,9 +15,10 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
-from data import get_futures_continuous_contract_price, get_factor_value
+from data import get_factor_formula_map_by_version, get_futures_continuous_contract_price
 from factors.factor_indicators import get_performance
-from factors.factor_utils import get_weighted_price, rolling_normalize_features
+from factors.factor_ops import calc_formula_series
+from factors.factor_utils import get_weighted_price
 from utils.logging import log
 from utils.params import FUTURES_CONTRACT_MULTIPLIER
 
@@ -57,12 +59,11 @@ class Strategy:
             可开仓上限约为 equity / (open * multiplier * margin_rate)。
         :param fee_per_lot: 每手固定手续费（开平合计按实际交易手数累计）。
         :param slippage: 每手滑点（价格点数）。实际成本为 slippage * multiplier * trade_lots。
-        :param apply_rolling_norm: 是否对因子做滚动标准化，默认 True。
-            建议与 BackTester 保持一致，避免信号分布口径不一致。
-        :param rolling_norm_window: 滚动标准化窗口长度。
-        :param rolling_norm_min_periods: 滚动标准化最小样本数。
-        :param rolling_norm_eps: 标准化分母平滑项，防止除零。
-        :param rolling_norm_clip: 标准化后截断阈值（对 zscore 做 clip）。
+        :param apply_rolling_norm: 是否在公式层包裹 OpRollNorm，默认 True。
+        :param rolling_norm_window: OpRollNorm 的窗口长度。
+        :param rolling_norm_min_periods: OpRollNorm 的最小样本数。
+        :param rolling_norm_eps: OpRollNorm 的分母平滑项。
+        :param rolling_norm_clip: OpRollNorm 的截断阈值。
         :param signal_delay_days: 信号执行延迟天数。
             例如 1 表示使用 T 日信号，在 T+1 开盘执行交易，
             与“信号生成后下一交易日开盘执行”的常见研究口径一致。
@@ -163,6 +164,42 @@ class Strategy:
         out = out.sort_values(['instrument_id', 'time']).reset_index(drop=True)
         return out
 
+    @staticmethod
+    def _is_top_level_roll_norm(formula: str) -> bool:
+        text = str(formula).strip()
+        if not text:
+            return False
+        try:
+            node = ast.parse(text, mode='eval').body
+        except Exception:
+            return text.startswith('OpRollNorm(')
+        if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Name):
+            return False
+        return node.func.id.lower() in {'oprollnorm', 'rollnorm'}
+
+    def _resolve_factor_formula(self) -> str:
+        formula_map = get_factor_formula_map_by_version(
+            fc_name_list=[self.factor_name],
+            version=self.version,
+            collections=[self.collection],
+            database=self.database,
+        )
+        formula = str(formula_map.get(self.factor_name, '')).strip()
+        if not formula:
+            raise ValueError(
+                f'Factor formula not found: factor_name={self.factor_name}, '
+                f'version={self.version}, collection={self.collection}, database={self.database}.'
+            )
+
+        if not self.apply_rolling_norm:
+            return formula
+        if self._is_top_level_roll_norm(formula):
+            return formula
+        return (
+            f'OpRollNorm({formula}, {self.rolling_norm_window}, {self.rolling_norm_min_periods}, '
+            f'{self.rolling_norm_eps:.10g}, {self.rolling_norm_clip:.10g})'
+        )
+
     def backtest(self) -> pd.DataFrame:
         root = self._root_instrument(self.instrument_id)
         multiplier = FUTURES_CONTRACT_MULTIPLIER.get(root)
@@ -177,23 +214,11 @@ class Strategy:
 
         # Factor must be calculated on weighted(adjusted) prices.
         factor_input = get_weighted_price(raw_df)
-        factor_input = get_factor_value(
-            Data=factor_input,
-            fc_name_list=[self.factor_name],
-            version=self.version,
-            collection=self.collection,
-            n_jobs=1,
+        factor_formula = self._resolve_factor_formula()
+        factor_input[self.factor_name] = pd.to_numeric(
+            calc_formula_series(df=factor_input, formula=factor_formula),
+            errors='coerce',
         )
-        if self.apply_rolling_norm:
-            factor_input = rolling_normalize_features(
-                df=factor_input,
-                factor_cols=[self.factor_name],
-                rolling_norm_window=self.rolling_norm_window,
-                rolling_norm_min_periods=self.rolling_norm_min_periods,
-                rolling_norm_eps=self.rolling_norm_eps,
-                rolling_norm_clip=self.rolling_norm_clip,
-                instrument_col='instrument_id',
-            )
         sim_df = raw_df[['time', 'instrument_id', 'open', 'high', 'low', 'close', 'volume', 'position', 'weighted_factor'] +
                         [c for c in ['symbol', 'is_rollover'] if c in raw_df.columns]].copy()
         sim_df = sim_df.merge(

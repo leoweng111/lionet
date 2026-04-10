@@ -21,7 +21,6 @@ from .factor_indicators import (
     get_annualized_ts_ic_and_t_corr,
     get_annualized_volatility,
 )
-from .factor_utils import rolling_normalize_features
 from .factor_ops import (
     BINARY_CHILD_OPS,
     BINARY_OPS,
@@ -33,6 +32,7 @@ from .factor_ops import (
     DataNode,
     FactorNode,
     OpNeg,
+    OpRollNorm,
     infer_node_type,
 )
 
@@ -482,24 +482,16 @@ def calc_fitness_and_sign(tree: FactorNode,
                           small_factor_penalty_coef: float = 0.0,
                           assumed_initial_capital: float = 1_000_000.0) -> Tuple[float, float, int]:
     try:
-        factor_series = pd.to_numeric(tree.calc(df), errors='coerce')
+        eval_node: FactorNode = tree
         if apply_rolling_norm:
-            norm_df = pd.DataFrame({'factor': factor_series})
-            if 'time' in df.columns:
-                norm_df['time'] = pd.to_datetime(df['time'], errors='coerce')
-            if 'instrument_id' in df.columns:
-                norm_df['instrument_id'] = df['instrument_id']
-
-            norm_df = rolling_normalize_features(
-                df=norm_df,
-                factor_cols='factor',
-                rolling_norm_window=rolling_norm_window,
-                rolling_norm_min_periods=rolling_norm_min_periods,
-                rolling_norm_eps=rolling_norm_eps,
-                rolling_norm_clip=rolling_norm_clip,
-                instrument_col='instrument_id',
+            eval_node = OpRollNorm(
+                tree,
+                window=rolling_norm_window,
+                min_periods=rolling_norm_min_periods,
+                eps=rolling_norm_eps,
+                clip=rolling_norm_clip,
             )
-            factor_series = norm_df['factor']
+        factor_series = pd.to_numeric(eval_node.calc(df), errors='coerce')
 
         eval_df = pd.DataFrame({
             'time': pd.to_datetime(df['time'], errors='coerce') if 'time' in df.columns else pd.NaT,
@@ -967,7 +959,16 @@ def run_gp_evolution(
             结构类似、常数略不同的两个树，formula 字符串相同
             实际计算值不同 -> fitness 不同
             """
-            oriented_node = copy.deepcopy(tree) if sign > 0 else OpNeg(copy.deepcopy(tree))
+            eval_node = copy.deepcopy(tree)
+            if apply_rolling_norm:
+                eval_node = OpRollNorm(
+                    eval_node,
+                    window=rolling_norm_window,
+                    min_periods=rolling_norm_min_periods,
+                    eps=rolling_norm_eps,
+                    clip=rolling_norm_clip,
+                )
+            oriented_node = eval_node if sign > 0 else OpNeg(eval_node)
             formula = oriented_node.to_formula()
             old = global_best.get(formula)
             if old is None or penalized_fitness > old.fitness:  # 对每个公式，只保留历史上 penalized fitness 最高的一次
@@ -985,11 +986,20 @@ def run_gp_evolution(
             # 符号翻转不变，无需使用 oriented_node。
             # ----------------------------------------------------------
             try:
+                eval_node_for_archive = copy.deepcopy(tree)
+                if apply_rolling_norm:
+                    eval_node_for_archive = OpRollNorm(
+                        eval_node_for_archive,
+                        window=rolling_norm_window,
+                        min_periods=rolling_norm_min_periods,
+                        eps=rolling_norm_eps,
+                        clip=rolling_norm_clip,
+                    )
                 factor_values_for_archive = pd.to_numeric(
-                    tree.calc(df), errors='coerce'
+                    eval_node_for_archive.calc(df), errors='coerce'
                 ).values.astype(float)
                 added, removed_count = elite_archive.try_add(
-                    tree,
+                    eval_node_for_archive,
                     penalized_fitness,
                     factor_values_for_archive,
                     original_fitness,
