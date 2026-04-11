@@ -38,6 +38,8 @@ def main() -> None:
     parser.add_argument('--start-time', type=str, default='20240101')
     parser.add_argument('--end-time', type=str, default='20240630')
     parser.add_argument('--max-fusion-count', type=int, default=3)
+    parser.add_argument('--version', type=str, required=True,
+                        help='Fusion result version to persist into factors.factor_fusion.')
     parser.add_argument('--fusion-metrics', type=str, default='ic,sharpe',
                         help='Comma separated list, e.g. ic or ic,sharpe')
     parser.add_argument('--use-raw-factor-dict', action='store_true',
@@ -59,6 +61,7 @@ def main() -> None:
         end_time=args.end_time,
         max_fusion_count=args.max_fusion_count,
         fusion_metrics=fusion_metrics,
+        version=args.version,
         apply_weighted_price=True,
         n_jobs=1,
     )

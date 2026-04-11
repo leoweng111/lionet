@@ -2,7 +2,7 @@
 
 from datetime import datetime
 from collections import Counter
-from typing import Dict, List, Optional, Sequence, Union
+from typing import Any, Dict, List, Optional, Sequence, Union
 
 import pandas as pd
 from joblib import Parallel, delayed
@@ -95,6 +95,7 @@ def update_factor_info(selected_fc_name_list: Sequence[str],
                        version: str,
                        start_date: Optional[str],
                        end_date: Optional[str],
+                       extra_record_fields: Optional[Dict[str, Any]] = None,
                        database: str = 'factors',
                        collection: str = 'genetic_programming') -> None:
     """Upsert selected factor metadata into database.
@@ -166,6 +167,8 @@ def update_factor_info(selected_fc_name_list: Sequence[str],
                 'formula': formula,
                 'created_at': now_text,
             }
+            if extra_record_fields:
+                record.update(dict(extra_record_fields))
             mongo_operator = {
                 'version': version,
                 'factor_name': fc_name,

@@ -31,7 +31,12 @@ from .factor_indicators import (
     get_ts_ret_and_turnover,
 )
 from .factor_ops import available_operator_prompt_text, calc_formula_df, calc_formula_series
-from .factor_utils import get_future_ret, get_weighted_price
+from .factor_utils import (
+    check_if_leakage as check_if_leakage_util,
+    filter_fc_by_db_relative_spearman as filter_fc_by_db_relative_spearman_util,
+    get_future_ret,
+    get_weighted_price,
+)
 from .gp_factor_engine import GPCandidate, run_gp_evolution
 
 
@@ -818,106 +823,17 @@ class FactorGenerator:
             selected_fc_name_list = list(fc_name_list)
         else:
             factor_df_for_names = self.generate_factor_df(base_df)
-            selected_fc_name_list = [
-                c for c in factor_df_for_names.columns if c not in ['time', 'instrument_id']
-            ]
-        if not selected_fc_name_list:
-            raise ValueError('No factor columns available for leakage check.')
+            selected_fc_name_list = [c for c in factor_df_for_names.columns if c not in ['time', 'instrument_id']]
 
-        full_factor_df = self.generate_factor_df(base_df, selected_fc_names=selected_fc_name_list)
-
-        all_time_list = sorted(full_factor_df['time'].dropna().unique().tolist())
-        if not all_time_list:
-            raise ValueError('No valid time points available for leakage check.')
-
-        sample_count = min(len(all_time_list), max(1, self.check_leakage_count))
-        if sample_count < len(all_time_list):
-            rng = np.random.default_rng()
-            sampled_time_list = sorted(rng.choice(all_time_list, size=sample_count, replace=False).tolist())
-        else:
-            sampled_time_list = all_time_list
-
-        slice_factor_list = []
-        for t in sampled_time_list:
-            log.info(f'Checking leakage for time slice <= {t}...')
-            df_slice = base_df.loc[base_df['time'] <= t].copy()
-            factor_df_slice = self.generate_factor_df(df_slice, selected_fc_names=selected_fc_name_list)
-            factor_df_slice = factor_df_slice.loc[
-                factor_df_slice['time'] == t,
-                ['time', 'instrument_id'] + selected_fc_name_list,
-            ].copy()
-            slice_factor_list.append(factor_df_slice)
-
-        slice_factor_df = pd.concat(slice_factor_list, ignore_index=True)
-
-        left = full_factor_df[['time', 'instrument_id'] + selected_fc_name_list].copy()
-        left = left[left['time'].isin(sampled_time_list)]
-        right = slice_factor_df[['time', 'instrument_id'] + selected_fc_name_list].copy()
-
-        merged = left.merge(
-            right,
-            on=['time', 'instrument_id'],
-            how='outer',
-            suffixes=('_full', '_slice'),
-            indicator=True,
+        return check_if_leakage_util(
+            selected_fc_name_list=selected_fc_name_list,
+            load_base_data_fn=self.load_base_data,
+            generate_factor_df_fn=self.generate_factor_df,
+            check_leakage_count=self.check_leakage_count,
+            atol=atol,
+            rtol=rtol,
+            raise_error=raise_error,
         )
-
-        missing_row_df = merged.loc[merged['_merge'] != 'both', ['time', 'instrument_id', '_merge']].copy()
-        mismatch_detail: Dict[str, int] = {}
-        mismatch_examples: Dict[str, List[dict]] = {}
-
-        both_df = merged.loc[merged['_merge'] == 'both'].copy()
-        for fc_name in selected_fc_name_list:
-            col_full = f'{fc_name}_full'
-            col_slice = f'{fc_name}_slice'
-            is_equal = np.isclose(
-                pd.to_numeric(both_df[col_full], errors='coerce').astype(float),
-                pd.to_numeric(both_df[col_slice], errors='coerce').astype(float),
-                rtol=rtol,
-                atol=atol,
-                equal_nan=True,
-            )
-            mismatch_mask = ~is_equal
-            mismatch_count = int(mismatch_mask.sum())
-            if mismatch_count > 0:
-                mismatch_detail[fc_name] = mismatch_count
-                mismatch_examples[fc_name] = both_df.loc[
-                    mismatch_mask,
-                    ['time', 'instrument_id', col_full, col_slice],
-                ].head(5).to_dict(orient='records')
-
-        failed_factor_set = set(mismatch_detail.keys())
-        if len(missing_row_df) > 0:
-            failed_factor_set.update(selected_fc_name_list)
-
-        passed = len(failed_factor_set) == 0
-        result = {
-            'passed': passed,
-            'checked_factor_count': len(selected_fc_name_list),
-            'checked_time_count': len(sampled_time_list),
-            'missing_row_count': int(len(missing_row_df)),
-            'mismatch_factor_count': int(len(mismatch_detail)),
-            'mismatch_detail': mismatch_detail,
-            'mismatch_examples': mismatch_examples,
-            'failed_factor_list': sorted(list(failed_factor_set)),
-        }
-
-        if not passed:
-            log.error('Leakage check failed with details:')
-            log.error(f'  checked_time_count={result["checked_time_count"]}')
-            log.error(f'  missing_row_count={result["missing_row_count"]}')
-            if len(missing_row_df) > 0:
-                log.error(f'  missing_row_samples={missing_row_df.head(10).to_dict(orient="records")}')
-            for fc_name in result['failed_factor_list']:
-                if fc_name in mismatch_detail:
-                    log.error(
-                        f'  factor={fc_name}, mismatch_count={mismatch_detail[fc_name]}, '
-                        f'samples={mismatch_examples.get(fc_name, [])}'
-                    )
-
-        if raise_error and not passed:
-            raise ValueError(f'Leakage check failed: {result}')
-        return result
 
     def auto_mine_select_and_save_fc(self,
                                      filter_indicator_dict: Dict[str, Tuple[float, float, int]],
@@ -1032,201 +948,20 @@ class FactorGenerator:
                                           generated_df: pd.DataFrame,
                                           n_jobs: Optional[int] = None,
                                           batch_size: int = 100) -> Dict[str, Any]:
-        """Filter factors by absolute Spearman correlation vs factors already in DB."""
-        if not selected_fc_name_list:
-            return {
-                'enabled': True,
-                'selected_fc_name_list': [],
-                'filtered_out_fc_name_list': [],
-                'checked_db_factor_count': 0,
-                'threshold': self.relative_threshold,
-                'versions': self.relative_check_version_list,
-                'detail': {},
-                'collection_count': 0,
-            }
-
-        candidate_df = generated_df[['time', 'instrument_id'] + list(selected_fc_name_list)].copy()
-        candidate_df = candidate_df.sort_values(['instrument_id', 'time']).reset_index(drop=True)
-
-        raw_records = get_factor_formula_records(
-            collections=None,
-            versions=self.relative_check_version_list,
+        return filter_fc_by_db_relative_spearman_util(
+            selected_fc_name_list=selected_fc_name_list,
+            generated_df=generated_df,
+            base_df=self.load_base_data(),
+            base_col_list=self.base_col_list,
+            relative_threshold=self.relative_threshold,
+            relative_check_version_list=self.relative_check_version_list,
+            n_jobs=n_jobs or self.n_jobs,
+            batch_size=batch_size,
             database='factors',
+            collections=None,
+            self_compare_version=self.version,
+            self_compare_collection=self._db_collection(),
         )
-        if raw_records.empty:
-            log.info(f'Relative check skipped: no existing factors found in DB with version '
-                     f'{self.relative_check_version_list}.')
-            return {
-                'enabled': True,
-                'selected_fc_name_list': list(selected_fc_name_list),
-                'filtered_out_fc_name_list': [],
-                'checked_db_factor_count': 0,
-                'threshold': self.relative_threshold,
-                'versions': self.relative_check_version_list,
-                'detail': {fc: {'max_abs_spearman': 0.0} for fc in selected_fc_name_list},
-                'collection_count': 0,
-            }
-
-        raw_records = raw_records.copy()
-        raw_records['factor_name'] = raw_records['factor_name'].astype(str)
-        raw_records['version'] = raw_records['version'].astype(str)
-        raw_records['collection'] = raw_records['collection'].astype(str)
-
-        # Avoid self-comparison when current version already exists in target collection.
-        same_run_mask = (raw_records['version'] == str(self.version)) & (raw_records['collection'] == self._db_collection())
-        raw_records = raw_records.loc[~same_run_mask].copy()
-        if raw_records.empty:
-            return {
-                'enabled': True,
-                'selected_fc_name_list': list(selected_fc_name_list),
-                'filtered_out_fc_name_list': [],
-                'checked_db_factor_count': 0,
-                'threshold': self.relative_threshold,
-                'versions': self.relative_check_version_list,
-                'detail': {fc: {'max_abs_spearman': 0.0} for fc in selected_fc_name_list},
-                'collection_count': 0,
-            }
-
-        raw_records['db_factor_key'] = raw_records.apply(
-            lambda x: f"{x['collection']}::{x['version']}::{x['factor_name']}", axis=1
-        )
-        raw_records = raw_records.drop_duplicates(subset=['db_factor_key'], keep='last').reset_index(drop=True)
-
-        base_df = self.load_base_data()
-        base_df = base_df.sort_values(['instrument_id', 'time']).reset_index(drop=True)
-        key_df = candidate_df[['time', 'instrument_id']].copy()
-        candidate_col_list = list(selected_fc_name_list)
-        candidate_values_df = candidate_df[candidate_col_list].apply(pd.to_numeric, errors='coerce')
-
-        detail_map: Dict[str, Dict[str, Any]] = {
-            fc_name: {
-                'max_abs_spearman': 0.0,
-                'matched_db_factor': None,
-            }
-            for fc_name in candidate_col_list
-        }
-
-        def _eval_records_chunk(df_chunk: pd.DataFrame) -> Dict[str, Dict[str, Any]]:
-            formula_map = {
-                row['db_factor_key']: row['formula']
-                for _, row in df_chunk.iterrows()
-                if isinstance(row.get('formula'), str) and row.get('formula', '').strip()
-            }
-            if not formula_map:
-                return {}
-
-            try:
-                existing_df = calc_formula_df(df=base_df, formula_map=formula_map, data_fields=self.base_col_list)
-            except Exception as e:
-                log.warning(f'Relative check chunk skipped due to formula evaluation error: {e}')
-                return {}
-
-
-            aligned_existing = key_df.merge(existing_df, on=['time', 'instrument_id'], how='left', validate='1:1')
-            existing_cols = list(formula_map.keys())
-            existing_values_df = aligned_existing[existing_cols].apply(pd.to_numeric, errors='coerce')
-
-            corr_mat = pd.concat([candidate_values_df, existing_values_df], axis=1).corr(method='spearman').abs()
-            cross = corr_mat.loc[candidate_col_list, existing_cols].fillna(0.0)
-
-            chunk_result: Dict[str, Dict[str, Any]] = {}
-            for fc_name in candidate_col_list:
-                row = cross.loc[fc_name]
-                if row.empty:
-                    continue
-                max_key = row.idxmax()
-                max_corr = float(row.loc[max_key])
-                chunk_result[fc_name] = {
-                    'max_abs_spearman': max_corr,
-                    'matched_db_factor': max_key,
-                }
-            return chunk_result
-
-        # 每batch_size个因子为一组
-        chunk_df_list = [
-            raw_records.iloc[i:i + batch_size].copy()
-            for i in range(0, len(raw_records), batch_size)
-        ]
-        effective_jobs = max(1, min(len(chunk_df_list), (n_jobs or self.n_jobs or 1)))
-        if effective_jobs > 1 and len(chunk_df_list) > 1:
-            chunk_result_list = Parallel(n_jobs=effective_jobs, prefer='threads')(
-                delayed(_eval_records_chunk)(chunk_df)
-                for chunk_df in chunk_df_list
-            )
-        else:
-            chunk_result_list = [_eval_records_chunk(chunk_df) for chunk_df in chunk_df_list]
-
-        for chunk_result in chunk_result_list:
-            for fc_name, item in chunk_result.items():
-                if item.get('max_abs_spearman', 0.0) > detail_map[fc_name]['max_abs_spearman']:
-                    detail_map[fc_name] = item
-
-        selected_fc = []
-        filtered_out_fc = []
-        for fc_name in candidate_col_list:
-            max_corr = float(detail_map[fc_name].get('max_abs_spearman', 0.0))
-            matched_db_factor = detail_map[fc_name].get('matched_db_factor')
-            if max_corr < self.relative_threshold:
-                selected_fc.append(fc_name)
-                decision = 'keep'
-            else:
-                filtered_out_fc.append(fc_name)
-                decision = 'remove'
-
-            log.info(
-                '[RelativeCheck][PerFactor] '
-                f'factor={fc_name}, '
-                f'max_abs_spearman={max_corr:.6f}, '
-                f'matched_db_factor={matched_db_factor}, '
-                f'threshold={self.relative_threshold}, '
-                f'decision={decision}'
-            )
-
-        removed_detail = [
-            {
-                'factor_name': fc_name,
-                'max_abs_spearman': float(detail_map[fc_name].get('max_abs_spearman', 0.0)),
-                'matched_db_factor': detail_map[fc_name].get('matched_db_factor'),
-            }
-            for fc_name in filtered_out_fc
-        ]
-        kept_detail = [
-            {
-                'factor_name': fc_name,
-                'max_abs_spearman': float(detail_map[fc_name].get('max_abs_spearman', 0.0)),
-                'matched_db_factor': detail_map[fc_name].get('matched_db_factor'),
-            }
-            for fc_name in selected_fc
-        ]
-
-        if filtered_out_fc:
-            log.warning(
-                'Relative correlation filter removed factors: '
-                f'threshold={self.relative_threshold}, removed={removed_detail}'
-            )
-        else:
-            log.info(
-                'Relative correlation filter removed factors: '
-                f'threshold={self.relative_threshold}, removed=[]'
-            )
-
-        log.info(
-            'Relative correlation filter kept factors: '
-            f'threshold={self.relative_threshold}, kept={kept_detail}'
-        )
-
-        return {
-            'enabled': True,
-            'selected_fc_name_list': selected_fc,
-            'filtered_out_fc_name_list': filtered_out_fc,
-            'checked_db_factor_count': int(len(raw_records)),
-            'threshold': self.relative_threshold,
-            'versions': self.relative_check_version_list,
-            'detail': detail_map,
-            'kept_detail': kept_detail,
-            'removed_detail': removed_detail,
-            'collection_count': int(raw_records['collection'].nunique()),
-        }
 
     def backtest(self,
                  data: Optional[pd.DataFrame] = None,
@@ -1810,8 +1545,13 @@ class FactorFusioner:
         interest_method: str = 'simple',
         risk_free_rate: bool = False,
         apply_weighted_price: bool = True,
+        check_leakage_count: int = 20,
+        check_relative: bool = True,
+        relative_threshold: float = 0.7,
+        relative_check_version_list: Optional[Sequence[str]] = None,
         max_fusion_count: int = 5,
         fusion_metrics: Union[str, Sequence[str]] = 'ic',
+        version: Optional[str] = None,
         n_jobs: int = 5,
         database: str = 'factors',
         base_col_list: Optional[Sequence[str]] = None,
@@ -1833,8 +1573,13 @@ class FactorFusioner:
         - interest_method: 收益累计方式（如 `simple`/`compound`），传递给回测器。
         - risk_free_rate: 是否在绩效计算中考虑无风险利率。
         - apply_weighted_price: 是否先对价格进行复权，再计算收益与因子。
+        - check_leakage_count: 泄露检查抽样次数。
+        - check_relative: 是否执行与历史融合因子的相似度检查。
+        - relative_threshold: 相似度阈值（Spearman abs），超过则判为过于相似。
+        - relative_check_version_list: 相似度检查版本白名单，None 表示不限制版本。
         - max_fusion_count: 最多融合因子数量（包含首个基石因子）。
         - fusion_metrics: 融合优化目标，可为 `ic`、`sharpe` 或其列表。
+        - version: 融合结果版本号，必填。最终落库记录 version 字段将使用该值。
         - n_jobs: 并行任务数，用于候选因子计算等并行流程。
         - database: 因子公式读取与融合结果写入的数据库名。
         - base_col_list: 计算因子时需要保留的基础字段列表（默认 OHLCV+position）。
@@ -1855,11 +1600,19 @@ class FactorFusioner:
         self.interest_method = interest_method
         self.risk_free_rate = bool(risk_free_rate)
         self.apply_weighted_price = bool(apply_weighted_price)
+        self.check_leakage_count = int(check_leakage_count)
+        self.check_relative = bool(check_relative)
+        self.relative_threshold = float(relative_threshold)
+        self.relative_check_version_list = None if relative_check_version_list is None else list(relative_check_version_list)
         self.max_fusion_count = int(max_fusion_count)
         self.fusion_metrics = self._normalize_fusion_metrics(fusion_metrics)
+        self.version = str(version).strip() if version is not None else ''
         self.n_jobs = int(n_jobs)
         self.database = str(database).strip() or 'factors'
         self.base_col_list = list(base_col_list) if base_col_list else ['open', 'high', 'low', 'close', 'volume', 'position']
+
+        if not self.version:
+            raise ValueError('FactorFusioner requires non-empty `version` and it must be explicitly provided.')
 
         if self.max_fusion_count <= 0:
             raise ValueError(f'max_fusion_count must be positive, got {self.max_fusion_count}.')
@@ -1874,6 +1627,8 @@ class FactorFusioner:
                 'FactorFusioner currently supports exactly one instrument_id for TS metric consistency, '
                 f'got {self.instrument_id_list}.'
             )
+        if not (0.0 <= self.relative_threshold <= 1.0):
+            raise ValueError(f'relative_threshold should be in [0, 1], got {self.relative_threshold}.')
 
     @staticmethod
     def _normalize_str_or_seq(value: Union[str, Sequence[str]], name: str) -> List[str]:
@@ -2115,23 +1870,75 @@ class FactorFusioner:
             if 'all' in annual_sharpe.index else float('nan')
         return {'ic': ic_value, 'sharpe': sharpe_value}
 
+    def check_if_leakage(self,
+                         fc_name_list: Sequence[str],
+                         generated_df: pd.DataFrame,
+                         atol: float = 1e-10,
+                         rtol: float = 1e-8,
+                         raise_error: bool = True) -> Dict[str, Any]:
+        def _gen(df_slice: pd.DataFrame, selected_fc_names: Optional[List[str]] = None) -> pd.DataFrame:
+            selected = [str(x) for x in (selected_fc_names or []) if str(x).strip()]
+            need_cols = ['time', 'instrument_id'] + selected
+            out = generated_df[need_cols].copy()
+            key_df = df_slice[['time', 'instrument_id']].copy()
+            out = key_df.merge(out, on=['time', 'instrument_id'], how='left', validate='1:1')
+            return out
+
+        return check_if_leakage_util(
+            selected_fc_name_list=fc_name_list,
+            load_base_data_fn=self._load_base_data,
+            generate_factor_df_fn=_gen,
+            check_leakage_count=self.check_leakage_count,
+            atol=atol,
+            rtol=rtol,
+            raise_error=raise_error,
+        )
+
+    def filter_fc_by_db_relative_spearman(self,
+                                          selected_fc_name_list: Sequence[str],
+                                          generated_df: pd.DataFrame,
+                                          base_df: pd.DataFrame,
+                                          n_jobs: Optional[int] = None,
+                                          batch_size: int = 100) -> Dict[str, Any]:
+        return filter_fc_by_db_relative_spearman_util(
+            selected_fc_name_list=selected_fc_name_list,
+            generated_df=generated_df,
+            base_df=base_df,
+            base_col_list=self.base_col_list,
+            relative_threshold=self.relative_threshold,
+            relative_check_version_list=self.relative_check_version_list,
+            n_jobs=n_jobs or self.n_jobs,
+            batch_size=batch_size,
+            database='factors',
+            collections=['factor_fusion'],
+            self_compare_version=self.version,
+            self_compare_collection='factor_fusion',
+        )
+
     def _run_backtest_for_signal(self,
                                  eval_df: pd.DataFrame,
-                                 factor_col: str) -> BackTester:
+                                 fc_name_list: Sequence[str],
+                                 calculate_baseline: bool = False) -> BackTester:
+        fc_name_list = [str(x) for x in fc_name_list if str(x).strip()]
+        if not fc_name_list:
+            raise ValueError('fc_name_list cannot be empty for _run_backtest_for_signal.')
+        # Keep order while removing duplicates.
+        fc_name_list = list(dict.fromkeys(fc_name_list))
+        bt_cols = ['time', 'instrument_id', 'future_ret'] + fc_name_list
         bt = BackTester(
-            fc_name_list=[factor_col],
+            fc_name_list=fc_name_list,
             version='fusion_runtime',
             collection='fusion_runtime',
             instrument_type=self.instrument_type,
             instrument_id_list=self.instrument_id_list,
             fc_freq=self.fc_freq,
-            data=eval_df[['time', 'instrument_id', 'future_ret', factor_col]].copy(),
+            data=eval_df[bt_cols].copy(),
             start_time=self.start_time,
             end_time=self.end_time,
             portfolio_adjust_method=self.portfolio_adjust_method,
             interest_method=self.interest_method,
             risk_free_rate=self.risk_free_rate,
-            calculate_baseline=False,
+            calculate_baseline=calculate_baseline,
             apply_weighted_price=False,
             n_jobs=max(1, self.n_jobs),
         )
@@ -2300,11 +2107,48 @@ class FactorFusioner:
         # 3) 生成最终融合信号，并进行一次完整回测用于落库与返回。
         final_fused_df = eval_df[['time', 'instrument_id', 'future_ret']].copy()
         final_fused_df[fusion_col] = pd.to_numeric(eval_df[selected_factor_keys].mean(axis=1), errors='coerce')
-        final_bt = self._run_backtest_for_signal(final_fused_df, fusion_col)
+        for key in selected_factor_keys:
+            final_fused_df[key] = pd.to_numeric(eval_df[key], errors='coerce')
+        final_bt = self._run_backtest_for_signal(
+            final_fused_df,
+            [fusion_col] + list(selected_factor_keys),
+            calculate_baseline=True,
+        )
         final_metrics = self._evaluate_metrics(final_fused_df, fusion_col)
+        leakage_result = self.check_if_leakage(
+            fc_name_list=[fusion_col],
+            generated_df=final_fused_df[['time', 'instrument_id', fusion_col]].copy(),
+            raise_error=False,
+        )
+        relative_result: Optional[Dict[str, Any]] = None
+        persist_allowed = True
+        if not leakage_result.get('passed', False):
+            persist_allowed = False
+            log.warning(
+                '[Fusion][Persist][Skip] leakage check failed, skip persisting fusion factor. '
+                f'failed_factor_list={leakage_result.get("failed_factor_list", [])}'
+            )
+        elif self.check_relative:
+            relative_result = self.filter_fc_by_db_relative_spearman(
+                selected_fc_name_list=[fusion_col],
+                generated_df=final_fused_df[['time', 'instrument_id', fusion_col]].copy(),
+                base_df=base_df,
+                n_jobs=self.n_jobs,
+            )
+            if not relative_result.get('selected_fc_name_list', []):
+                persist_allowed = False
+                log.warning(
+                    '[Fusion][Persist][Skip] relative correlation check failed, skip persisting fusion factor. '
+                    f'threshold={self.relative_threshold}, versions={self.relative_check_version_list}'
+                )
 
         # 4) 组装入选因子的元信息，便于后续追踪来源与公式。
         meta_df = factor_records.set_index('factor_key')
+        selected_factor_keys_by_perf = sorted(
+            selected_factor_keys,
+            key=lambda x: self._metric_sort_key(single_metric_map.get(x, {})),
+            reverse=True,
+        )
         selected_factors_detail = [
             {
                 'factor_key': key,
@@ -2313,13 +2157,18 @@ class FactorFusioner:
                 'collection': str(meta_df.loc[key, 'collection']),
                 'formula': str(meta_df.loc[key, 'formula']),
             }
-            for key in selected_factor_keys
+            for key in selected_factor_keys_by_perf
         ]
 
         # 5) 构建融合后的公式表达式，并将结果写入 factors.fusion_factor。
         fusion_formula = self._build_fusion_formula(selected_factor_keys, factor_records)
-        fusion_version = datetime.now().strftime('%Y%m%d_%H%M%S')
-        fusion_factor_name = f'fusion_{self.fusion_method}_{fusion_version}'
+        fusion_collection = 'factor_fusion'
+        fusion_idx = max(0, len(selected_factor_keys_by_perf) - 1)
+        fusion_factor_name = f'fusion_{self.fusion_method}_{fusion_idx}'
+        fusion_info: Dict[str, List[str]] = {}
+        for item in selected_factors_detail:
+            info_key = f"{item['collection']}:{item['version']}"
+            fusion_info.setdefault(info_key, []).append(str(item['factor_name']))
         fitness_payload = {
             metric: {'value': float(final_metrics.get(metric, float('nan')))}
             for metric in self.fusion_metrics
@@ -2327,29 +2176,42 @@ class FactorFusioner:
 
         perf_summary = final_bt.performance_summary.copy()
         if 'Factor Name' in perf_summary.columns:
+            perf_summary = perf_summary[perf_summary['Factor Name'] == fusion_col].copy()
             perf_summary['Factor Name'] = fusion_factor_name
 
-        update_factor_info(
-            selected_fc_name_list=[fusion_factor_name],
-            performance_summary=perf_summary,
-            factor_formula_map={fusion_factor_name: fusion_formula},
-            factor_fitness_map={fusion_factor_name: fitness_payload},
-            instrument_id_list=self.instrument_id_list,
-            method='fusion',
-            version=fusion_version,
-            start_date=self.start_time,
-            end_date=self.end_time,
-            database='factors',
-            collection='fusion_factor',
-        )
-        log.info(
-            '[Fusion][Persist] '
-            f'database=factors, collection=fusion_factor, '
-            f'version={fusion_version}, factor_name={fusion_factor_name}, '
-            f'selected_factor_keys={selected_factor_keys}, '
-            f'formula={fusion_formula}, '
-            f'fitness={fitness_payload}'
-        )
+        if len(selected_factor_keys) <= 1:
+            log.info(
+                '[Fusion][Persist][Skip] '
+                'selected_factor_count<=1, skip persisting to factor_fusion because no real fusion happened. '
+                f'selected_factor_keys={selected_factor_keys}, '
+                f'base_formula={fusion_formula}'
+            )
+        elif not persist_allowed:
+            log.info('[Fusion][Persist][Skip] persistence disabled by leakage/relative checks.')
+        else:
+            update_factor_info(
+                selected_fc_name_list=[fusion_factor_name],
+                performance_summary=perf_summary,
+                factor_formula_map={fusion_factor_name: fusion_formula},
+                factor_fitness_map={fusion_factor_name: fitness_payload},
+                instrument_id_list=self.instrument_id_list,
+                method='fusion',
+                version=self.version,
+                start_date=self.start_time,
+                end_date=self.end_time,
+                extra_record_fields={'fusion_info': fusion_info},
+                database='factors',
+                collection=fusion_collection,
+            )
+            log.info(
+                '[Fusion][Persist] '
+                f'database=factors, collection={fusion_collection}, '
+                f'version={self.version}, factor_name={fusion_factor_name}, '
+                f'selected_factor_keys={selected_factor_keys}, '
+                f'formula={fusion_formula}, '
+                f'fusion_info={fusion_info}, '
+                f'fitness={fitness_payload}'
+            )
 
         log.info(
             'Fusion finished: '
@@ -2364,6 +2226,8 @@ class FactorFusioner:
             'selected_factors_detail': selected_factors_detail,
             'final_metrics': final_metrics,
             'single_factor_metrics': single_metric_map,
+            'leakage_check': leakage_result,
+            'relative_check': relative_result,
             'fused_col': fusion_col,
             'fused_data': final_fused_df,
             'bt': final_bt,
