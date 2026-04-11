@@ -1852,11 +1852,12 @@ class FactorFusioner:
                           eval_df: pd.DataFrame,
                           factor_col: str) -> Dict[str, float]:
         data_i = eval_df[['time', 'instrument_id', 'future_ret', factor_col]].copy()
-        gross_ret_df, _, _ = get_ts_ret_and_turnover(data_i, factor_col)
-        gross_ret_df = gross_ret_df.reset_index()
+        _, net_ret_df, _ = get_ts_ret_and_turnover(data_i, factor_col)
+        net_ret_df = net_ret_df.reset_index()
 
-        annual_ret = get_annualized_ret(gross_ret_df, factor_col, self.interest_method)
-        annual_vol = get_annualized_volatility(gross_ret_df, factor_col)
+        # Fusion Sharpe uses fee-adjusted net return series for consistency with executable performance.
+        annual_ret = get_annualized_ret(net_ret_df, factor_col, self.interest_method)
+        annual_vol = get_annualized_volatility(net_ret_df, factor_col)
         annual_sharpe = get_annualized_sharpe(annual_ret, annual_vol)
         ic_df, _ = get_annualized_ts_ic_and_t_corr(
             data_i,
