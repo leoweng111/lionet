@@ -31,7 +31,7 @@ from .factor_indicators import (
     get_ts_ret_and_turnover,
 )
 from .factor_ops import available_operator_prompt_text, calc_formula_df, calc_formula_series
-from .factor_utils import get_future_ret, get_weighted_price, rolling_normalize_features
+from .factor_utils import get_future_ret, get_weighted_price
 from .gp_factor_engine import GPCandidate, run_gp_evolution
 
 
@@ -825,16 +825,6 @@ class FactorGenerator:
             raise ValueError('No factor columns available for leakage check.')
 
         full_factor_df = self.generate_factor_df(base_df, selected_fc_names=selected_fc_name_list)
-        if self.apply_rolling_norm:
-            full_factor_df = rolling_normalize_features(
-                df=full_factor_df,
-                factor_cols=list(selected_fc_name_list),
-                rolling_norm_window=self.rolling_norm_window,
-                rolling_norm_min_periods=self.rolling_norm_min_periods,
-                rolling_norm_eps=self.rolling_norm_eps,
-                rolling_norm_clip=self.rolling_norm_clip,
-                instrument_col='instrument_id',
-            )
 
         all_time_list = sorted(full_factor_df['time'].dropna().unique().tolist())
         if not all_time_list:
@@ -852,16 +842,6 @@ class FactorGenerator:
             log.info(f'Checking leakage for time slice <= {t}...')
             df_slice = base_df.loc[base_df['time'] <= t].copy()
             factor_df_slice = self.generate_factor_df(df_slice, selected_fc_names=selected_fc_name_list)
-            if self.apply_rolling_norm:
-                factor_df_slice = rolling_normalize_features(
-                    df=factor_df_slice,
-                    factor_cols=list(selected_fc_name_list),
-                    rolling_norm_window=self.rolling_norm_window,
-                    rolling_norm_min_periods=self.rolling_norm_min_periods,
-                    rolling_norm_eps=self.rolling_norm_eps,
-                    rolling_norm_clip=self.rolling_norm_clip,
-                    instrument_col='instrument_id',
-                )
             factor_df_slice = factor_df_slice.loc[
                 factor_df_slice['time'] == t,
                 ['time', 'instrument_id'] + selected_fc_name_list,
@@ -1067,16 +1047,6 @@ class FactorGenerator:
 
         candidate_df = generated_df[['time', 'instrument_id'] + list(selected_fc_name_list)].copy()
         candidate_df = candidate_df.sort_values(['instrument_id', 'time']).reset_index(drop=True)
-        if self.apply_rolling_norm:
-            candidate_df = rolling_normalize_features(
-                df=candidate_df,
-                factor_cols=list(selected_fc_name_list),
-                rolling_norm_window=self.rolling_norm_window,
-                rolling_norm_min_periods=self.rolling_norm_min_periods,
-                rolling_norm_eps=self.rolling_norm_eps,
-                rolling_norm_clip=self.rolling_norm_clip,
-                instrument_col='instrument_id',
-            )
 
         raw_records = get_factor_formula_records(
             collections=None,
@@ -1151,16 +1121,6 @@ class FactorGenerator:
                 log.warning(f'Relative check chunk skipped due to formula evaluation error: {e}')
                 return {}
 
-            if self.apply_rolling_norm:
-                existing_df = rolling_normalize_features(
-                    df=existing_df,
-                    factor_cols=list(formula_map.keys()),
-                    rolling_norm_window=self.rolling_norm_window,
-                    rolling_norm_min_periods=self.rolling_norm_min_periods,
-                    rolling_norm_eps=self.rolling_norm_eps,
-                    rolling_norm_clip=self.rolling_norm_clip,
-                    instrument_col='instrument_id',
-                )
 
             aligned_existing = key_df.merge(existing_df, on=['time', 'instrument_id'], how='left', validate='1:1')
             existing_cols = list(formula_map.keys())

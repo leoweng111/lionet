@@ -2,7 +2,17 @@
 
 import argparse
 import ast
+import sys
+from pathlib import Path
 from typing import Dict
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+SCRIPT_DIR = str(Path(__file__).resolve().parent)
+if sys.path and Path(sys.path[0]).resolve() == Path(SCRIPT_DIR).resolve():
+    # Replace script directory to avoid shadowing stdlib modules like `logging`.
+    sys.path[0] = str(PROJECT_ROOT)
+elif str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
 from mongo.mongify import get_data, update_one_data
 from utils.logging import log
@@ -113,10 +123,11 @@ def main() -> None:
     parser = argparse.ArgumentParser(description='Wrap factor formulas with OpRollNorm in one DB collection.')
     parser.add_argument('--database', type=str, default='factors')
     parser.add_argument('--collection', type=str, default='genetic_programming')
-    parser.add_argument('--rolling-norm-window', type=int, default=30)
-    parser.add_argument('--rolling-norm-min-periods', type=int, default=20)
-    parser.add_argument('--rolling-norm-eps', type=float, default=1e-8)
-    parser.add_argument('--rolling-norm-clip', type=float, default=5.0)
+    parser.add_argument('--rolling-norm-window', '--rolling_norm_window', dest='rolling_norm_window', type=int, default=30)
+    parser.add_argument('--rolling-norm-min-periods', '--rolling_norm_min_periods',
+                        dest='rolling_norm_min_periods', type=int, default=20)
+    parser.add_argument('--rolling-norm-eps', '--rolling_norm_eps', dest='rolling_norm_eps', type=float, default=1e-8)
+    parser.add_argument('--rolling-norm-clip', '--rolling_norm_clip', dest='rolling_norm_clip', type=float, default=5.0)
     args = parser.parse_args()
 
     summary = modify_factor_with_rolling_norm(
