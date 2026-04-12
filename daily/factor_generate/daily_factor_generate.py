@@ -248,8 +248,9 @@ def main(argv: Optional[Sequence[str]] = None):
         print(f"[schedule] Trigger daily factor generation at 22:00, version={args.version}")
         run_daily_once(args)
 
-    schedule.every().day.at('22:00').do(_job)
-    print('[schedule] Started. Daily factor generation will run at 22:00.')
+    schedule_time = '12:15'
+    schedule.every().day.at(schedule_time).do(_job)
+    print(f'[schedule] Started. Daily factor generation will run at {schedule_time}.')
     while True:
         schedule.run_pending()
         time.sleep(60)
