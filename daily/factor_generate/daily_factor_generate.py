@@ -32,8 +32,8 @@ def build_parser() -> argparse.ArgumentParser:
                         help='One instrument id (C0) or comma-separated ids (C0,FG0).')
     parser.add_argument('--start_time', type=str, default='20200101', help='Backtest start time in YYYYMMDD.')
     parser.add_argument('--end_time', type=str, default='20241231', help='Backtest end time in YYYYMMDD.')
-    parser.add_argument('--version', type=str, default='20260407_gp_test_1',
-                        help='Version suffix. Default: 20260407_gp_test_1.')
+    parser.add_argument('--version', type=str, default=None,
+                        help='Version suffix. Default: YYMMDD.')
     parser.add_argument('--n_jobs', type=int, default=5)
 
     parser.add_argument('--instrument_type', type=str, default='futures_continuous_contract',
@@ -95,7 +95,8 @@ def build_parser() -> argparse.ArgumentParser:
                         help='Total attempts for GP mining when persistence may fail.')
 
     parser.add_argument('--check_leakage_count', type=int, default=20)
-    parser.add_argument('--only', type=str, default='all', choices=['all', 'llm_prompt', 'gp'])
+    parser.add_argument('--generate_method', type=str, default='genetic_programming',
+                        help='Generation methods: genetic_programming / llm_prompt / genetic_programming,llm_prompt.')
     parser.add_argument('--execute_now', action=argparse.BooleanOptionalAction, default=False,
                         help='Execute immediately once and exit. Default behavior is scheduled daily execution.')
     return parser
@@ -123,10 +124,24 @@ def run_daily_once(args) -> dict:
     relative_versions = [x.strip() for x in args.relative_check_version_list.split(',') if x.strip()] \
         if args.relative_check_version_list else None
 
+    raw_generate_method = getattr(args, 'generate_method', 'genetic_programming')
+    method_set = {
+        x.strip() for x in str(raw_generate_method).split(',') if x.strip()
+    }
+    if not method_set:
+        method_set = {'genetic_programming'}
+    valid_methods = {'genetic_programming', 'llm_prompt'}
+    invalid_methods = sorted([x for x in method_set if x not in valid_methods])
+    if invalid_methods:
+        raise ValueError(
+            f'Invalid generate_method={invalid_methods}. '
+            'Only support genetic_programming and/or llm_prompt.'
+        )
+
     llm_result = None
     gp_result = None
 
-    if args.only in ['all', 'llm_prompt']:
+    if 'llm_prompt' in method_set:
         llm_result = run_llm_prompt_factor_generate(
             instrument_type=args.instrument_type,
             instrument_id_list=instrument_id,
@@ -160,7 +175,7 @@ def run_daily_once(args) -> dict:
         print(f"[daily][llm_prompt] config_path={llm_result.get('config_path')}")
         print(f"[daily][llm_prompt] selected_factor_count={len(llm_result.get('selected_fc_name_list', []))}")
 
-    if args.only in ['all', 'gp']:
+    if 'genetic_programming' in method_set:
         gp_result = run_gp_factor_generate(
             instrument_type=args.instrument_type,
             instrument_id_list=instrument_id,

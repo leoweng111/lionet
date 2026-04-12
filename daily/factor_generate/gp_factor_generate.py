@@ -73,7 +73,7 @@ def run_gp_factor_generate(
     gp_elite_stagnation_generation_count: int = 4,
     gp_max_shock_generation: int = 3,
     attempt_time: int = 3,
-    version: Optional[str] = '20260407_gp_test_1',
+    version: Optional[str] = '20260411_gp_test_1',
 ):
     version = version or datetime.now().strftime('%Y%m%d')
     total_attempts = max(1, int(attempt_time))
@@ -170,8 +170,8 @@ def build_parser() -> argparse.ArgumentParser:
                         help='One instrument id (C0) or comma-separated ids (C0,FG0).')
     parser.add_argument('--start_time', type=str, default='20200101', help='Backtest start time in YYYYMMDD.')
     parser.add_argument('--end_time', type=str, default='20241231', help='Backtest end time in YYYYMMDD.')
-    parser.add_argument('--version', type=str, default='20260407_gp_test_1',
-                        help='Config version suffix. Default: 20260407_gp_test_1.')
+    parser.add_argument('--version', type=str, default='20260411_gp_test_1',
+                        help='Config version suffix. Default: 20260411_gp_test_1.')
 
     parser.add_argument('--instrument_type', type=str, default='futures_continuous_contract',
                         choices=['futures_continuous_contract'])
