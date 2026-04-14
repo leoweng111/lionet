@@ -1406,6 +1406,7 @@ class GeneticFactorGenerator(FactorGenerator):
         self.apply_formula_rolling_norm = bool(apply_rolling_norm)
 
         self.factor_tree_map: Dict[str, Any] = {}
+        self.cancel_event = None  # threading.Event, set externally to cancel GP
 
         assert self.fitness_metric in ['ic', 'sharpe'], \
             f'Unsupported fitness_metric={self.fitness_metric}, use ic/sharpe.'
@@ -1514,6 +1515,7 @@ class GeneticFactorGenerator(FactorGenerator):
             assumed_initial_capital=self.gp_assumed_initial_capital,
             elite_stagnation_generation_count=self.gp_elite_stagnation_generation_count,
             max_shock_generation=self.gp_max_shock_generation,
+            cancel_event=self.cancel_event,
         )
 
         if not candidates:

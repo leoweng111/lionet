@@ -7,6 +7,7 @@ without changing existing gp.py scripts.
 import copy
 import random
 import re
+import threading
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Sequence, Tuple, cast
 
@@ -817,6 +818,7 @@ def run_gp_evolution(
     elite_relative_threshold: float = 0.65,
     elite_stagnation_generation_count: int = 4,
     max_shock_generation: int = 3,
+    cancel_event: Optional[threading.Event] = None,
 ) -> List[GPCandidate]:
     """运行遗传规划（GP）进行因子挖掘。
 +
@@ -912,6 +914,11 @@ def run_gp_evolution(
     shock_count = 0
 
     for gen_idx in range(generations):
+        # ── Check for external cancellation ──
+        if cancel_event is not None and cancel_event.is_set():
+            log.warning(f'GP evolution cancelled at generation {gen_idx + 1}/{generations}.')
+            break
+
         log.info(f'GP generation {gen_idx + 1}/{generations} scoring started.')
         scored_pop: List[Tuple[FactorNode, float]] = []
         penalized_fitness_values: List[float] = []
