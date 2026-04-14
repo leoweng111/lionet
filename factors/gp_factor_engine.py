@@ -991,22 +991,27 @@ def run_gp_evolution(
             # 尝试将当前因子加入精英库（Elite Archive）
             # 使用原始（未取向）的因子值进行相关性比较，因为 |corr| 对
             # 符号翻转不变，无需使用 oriented_node。
+            #
+            # 注意：传给 try_add 的 node 必须是 **原始 tree**（不含
+            # OpRollNorm），因为精英库中的节点会被注入下一代种群。如果
+            # 存入已包裹 OpRollNorm 的节点，后续评分/入库时会再次包裹
+            # OpRollNorm，导致 OpRollNorm 逐代嵌套叠加。
             # ----------------------------------------------------------
             try:
-                eval_node_for_archive = copy.deepcopy(tree)
+                eval_node_for_values = copy.deepcopy(tree)
                 if apply_rolling_norm:
-                    eval_node_for_archive = OpRollNorm(
-                        eval_node_for_archive,
+                    eval_node_for_values = OpRollNorm(
+                        eval_node_for_values,
                         window=rolling_norm_window,
                         min_periods=rolling_norm_min_periods,
                         eps=rolling_norm_eps,
                         clip=rolling_norm_clip,
                     )
                 factor_values_for_archive = pd.to_numeric(
-                    eval_node_for_archive.calc(df), errors='coerce'
+                    eval_node_for_values.calc(df), errors='coerce'
                 ).values.astype(float)
                 added, removed_count = elite_archive.try_add(
-                    eval_node_for_archive,
+                    tree,
                     penalized_fitness,
                     factor_values_for_archive,
                     original_fitness,
@@ -1208,6 +1213,24 @@ def run_gp_evolution(
         population = next_gen[:population_size]
 
     elite_candidates = elite_archive.get_elite_candidates_sorted()
+
+    # ------------------------------------------------------------------
+    # 精英库中存储的是原始 tree（不含 OpRollNorm），以避免逐代嵌套。
+    # 返回前统一包裹一层 OpRollNorm（当 apply_rolling_norm=True），
+    # 使最终输出的公式中包含滚动标准化。
+    # ------------------------------------------------------------------
+    if apply_rolling_norm:
+        for cand in elite_candidates:
+            wrapped = OpRollNorm(
+                cand.node,
+                window=rolling_norm_window,
+                min_periods=rolling_norm_min_periods,
+                eps=rolling_norm_eps,
+                clip=rolling_norm_clip,
+            )
+            cand.node = wrapped
+            cand.formula = wrapped.to_formula()
+
     log.info(
         f'GP finished: total_elites={len(elite_candidates)}, '
         f'return_top_n={min(max_factor_count, len(elite_candidates))}'
