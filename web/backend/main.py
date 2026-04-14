@@ -115,7 +115,7 @@ class GPMiningParams(BaseModel):
     check_leakage_count: int = 20
     check_relative: bool = True
     relative_threshold: float = 0.7
-    gp_generations: int = 60
+    gp_generations: int = 20
     gp_population_size: int = 500
     gp_max_depth: int = 6
     gp_elite_size: int = 50
@@ -144,8 +144,9 @@ class GPMiningParams(BaseModel):
 
 
 class BacktestParams(BaseModel):
-    version: str
-    fc_name_list: List[str]
+    version: Optional[str] = None
+    fc_name_list: Optional[List[str]] = None
+    formula: Optional[str] = None
     collection: str = "genetic_programming"
     instrument_type: str = "futures_continuous_contract"
     instrument_id_list: str = "C0"
@@ -360,8 +361,14 @@ async def start_mining(params: GPMiningParams):
         try:
             loop = asyncio.get_event_loop()
             result = await loop.run_in_executor(None, _execute_mining, params, task_id, cancel_event)
-            # If already terminated by user, don't overwrite status
+            # If terminated by user, still save partial results but keep terminated status
             if tasks[task_id]["status"] == "terminated":
+                tasks[task_id]["result"] = result
+                _save_task_to_db(task_id, params.dict(), "terminated", {
+                    "selected_fc_name_list": result.get("selected_fc_name_list", []),
+                    "version": result.get("version", ""),
+                    "message": result.get("message", "Task terminated by user."),
+                })
                 return
             tasks[task_id]["result"] = result
             tasks[task_id]["status"] = "completed"
@@ -372,8 +379,9 @@ async def start_mining(params: GPMiningParams):
                 "message": result.get("message", ""),
             })
         except Exception as e:
-            # If already terminated by user, don't overwrite status
+            # If terminated by user, keep status but note the error
             if tasks[task_id]["status"] == "terminated":
+                tasks[task_id]["progress"] = "已终止（用户手动终止）"
                 return
             tasks[task_id]["status"] = "failed"
             tasks[task_id]["error"] = traceback.format_exc()
@@ -512,8 +520,7 @@ async def terminate_mining(task_id: str):
 @app.post("/api/backtest")
 async def run_backtest(params: BacktestParams):
     try:
-        bt = BackTester(
-            fc_name_list=params.fc_name_list, version=params.version,
+        bt_kwargs = dict(
             collection=params.collection, instrument_type=params.instrument_type,
             instrument_id_list=params.instrument_id_list, fc_freq=params.fc_freq,
             start_time=params.start_time, end_time=params.end_time,
@@ -522,12 +529,36 @@ async def run_backtest(params: BacktestParams):
             calculate_baseline=params.calculate_baseline,
             apply_weighted_price=params.apply_weighted_price, n_jobs=params.n_jobs,
         )
+        if params.formula:
+            bt_kwargs["formula"] = params.formula
+            bt_kwargs["version"] = params.version or "__formula__"
+            bt_kwargs["fc_name_list"] = ["formula_factor"]
+        else:
+            if not params.version or not params.fc_name_list:
+                raise ValueError("version and fc_name_list are required when formula is not provided.")
+            bt_kwargs["version"] = params.version
+            bt_kwargs["fc_name_list"] = params.fc_name_list
+
+        bt = BackTester(**bt_kwargs)
         loop = asyncio.get_event_loop()
         await loop.run_in_executor(None, bt.backtest)
         nav_data = _extract_nav_data(bt)
-        return {"status": "ok", "nav_data": nav_data, "fc_name_list": params.fc_name_list, "version": params.version}
+
+        # In formula mode, rename 'formula_factor' to the actual formula in the response
+        if params.formula and "formula_factor" in nav_data.get("nav_curves", {}):
+            nav_data["nav_curves"][params.formula] = nav_data["nav_curves"].pop("formula_factor")
+            for rec in nav_data.get("performance_summary", []):
+                if rec.get("Factor Name") == "formula_factor":
+                    rec["Factor Name"] = params.formula
+
+        return {
+            "status": "ok", "nav_data": nav_data,
+            "fc_name_list": [params.formula] if params.formula else params.fc_name_list,
+            "version": params.version or "",
+            "formula": params.formula,
+        }
     except Exception as e:
-        raise HTTPException(status_code=500, detail=traceback.format_exc())
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 # ── Strategy (batch) ──────────────────────────────────────────────────
@@ -603,7 +634,7 @@ async def get_task_detail(task_id: str):
             "task_id": task_id, "status": task["status"], "progress": task["progress"],
             "started_at": task["started_at"], "error": task.get("error"),
             "gp_progress": task.get("gp_progress"), "params": task.get("params"),
-            "result": task.get("result") if task["status"] == "completed" else None,
+            "result": task.get("result") if task["status"] in ("completed", "terminated") else None,
         }
     # Fallback to DB
     try:

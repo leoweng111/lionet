@@ -20,8 +20,8 @@ class BackTester:
     """
 
     def __init__(self,
-                 fc_name_list: Union[str, List],
-                 version: str,
+                 fc_name_list: Union[str, List] = None,
+                 version: str = None,
                  collection: Union[str, List] = 'genetic_programming',
                  instrument_type: str = 'futures_continuous_contract',
                  instrument_id_list: Union[str, List] = 'C0',
@@ -34,7 +34,8 @@ class BackTester:
                  risk_free_rate: bool = False,
                  calculate_baseline: bool = True,
                  apply_weighted_price: bool = True,
-                 n_jobs: int = 5):
+                 n_jobs: int = 5,
+                 formula: str = None):
         # todo: 数据频率，调仓频率和收益率计算频率三者相关
         # 对数据频率1min，调仓频率为1day情况，计算IC需要先将一分钟的数据聚合成一天的，然后计算日频收益率，再计算日频因子值和日频收益率
         # 之间的相关系数。
@@ -76,6 +77,7 @@ class BackTester:
         self.calculate_baseline = calculate_baseline
         self.apply_weighted_price = apply_weighted_price
         self.n_jobs = n_jobs
+        self.formula = formula
 
         self.fc_name_with_param_list = None
         self.performance_dc = None
@@ -85,12 +87,19 @@ class BackTester:
         self.is_preprocessed = isinstance(self.data, pd.DataFrame)
         self._did_preprocess = False
 
-        if not isinstance(self.version, str) or not self.version.strip():
-            raise ValueError('BackTester requires a non-empty `version` to resolve factor formulas precisely.')
+        # Formula mode: derive fc_name_list and relax version/collection checks
+        if self.formula:
+            self.fc_name_list = ['formula_factor']
+            if not self.version:
+                self.version = '__formula__'
+        else:
+            if not isinstance(self.version, str) or not self.version.strip():
+                raise ValueError('BackTester requires a non-empty `version` to resolve factor formulas precisely.')
+
         if isinstance(self.collection, str):
             self.collection = [self.collection]
         self.collection = [str(x).strip() for x in self.collection if str(x).strip()]
-        if not self.collection:
+        if not self.formula and not self.collection:
             raise ValueError('BackTester requires non-empty `collection` to resolve factor formulas precisely.')
 
         assert self.fc_freq in ['1m', '5m', '1d'], f'Only support 1m, 5m or 1d fc_freq, but got {fc_freq} instead.'
@@ -101,18 +110,20 @@ class BackTester:
                                                           'than factor frequency'
         if isinstance(self.fc_name_list, str):
             self.fc_name_list = [self.fc_name_list]
-        fc_name_counter = Counter(self.fc_name_list)
-        duplicated_fc_names = sorted([x for x, cnt in fc_name_counter.items() if cnt > 1])
-        if duplicated_fc_names:
-            raise ValueError(f'fc_name_list contains duplicated factor names: {duplicated_fc_names}')
+        if not self.formula:
+            fc_name_counter = Counter(self.fc_name_list)
+            duplicated_fc_names = sorted([x for x, cnt in fc_name_counter.items() if cnt > 1])
+            if duplicated_fc_names:
+                raise ValueError(f'fc_name_list contains duplicated factor names: {duplicated_fc_names}')
         if isinstance(self.instrument_id_list, str):
             self.instrument_id_list = [self.instrument_id_list]
 
         # if data is provided outside
         if isinstance(self.data, pd.DataFrame):
             # when data is provided, it should have been preprocessed, and we will not preprocess it here.
-            for col in ['time', 'instrument_id', 'future_ret'] + self.fc_name_list:
-                assert col in self.data.columns, f'Provided data does not contain column {col}.'
+            if not self.formula:
+                for col in ['time', 'instrument_id', 'future_ret'] + self.fc_name_list:
+                    assert col in self.data.columns, f'Provided data does not contain column {col}.'
 
             if self.apply_weighted_price:
                 for col in ['weighted_factor', 'open', 'high', 'low', 'close']:
@@ -171,13 +182,22 @@ class BackTester:
         if self.apply_weighted_price:
             self.data = get_weighted_price(self.data)
 
-        self.data = get_factor_value(
-            self.data,
-            self.fc_name_list,
-            version=self.version,
-            collection=self.collection,
-            n_jobs=self.n_jobs,
-        )
+        if self.formula:
+            # Compute factor values from formula expression
+            from factors.factor_ops import calc_formula_series
+            data_fields = ['open', 'high', 'low', 'close', 'volume', 'position']
+            fc_name = self.fc_name_list[0]
+            self.data[fc_name] = calc_formula_series(
+                self.data, formula=self.formula, data_fields=data_fields,
+            )
+        else:
+            self.data = get_factor_value(
+                self.data,
+                self.fc_name_list,
+                version=self.version,
+                collection=self.collection,
+                n_jobs=self.n_jobs,
+            )
 
 
         # get return as label

@@ -11,10 +11,25 @@
           <div class="param-scroll-panel">
           <el-form :model="p" label-width="auto" size="small">
             <div class="param-section"><el-divider content-position="left">因子选择</el-divider>
-              <el-form-item label="集合"><el-select v-model="p.collection" style="width:100%" @change="onCollChange"><el-option v-for="c in collections" :key="c" :label="c" :value="c" /></el-select></el-form-item>
-              <el-form-item label="版本"><el-select v-model="p.version" filterable style="width:100%" @change="onVerChange"><el-option v-for="v in filteredVersions" :key="v" :label="v" :value="v" /></el-select></el-form-item>
-              <el-form-item label="因子"><el-select v-model="p.fc_name_list" multiple filterable collapse-tags collapse-tags-tooltip style="width:100%" placeholder="可多选因子"><el-option v-for="f in availableFactors" :key="f" :label="f" :value="f" /></el-select></el-form-item>
-              <div style="text-align:right;margin-bottom:8px;"><el-button size="small" link type="primary" @click="p.fc_name_list=[...availableFactors]" :disabled="!availableFactors.length">全选</el-button><el-button size="small" link @click="p.fc_name_list=[]">清空选择</el-button></div>
+              <el-form-item label="输入模式">
+                <el-radio-group v-model="inputMode" size="small">
+                  <el-radio-button value="db">数据库因子</el-radio-button>
+                  <el-radio-button value="formula">公式输入</el-radio-button>
+                </el-radio-group>
+              </el-form-item>
+
+              <template v-if="inputMode === 'db'">
+                <el-form-item label="集合"><el-select v-model="p.collection" style="width:100%" @change="onCollChange"><el-option v-for="c in collections" :key="c" :label="c" :value="c" /></el-select></el-form-item>
+                <el-form-item label="版本"><el-select v-model="p.version" filterable style="width:100%" @change="onVerChange"><el-option v-for="v in filteredVersions" :key="v" :label="v" :value="v" /></el-select></el-form-item>
+                <el-form-item label="因子"><el-select v-model="p.fc_name_list" multiple filterable collapse-tags collapse-tags-tooltip style="width:100%" placeholder="可多选因子"><el-option v-for="f in availableFactors" :key="f" :label="f" :value="f" /></el-select></el-form-item>
+                <div style="text-align:right;margin-bottom:8px;"><el-button size="small" link type="primary" @click="p.fc_name_list=[...availableFactors]" :disabled="!availableFactors.length">全选</el-button><el-button size="small" link @click="p.fc_name_list=[]">清空选择</el-button></div>
+              </template>
+
+              <template v-else>
+                <el-form-item label="因子公式">
+                  <el-input v-model="formulaInput" type="textarea" :autosize="{ minRows: 2, maxRows: 6 }" placeholder="输入因子公式，例如: OpRollNorm(TsMean(close, 10), 30, 20, 1e-08, 5)" />
+                </el-form-item>
+              </template>
             </div>
             <div class="param-section"><el-divider content-position="left">基础参数</el-divider>
               <el-form-item label="合约"><el-input v-model="p.instrument_id_list" /></el-form-item>
@@ -53,8 +68,10 @@ import NavChart from '../components/NavChart.vue'
 const SK = 'lionet_bt'
 const collections = ref([]), versionMap = ref({}), allVersions = ref([]), availableFactors = ref([])
 const loading = ref(false), oosStart = ref(''), oosEnd = ref('')
+const inputMode = ref('db')
+const formulaInput = ref('')
 const p = reactive({ version: '', fc_name_list: [], collection: 'genetic_programming', instrument_type: 'futures_continuous_contract', instrument_id_list: 'C0', fc_freq: '1d', start_time: '20200101', end_time: '20241231', portfolio_adjust_method: '1D', interest_method: 'simple', risk_free_rate: false, calculate_baseline: true, apply_weighted_price: true, n_jobs: 5 })
-const resetParams = () => { const kv = p.version, kf = [...p.fc_name_list], kc = p.collection; Object.assign(p, { version: kv, fc_name_list: kf, collection: kc, instrument_type: 'futures_continuous_contract', instrument_id_list: 'C0', fc_freq: '1d', start_time: '20200101', end_time: '20241231', portfolio_adjust_method: '1D', interest_method: 'simple', risk_free_rate: false, calculate_baseline: true, apply_weighted_price: true, n_jobs: 5 }); oosStart.value = ''; oosEnd.value = '' }
+const resetParams = () => { const kv = p.version, kf = [...p.fc_name_list], kc = p.collection; Object.assign(p, { version: kv, fc_name_list: kf, collection: kc, instrument_type: 'futures_continuous_contract', instrument_id_list: 'C0', fc_freq: '1d', start_time: '20200101', end_time: '20241231', portfolio_adjust_method: '1D', interest_method: 'simple', risk_free_rate: false, calculate_baseline: true, apply_weighted_price: true, n_jobs: 5 }); oosStart.value = ''; oosEnd.value = ''; formulaInput.value = '' }
 const isR = ref(null), oosR = ref(null)
 const filteredVersions = computed(() => p.collection && versionMap.value[p.collection] ? versionMap.value[p.collection] : allVersions.value)
 const sCols = (r) => { const s = r?.nav_data?.performance_summary; return s?.length ? Object.keys(s[0]) : [] }
@@ -62,7 +79,29 @@ const fcSum = (r, fn) => { const s = r?.nav_data?.performance_summary || []; con
 const fetchVersions = async () => { try { const { data } = await getVersions(); collections.value = data.collections || []; versionMap.value = data.version_map || {}; allVersions.value = data.all_versions || [] } catch { /* */ } }
 const onCollChange = () => { p.version = ''; p.fc_name_list = []; availableFactors.value = [] }
 const onVerChange = async () => { p.fc_name_list = []; if (!p.version) { availableFactors.value = []; return }; try { const q = { version: p.version }; if (p.collection) q.collection = p.collection; const { data } = await getFactors(q); availableFactors.value = (data.factors || []).map(f => f.factor_name) } catch { availableFactors.value = [] } }
-const handleBt = async (isOOS) => { if (!p.version || !p.fc_name_list.length) { ElMessage.warning('请先选择版本和因子'); return }; loading.value = true; const pl = { ...p }; if (isOOS) { pl.start_time = oosStart.value; pl.end_time = oosEnd.value }; try { const { data } = await runBacktest(pl); if (isOOS) oosR.value = data; else isR.value = data; ElMessage.success((isOOS ? '样本外' : '样本内') + '回测完成') } catch (e) { ElMessage.error('回测失败: ' + (e.response?.data?.detail || e.message)) } finally { loading.value = false } }
+const handleBt = async (isOOS) => {
+  if (inputMode.value === 'db') {
+    if (!p.version || !p.fc_name_list.length) { ElMessage.warning('请先选择版本和因子'); return }
+  } else {
+    if (!formulaInput.value.trim()) { ElMessage.warning('请输入因子公式'); return }
+  }
+  loading.value = true
+  const pl = { ...p }
+  if (inputMode.value === 'formula') {
+    pl.formula = formulaInput.value.trim()
+    pl.version = ''
+    pl.fc_name_list = []
+  }
+  if (isOOS) { pl.start_time = oosStart.value; pl.end_time = oosEnd.value }
+  try {
+    const { data } = await runBacktest(pl)
+    if (isOOS) oosR.value = data; else isR.value = data
+    ElMessage.success((isOOS ? '样本外' : '样本内') + '回测完成')
+  } catch (e) {
+    const detail = e.response?.data?.detail || e.message || '未知错误'
+    ElMessage.error({ message: '回测失败: ' + detail, duration: 8000, showClose: true })
+  } finally { loading.value = false }
+}
 const clearResults = () => { isR.value = null; oosR.value = null; sessionStorage.removeItem(SK) }
 watch([isR, oosR], () => { try { sessionStorage.setItem(SK, JSON.stringify({ is: isR.value, oos: oosR.value })) } catch { /* */ } }, { deep: true })
 onMounted(() => { fetchVersions(); try { const s = sessionStorage.getItem(SK); if (s) { const d = JSON.parse(s); isR.value = d.is; oosR.value = d.oos } } catch { /* */ }; const pf = sessionStorage.getItem('backtest_prefill'); if (pf) { try { const d = JSON.parse(pf); if (d.version) p.version = d.version; if (d.collection) p.collection = d.collection; if (d.fc_name_list) { p.fc_name_list = d.fc_name_list; availableFactors.value = d.fc_name_list } } catch { /* */ }; sessionStorage.removeItem('backtest_prefill') } })

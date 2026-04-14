@@ -190,7 +190,7 @@ const defaultParams = () => ({
   apply_rolling_norm: true, rolling_norm_window: 30, rolling_norm_min_periods: 20,
   rolling_norm_eps: 1e-8, rolling_norm_clip: 5.0,
   check_leakage_count: 20, check_relative: true, relative_threshold: 0.7,
-  gp_generations: 60, gp_population_size: 500, gp_max_depth: 6, gp_elite_size: 50,
+  gp_generations: 20, gp_population_size: 500, gp_max_depth: 6, gp_elite_size: 50,
   gp_elite_relative_threshold: 0.65, gp_crossover_prob: 0.3, gp_mutation_prob: 0.7,
   gp_leaf_prob: 0.2, gp_const_prob: 0.02, gp_tournament_size: 3,
   gp_window_choices: [3,5,10,20,30], random_seed: null,

@@ -609,7 +609,8 @@ class FactorGenerator:
         return out
 
     @staticmethod
-    def _format_best_failed_indicator_metrics_log(best_failed_indicator_metrics: Dict[str, Dict[str, Any]]) -> str:
+    def _format_best_failed_indicator_metrics_log(best_failed_indicator_metrics: Dict[str, Dict[str, Any]],
+                                                   factor_formula_map: Optional[Dict[str, str]] = None) -> str:
         if not best_failed_indicator_metrics:
             return 'Best failed indicator metrics: none.'
 
@@ -634,6 +635,11 @@ class FactorGenerator:
             f'  Indicator -> factor mapping: {indicator_to_factor}',
             f'  Unique factors in this diagnostic: {unique_factors}',
         ]
+        if factor_formula_map and unique_factors:
+            for uf in unique_factors:
+                formula = factor_formula_map.get(uf)
+                if formula:
+                    lines.append(f'  Factor formula: {uf} = {formula}')
         for indicator, info in best_failed_indicator_metrics.items():
             lines.append(f'  - Indicator: {indicator}')
             lines.append(f'    factor_name: {info.get("factor_name")}')
@@ -862,7 +868,10 @@ class FactorGenerator:
             )
             log.warning(msg)
             if best_failed_indicator_metrics:
-                log.warning(self._format_best_failed_indicator_metrics_log(best_failed_indicator_metrics))
+                log.warning(self._format_best_failed_indicator_metrics_log(
+                    best_failed_indicator_metrics,
+                    factor_formula_map=getattr(self, 'factor_formula_map', None),
+                ))
             return {
                 'config_ref': None,
                 'config_path': None,
@@ -1277,7 +1286,7 @@ class GeneticFactorGenerator(FactorGenerator):
                  relative_threshold: float = 0.7,
                  relative_check_version_list: Optional[Sequence[str]] = None,
                  version: Optional[str] = '20260407_gp_test_1',
-                 gp_generations: int = 60,
+                 gp_generations: int = 20,
                  gp_population_size: int = 500,
                  gp_max_depth: int = 6,
                  gp_elite_size: int = 50,
