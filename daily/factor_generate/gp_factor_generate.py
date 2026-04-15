@@ -49,7 +49,7 @@ def run_gp_factor_generate(
     check_relative: bool = True,
     relative_threshold: float = 0.7,
     relative_check_version_list: Optional[Sequence[str]] = None,
-    gp_generations: int = 60,
+    gp_generations: int = 20,
     gp_population_size: int = 500,
     gp_max_depth: int = 6,
     gp_elite_size: int = 50,
@@ -199,7 +199,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument('--relative_check_version_list', type=str, default=None,
                         help='Comma-separated versions for relative check. Default None means all versions.')
 
-    parser.add_argument('--gp_generations', type=int, default=60)
+    parser.add_argument('--gp_generations', type=int, default=20)
     parser.add_argument('--gp_population_size', type=int, default=500)
     parser.add_argument('--gp_max_depth', type=int, default=6)
     parser.add_argument('--gp_elite_size', type=int, default=50)

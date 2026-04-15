@@ -65,7 +65,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument('--llm_user_requirement', type=str, default='生成期货的日频量价因子')
 
     parser.add_argument('--gp_max_factor_count', type=int, default=50)
-    parser.add_argument('--gp_generations', type=int, default=60)
+    parser.add_argument('--gp_generations', type=int, default=20)
     parser.add_argument('--gp_population_size', type=int, default=500)
     parser.add_argument('--gp_max_depth', type=int, default=6)
     parser.add_argument('--gp_elite_size', type=int, default=50)
