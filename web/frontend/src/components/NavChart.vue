@@ -23,6 +23,7 @@ const props = defineProps({
   curveData: { type: Object, default: () => ({}) },
   showBaseline: { type: Boolean, default: true },
   height: { type: String, default: '400px' },
+  splitDate: { type: String, default: '' },
 })
 
 const chartOption = computed(() => {
@@ -50,6 +51,19 @@ const chartOption = computed(() => {
     },
   ]
 
+  if (Array.isArray(d.extra_series)) {
+    d.extra_series.forEach((s, idx) => {
+      if (!s || !Array.isArray(s.data)) return
+      series.push({
+        name: s.name || `扩展序列${idx + 1}`,
+        type: 'line',
+        data: s.data,
+        showSymbol: false,
+        lineStyle: { width: 2, type: s.lineType || 'solid' },
+      })
+    })
+  }
+
   if (props.showBaseline && d.gross_nav_baseline_long) {
     series.push(
       {
@@ -69,6 +83,19 @@ const chartOption = computed(() => {
     )
   }
 
+  const splitDate = (props.splitDate || '').slice(0, 10)
+  const splitIdx = splitDate ? times.findIndex(t => t === splitDate) : -1
+  if (splitIdx >= 0 && series.length > 0) {
+    const originalMarkLine = series[0].markLine || {}
+    series[0].markLine = {
+      ...originalMarkLine,
+      symbol: 'none',
+      lineStyle: { color: '#f56c6c', type: 'dashed', width: 2 },
+      label: { show: true, formatter: '样本内外分界', color: '#f56c6c' },
+      data: [{ xAxis: times[splitIdx] }],
+    }
+  }
+
   return {
     title: { text: props.title, left: 'center', textStyle: { fontSize: 14 } },
     tooltip: {
@@ -76,8 +103,8 @@ const chartOption = computed(() => {
       formatter(params) {
         let s = `<b>${params[0].axisValueLabel}</b><br/>`
         params.forEach(p => {
-          if (p.value != null) {
-            s += `${p.marker} ${p.seriesName}: ${p.value.toFixed(4)}<br/>`
+          if (p.value != null && p.value !== '' && Number.isFinite(Number(p.value))) {
+            s += `${p.marker} ${p.seriesName}: ${Number(p.value).toFixed(4)}<br/>`
           }
         })
         return s

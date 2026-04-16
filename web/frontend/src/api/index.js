@@ -17,6 +17,9 @@ export const terminateMining = (taskId) => api.post(`/api/mining/terminate/${tas
 // ── Backtest ──────────────────────────────────────────
 export const runBacktest = (data) => api.post('/api/backtest', data)
 
+// ── Fusion ────────────────────────────────────────────
+export const runFusion = (data) => api.post('/api/fusion/run', data)
+
 // ── Strategy ──────────────────────────────────────────
 export const runStrategy = (data) => api.post('/api/strategy', data)
 

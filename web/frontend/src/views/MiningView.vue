@@ -177,7 +177,7 @@
 <script setup>
 import { ref, reactive, computed } from 'vue'
 import { ElMessage } from 'element-plus'
-import { startMining, getMiningStatus } from '../api'
+import { startMining, getMiningStatus, getTasks } from '../api'
 import NavChart from '../components/NavChart.vue'
 
 const defaultParams = () => ({
@@ -211,12 +211,41 @@ const statusTag = computed(() => taskStatus.value==='completed'?'success':taskSt
 let pollTimer = null
 
 const handleStartMining = async () => {
-  mining.value = true; taskError.value = ''; miningResult.value = null; navCurves.value = {}; perfSummary.value = []
+  const version = String(params.version || '').trim()
+  if (!version) {
+    ElMessage.warning('版本号不能为空')
+    return
+  }
+
+  mining.value = true
+  taskError.value = ''
+  miningResult.value = null
+  navCurves.value = {}
+  perfSummary.value = []
   try {
+    try {
+      const { data: taskData } = await getTasks()
+      const duplicated = (taskData.tasks || []).find(
+        t => t.status === 'running' && String(t.version || '').trim() === version,
+      )
+      if (duplicated) {
+        ElMessage.warning(`禁止提交：版本号 ${version} 已在运行中（任务ID: ${duplicated.task_id}）`)
+        return
+      }
+    } catch {
+      // If pre-check fails, still try backend submission; backend has the final duplicate guard.
+    }
+
     const { data } = await startMining({ ...params, random_seed: params.random_seed || null })
     taskId.value = data.task_id; taskStatus.value = 'running'; taskProgress.value = '任务已提交...'
-    ElMessage.success('挖掘任务已启动: ' + data.task_id); startPolling()
-  } catch (err) { mining.value = false; ElMessage.error('启动失败: ' + (err.response?.data?.detail || err.message)) }
+    ElMessage.success('挖掘任务已启动: ' + data.task_id)
+    startPolling()
+  } catch (err) {
+    ElMessage.error('启动失败: ' + (err.response?.data?.detail || err.message))
+  } finally {
+    // 仅在“提交请求”阶段显示 loading，提交成功后允许继续发起新任务。
+    mining.value = false
+  }
 }
 const startPolling = () => {
   if (pollTimer) clearInterval(pollTimer)
@@ -224,15 +253,15 @@ const startPolling = () => {
     try {
       const { data } = await getMiningStatus(taskId.value)
       taskStatus.value = data.status; taskProgress.value = data.progress; taskError.value = data.error || ''
-      if (data.status === 'completed') {
-        clearInterval(pollTimer); mining.value = false; miningResult.value = data.result
+      if (data.status === 'completed' || data.status === 'terminated') {
+        clearInterval(pollTimer); miningResult.value = data.result
         if (data.result?.nav_data) {
           navCurves.value = data.result.nav_data.nav_curves || {}
           const s = data.result.nav_data.performance_summary || []; perfSummary.value = s
           if (s.length) perfColumns.value = Object.keys(s[0])
         }
-        ElMessage.success('因子挖掘完成!')
-      } else if (data.status === 'failed') { clearInterval(pollTimer); mining.value = false; ElMessage.error('因子挖掘失败') }
+        ElMessage.success(data.status === 'completed' ? '因子挖掘完成!' : '任务已终止，已展示当前结果')
+      } else if (data.status === 'failed') { clearInterval(pollTimer); ElMessage.error('因子挖掘失败') }
     } catch { /* keep polling */ }
   }, 3000)
 }

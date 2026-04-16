@@ -1443,6 +1443,13 @@ class GeneticFactorGenerator(FactorGenerator):
         self.factor_formula_map = {}
         self.factor_fitness_map = {}
 
+        # Keep output factor naming stable with descending penalized fitness.
+        candidates = sorted(
+            list(candidates),
+            key=lambda x: float(getattr(x, 'penalized_fitness', getattr(x, 'fitness', float('-inf')))),
+            reverse=True,
+        )
+
         for idx, cand in enumerate(candidates, start=1):
             fc_name = f'fac_gp_{idx:04d}'
             signal = cand.node.calc(df_eval)
@@ -1566,6 +1573,9 @@ class FactorFusioner:
         n_jobs: int = 5,
         database: str = 'factors',
         base_col_list: Optional[Sequence[str]] = None,
+        consider_outsample: bool = False,
+        outsample_start_day: Optional[str] = None,
+        outsample_end_day: Optional[str] = None,
     ):
         """初始化因子融合器。
 
@@ -1594,6 +1604,9 @@ class FactorFusioner:
         - n_jobs: 并行任务数，用于候选因子计算等并行流程。
         - database: 因子公式读取与融合结果写入的数据库名。
         - base_col_list: 计算因子时需要保留的基础字段列表（默认 OHLCV+position）。
+        - consider_outsample: 是否在融合排序/筛选时优先使用样本外指标。
+        - outsample_start_day: 样本外区间起始日（YYYYMMDD）。
+        - outsample_end_day: 样本外区间结束日（YYYYMMDD）。
         """
         self.fusion_method = str(fusion_method).strip()
         if self.fusion_method not in FusionSupportedMethods:
@@ -1621,6 +1634,9 @@ class FactorFusioner:
         self.n_jobs = int(n_jobs)
         self.database = str(database).strip() or 'factors'
         self.base_col_list = list(base_col_list) if base_col_list else ['open', 'high', 'low', 'close', 'volume', 'position']
+        self.consider_outsample = bool(consider_outsample)
+        self.outsample_start_day = str(outsample_start_day).strip() if outsample_start_day is not None else ''
+        self.outsample_end_day = str(outsample_end_day).strip() if outsample_end_day is not None else ''
 
         if not self.version:
             raise ValueError('FactorFusioner requires non-empty `version` and it must be explicitly provided.')
@@ -2013,6 +2029,28 @@ class FactorFusioner:
             validate='1:1',
         )
 
+        # Optional out-of-sample slice used as the primary optimization target.
+        optimize_eval_df = eval_df
+        outsample_eval_df: Optional[pd.DataFrame] = None
+        use_outsample = bool(self.consider_outsample and self.outsample_start_day and self.outsample_end_day)
+        if use_outsample:
+            out_start = pd.to_datetime(self.outsample_start_day)
+            out_end = pd.to_datetime(self.outsample_end_day)
+            outsample_eval_df = eval_df[(eval_df['time'] >= out_start) & (eval_df['time'] <= out_end)].copy()
+            if outsample_eval_df.empty:
+                log.warning(
+                    '[Fusion][Outsample] empty outsample range, fallback to full sample optimization. '
+                    f'outsample_start_day={self.outsample_start_day}, outsample_end_day={self.outsample_end_day}'
+                )
+                use_outsample = False
+            else:
+                optimize_eval_df = outsample_eval_df
+                log.info(
+                    '[Fusion][Outsample] enabled. '
+                    f'rows={len(outsample_eval_df)}, '
+                    f'start={self.outsample_start_day}, end={self.outsample_end_day}'
+                )
+
         # factor_keys: 形如 "version::factor_name" 的候选因子唯一键列表。
         factor_keys = factor_records['factor_key'].astype(str).tolist()
         if not factor_keys:
@@ -2022,7 +2060,7 @@ class FactorFusioner:
         # 这些 metrics 用于初始化排序与后续比较基线，不是逐年指标。
         single_metric_map: Dict[str, Dict[str, float]] = {}
         for factor_key in factor_keys:
-            signal_df = eval_df[['time', 'instrument_id', 'future_ret', factor_key]].copy()
+            signal_df = optimize_eval_df[['time', 'instrument_id', 'future_ret', factor_key]].copy()
             metrics = self._evaluate_metrics(signal_df, factor_key)
             single_metric_map[factor_key] = metrics
             log.info(f'[Fusion][Init] factor={factor_key}, {self._format_metrics(metrics)}')
@@ -2074,6 +2112,8 @@ class FactorFusioner:
                     raise ValueError(f'Unsupported fusion_method={self.fusion_method}')
 
                 trial_df = eval_df[['time', 'instrument_id', 'future_ret']].copy()
+                if use_outsample:
+                    trial_df = optimize_eval_df[['time', 'instrument_id', 'future_ret']].copy()
                 trial_df[fusion_col] = pd.to_numeric(fused_series, errors='coerce')
 
                 # trial_metrics: 该组合在整个回测区间上的总体指标。
@@ -2127,6 +2167,12 @@ class FactorFusioner:
             calculate_baseline=True,
         )
         final_metrics = self._evaluate_metrics(final_fused_df, fusion_col)
+        final_metrics_outsample: Optional[Dict[str, float]] = None
+        if use_outsample and outsample_eval_df is not None:
+            out_df = cast(pd.DataFrame, outsample_eval_df)
+            out_fused_df = out_df[['time', 'instrument_id', 'future_ret']].copy()
+            out_fused_df[fusion_col] = pd.to_numeric(out_df[selected_factor_keys].mean(axis=1), errors='coerce')
+            final_metrics_outsample = self._evaluate_metrics(out_fused_df, fusion_col)
         leakage_result = self.check_if_leakage(
             fc_name_list=[fusion_col],
             generated_df=final_fused_df[['time', 'instrument_id', fusion_col]].copy(),
@@ -2225,6 +2271,8 @@ class FactorFusioner:
                 f'fitness={fitness_payload}'
             )
 
+        persisted = bool(len(selected_factor_keys) > 1 and persist_allowed)
+
         log.info(
             'Fusion finished: '
             f'selected_count={len(selected_factor_keys)}, '
@@ -2237,6 +2285,7 @@ class FactorFusioner:
             'selected_factor_keys': selected_factor_keys,
             'selected_factors_detail': selected_factors_detail,
             'final_metrics': final_metrics,
+            'final_metrics_outsample': final_metrics_outsample,
             'single_factor_metrics': single_metric_map,
             'leakage_check': leakage_result,
             'relative_check': relative_result,
@@ -2244,6 +2293,14 @@ class FactorFusioner:
             'fused_data': final_fused_df,
             'bt': final_bt,
             'round_base_metrics': base_metrics,
+            'consider_outsample': bool(use_outsample),
+            'outsample_start_day': self.outsample_start_day,
+            'outsample_end_day': self.outsample_end_day,
+            'persisted': persisted,
+            'fusion_collection': fusion_collection,
+            'fusion_factor_name': fusion_factor_name,
+            'fusion_formula': fusion_formula,
+            'fusion_info': fusion_info,
         }
 
 

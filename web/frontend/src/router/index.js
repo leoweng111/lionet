@@ -12,6 +12,12 @@ const routes = [
     meta: { title: '因子挖掘', icon: 'Cpu' },
   },
   {
+    path: '/fusion',
+    name: 'Fusion',
+    component: () => import('../views/FusionView.vue'),
+    meta: { title: '因子融合', icon: 'Connection' },
+  },
+  {
     path: '/factors',
     name: 'Factors',
     component: () => import('../views/FactorsView.vue'),
