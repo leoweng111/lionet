@@ -13,7 +13,7 @@
         <el-table-column prop="progress" label="进度" min-width="300" show-overflow-tooltip />
         <el-table-column label="GP演化" width="200"><template #default="{row}"><template v-if="row.gp_progress"><el-progress :percentage="Math.round(row.gp_progress.generation/row.gp_progress.total_generations*100)" :stroke-width="14" :text-inside="true" style="width:100%" /><div style="font-size:11px;color:#606266;margin-top:2px;">{{ row.gp_progress.generation }}/{{ row.gp_progress.total_generations }}代 best={{ row.gp_progress.global_best_penalized?.toFixed(4) }}</div></template><span v-else style="color:#c0c4cc;">-</span></template></el-table-column>
         <el-table-column prop="started_at" label="开始时间" width="180" show-overflow-tooltip />
-        <el-table-column label="操作" width="220"><template #default="{row}"><el-button size="small" type="primary" link @click.stop="viewDetail(row)">详情</el-button><el-button size="small" type="info" link @click.stop="viewLogs(row)">日志</el-button><el-button size="small" type="danger" link @click.stop="handleTerminate(row)" :disabled="row.status !== 'running' && row.status !== 'interrupted'">终止</el-button></template></el-table-column>
+        <el-table-column label="操作" width="220"><template #default="{row}"><el-button size="small" type="primary" link @click.stop="viewDetail(row)">详情</el-button><el-button size="small" type="info" link @click.stop="viewLogs(row)">日志</el-button><el-button size="small" type="danger" link @click.stop="handleTerminate(row)" :disabled="row.status !== 'running'">终止</el-button></template></el-table-column>
       </el-table>
       <div v-if="!taskList.length" style="text-align:center;padding:40px;color:#909399;">暂无任务记录</div>
     </el-card>
@@ -67,7 +67,7 @@
             <el-descriptions-item label="存储路径" v-if="dd.result.config_path">{{ dd.result.config_path }}</el-descriptions-item>
             <el-descriptions-item label="集合" v-if="dd.result.collection">{{ dd.result.collection }}</el-descriptions-item>
           </el-descriptions>
-          <div v-if="dd.result.nav_data?.nav_curves"><el-card v-for="(curve, name) in dd.result.nav_data.nav_curves" :key="name" class="chart-card" shadow="never" style="margin-bottom:12px;"><NavChart :title="name" :curve-data="curve" height="300px" /></el-card></div>
+          <div v-if="dd.result.nav_data?.nav_curves"><el-card v-for="(curve, name) in dd.result.nav_data.nav_curves" :key="name" class="chart-card" shadow="never" style="margin-bottom:12px;"><NavChart :title="name" :curve-data="curve" height="300px" /><div v-if="resolveFactorFormula(dd, name)" style="margin-top:8px; font-size:12px; color:#606266; white-space:pre-wrap; line-height:1.5;"><strong>Formula:</strong> {{ resolveFactorFormula(dd, name) }}</div></el-card></div>
         </template>
       </template>
     </el-dialog>
@@ -90,16 +90,22 @@ import NavChart from '../components/NavChart.vue'
 const loading = ref(false), taskList = ref([]), dlgVisible = ref(false), dd = ref(null)
 const logDlgVisible = ref(false), taskLogs = ref([]), logTaskId = ref('')
 const stType = (s) => s === 'completed' ? 'success' : s === 'failed' ? 'danger' : s === 'terminated' ? 'info' : s === 'interrupted' ? 'warning' : 'warning'
+const getFormulaMap = (detail) => detail?.result?.factor_formulas || detail?.result_summary?.factor_formulas || {}
+const resolveFactorFormula = (detail, factorName) => getFormulaMap(detail)?.[factorName] || ''
 const buildResultOverview = (detail) => {
   if (!detail) return ''
   if (detail.result_overview) return detail.result_overview
   const source = detail.result || detail.result_summary || {}
   const selected = source.selected_fc_name_list || []
+  const formulaMap = getFormulaMap(detail)
   const msg = source.message || ''
   const version = source.version || (detail.params?.version || '')
   const configPath = source.config_path || source.config_ref || ''
   if (selected.length) {
-    return `挖到 ${selected.length} 个有效因子\n因子名称: ${selected.join(', ')}\n版本: ${version}\n存储位置: ${configPath || '未返回'}\n${msg}`
+    const formulaLines = selected
+      .map((name) => formulaMap[name] ? `${name}: ${formulaMap[name]}` : `${name}: (未返回公式)`)
+      .join('\n')
+    return `挖到 ${selected.length} 个有效因子\n因子名称: ${selected.join(', ')}\n版本: ${version}\n存储位置: ${configPath || '未返回'}\n公式:\n${formulaLines}${msg ? `\n${msg}` : ''}`
   }
   return `未挖到有效因子\n版本: ${version}\n${msg}`
 }
@@ -138,7 +144,7 @@ onMounted(() => {
         // keep previous logs
       }
     }
-  }, 5000)
+  }, 2000)
 })
 onUnmounted(() => { if (timer) clearInterval(timer) })
 </script>

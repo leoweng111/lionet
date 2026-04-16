@@ -5,9 +5,8 @@
       <p>配置 GP 遗传算法超参数，一键启动因子挖掘任务，挖掘完成后自动展示回测结果和净值曲线</p>
     </div>
 
-    <el-row :gutter="20" class="responsive-row">
-      <!-- Left: Params (scrollable) -->
-      <el-col :xs="24" :sm="24" :md="12" :lg="10" :xl="10">
+    <el-row :gutter="20" class="responsive-row top-panel-row">
+      <el-col :span="24">
         <el-card shadow="hover">
           <template #header>
             <div style="display:flex;align-items:center;justify-content:space-between;">
@@ -126,19 +125,28 @@
               </el-row>
             </div>
 
-            <el-form-item>
-              <el-button type="primary" size="large" :loading="mining" @click="handleStartMining" style="width:100%;">
-                <el-icon v-if="!mining"><VideoPlay /></el-icon>
-                {{ mining ? '挖掘中...' : '🚀 启动因子挖掘' }}
-              </el-button>
-            </el-form-item>
-          </el-form>
+              </el-form>
           </div>
         </el-card>
       </el-col>
 
-      <!-- Right: Result -->
-      <el-col :xs="24" :sm="24" :md="12" :lg="14" :xl="14">
+    </el-row>
+
+    <el-row :gutter="20" class="responsive-row" style="margin-top:16px;">
+      <el-col :xs="24" :sm="24" :md="8" :lg="6" :xl="6">
+        <el-card shadow="hover" style="margin-bottom:16px;">
+          <template #header><span style="font-weight:600;">启动挖掘</span></template>
+          <el-button type="primary" size="large" :loading="mining" @click="handleStartMining" style="width:100%;">
+            <el-icon v-if="!mining"><VideoPlay /></el-icon>
+            {{ mining ? '挖掘中...' : '🚀 启动因子挖掘' }}
+          </el-button>
+          <div style="margin-top:10px;color:#909399;font-size:12px;line-height:1.6;">
+            提示：先在上方调整超参数，再点击启动；任务状态与结果在右侧实时刷新。
+          </div>
+        </el-card>
+      </el-col>
+
+      <el-col :xs="24" :sm="24" :md="16" :lg="18" :xl="18">
         <el-card shadow="hover" style="margin-bottom:16px;" v-if="taskId">
           <template #header><span style="font-weight:600;">任务状态</span></template>
           <el-descriptions :column="2" size="small" border>
@@ -196,7 +204,7 @@ const defaultParams = () => ({
   gp_window_choices: [3,5,10,20,30], random_seed: null,
   gp_early_stopping_generation_count: 20, gp_depth_penalty_coef: 0.0,
   gp_depth_penalty_start_depth: 6, gp_depth_penalty_linear_coef: 0.03,
-  gp_depth_penalty_quadratic_coef: 0.0, gp_log_interval: 5,
+  gp_depth_penalty_quadratic_coef: 0.0, gp_log_interval: 1,
   gp_small_factor_penalty_coef: 0.0, gp_assumed_initial_capital: 100000,
   gp_elite_stagnation_generation_count: 4, gp_max_shock_generation: 3,
   filter_net_return_mean: 0.05, filter_net_return_yearly: 0.03,

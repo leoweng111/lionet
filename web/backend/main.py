@@ -183,7 +183,7 @@ class GPMiningParams(BaseModel):
     gp_depth_penalty_start_depth: int = 6
     gp_depth_penalty_linear_coef: float = 0.03
     gp_depth_penalty_quadratic_coef: float = 0.0
-    gp_log_interval: int = 5
+    gp_log_interval: int = 1
     gp_small_factor_penalty_coef: float = 0.0
     gp_assumed_initial_capital: float = 100000
     gp_elite_stagnation_generation_count: int = 4
@@ -336,20 +336,39 @@ def _build_mining_result_overview(result: Dict[str, Any]) -> str:
     selected = result.get('selected_fc_name_list', []) or []
     config_path = result.get('config_path')
     msg = str(result.get('message', '') or '').strip()
+    formulas = result.get('factor_formulas') or {}
     if selected:
-        return (
-            f'挖到 {len(selected)} 个有效因子：{selected}。'
-            f'已储存到 {config_path or "(未返回存储路径)"}。'
-        )
+        lines = [
+            f'挖到 {len(selected)} 个有效因子。',
+            f'已储存到: {config_path or "(未返回存储路径)"}',
+            '入选因子与公式:',
+        ]
+        for i, fc in enumerate(selected, start=1):
+            lines.append(f'{i}. {fc}')
+            formula = formulas.get(fc)
+            if formula:
+                lines.append(f'   Formula: {formula}')
+        if msg:
+            lines.append(f'补充信息: {msg}')
+        return '\n'.join(lines)
 
     best_failed = result.get('best_failed_indicator_metrics') or {}
+    lines = ['未挖到有效因子。']
+    if msg:
+        lines.append(f'筛选/失败信息: {msg}')
     if best_failed:
-        # Pick one indicator-wise best candidate for human-readable summary.
-        sample_indicator = next(iter(best_failed.keys()))
-        sample_info = best_failed.get(sample_indicator) or {}
-        sample_fc = sample_info.get('factor_name', 'N/A')
-        return f'未挖到有效因子。最佳候选示例：{sample_fc}（指标维度：{sample_indicator}）。{msg}'
-    return f'未挖到有效因子。{msg}'
+        lines.append('各指标最佳候选（含公式）:')
+        for indicator, info in best_failed.items():
+            info = info or {}
+            sample_fc = str(info.get('factor_name', 'N/A'))
+            lines.append(f'- 指标 {indicator}: {sample_fc}')
+            formula = formulas.get(sample_fc)
+            if formula:
+                lines.append(f'  Formula: {formula}')
+            extra_metrics = {k: v for k, v in info.items() if k != 'factor_name'}
+            if extra_metrics:
+                lines.append(f'  Metrics: {json.dumps(extra_metrics, ensure_ascii=False)}')
+    return '\n'.join(lines)
 
 
 def _extract_strategy_nav_data(strat: Strategy) -> Dict[str, Any]:
@@ -500,6 +519,8 @@ async def start_mining(params: GPMiningParams):
                     "version": result.get("version", ""),
                     "message": result.get("message", "Task terminated by user."),
                     "config_path": result.get("config_path"),
+                    "factor_formulas": result.get("factor_formulas", {}),
+                    "best_failed_indicator_metrics": result.get("best_failed_indicator_metrics"),
                     "result_overview": tasks[task_id]["result_overview"],
                 })
                 return
@@ -512,6 +533,8 @@ async def start_mining(params: GPMiningParams):
                 "version": result.get("version", ""),
                 "message": result.get("message", ""),
                 "config_path": result.get("config_path"),
+                "factor_formulas": result.get("factor_formulas", {}),
+                "best_failed_indicator_metrics": result.get("best_failed_indicator_metrics"),
                 "result_overview": tasks[task_id]["result_overview"],
             })
         except Exception as e:
@@ -659,7 +682,7 @@ async def terminate_mining(task_id: str):
         df = get_data(database="task", collection="task_detail", mongo_operator={"task_id": task_id})
         if isinstance(df, pd.DataFrame) and not df.empty:
             current_status = str(df.iloc[0].get("status", "") or "")
-            if current_status not in ("completed", "failed", "terminated"):
+            if current_status == "running":
                 update_one_data(
                     database="task",
                     collection="task_detail",

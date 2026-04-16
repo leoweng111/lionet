@@ -729,10 +729,13 @@ class EliteArchive:
         if not self._elites:
             return f'EliteArchive(size=0/{self.max_size})'
         fitnesses = [f for _, f, _, _ in self._elites]
+        best_candidate = max(self._elites, key=lambda x: x[1])[3]
+        best_formula = str(best_candidate.formula).replace('\n', ' ') if best_candidate and best_candidate.formula else 'N/A'
         return (
             f'EliteArchive(size={len(self._elites)}/{self.max_size}, '
             f'best={max(fitnesses):.6f}, worst={min(fitnesses):.6f}, '
-            f'mean={np.mean(fitnesses):.6f})'
+            f'mean={np.mean(fitnesses):.6f}, '
+            f'best_formula={best_formula})'
         )
 
     # ------------------------------------------------------------------
@@ -791,7 +794,7 @@ def run_gp_evolution(
     data_fields: Sequence[str],
     fitness_metric: str,
     max_factor_count: int,
-    generations: int,
+        generations: int,
     population_size: int,
     max_depth: int,
     elite_size: int,
@@ -1097,6 +1100,15 @@ def run_gp_evolution(
             avg_original_fitness_current = 0.0
             global_best_fitness = 0.0
             global_best_original_fitness = 0.0
+
+        # Emit one concise progress line every generation so task panel can refresh in real time.
+        log.info(
+            f'GP generation {gen_idx + 1}/{generations}: '
+            f'global_best_penalized={global_best_fitness:.6f}, '
+            f'global_best_original={global_best_original_fitness:.6f}, '
+            f'mode={mode}, '
+            f'elite_size={elite_archive.size}/{elite_archive.max_size}'
+        )
 
         should_log = ((gen_idx + 1) % log_interval == 0) or (gen_idx == 0) or (gen_idx == generations - 1)
         if should_log:
