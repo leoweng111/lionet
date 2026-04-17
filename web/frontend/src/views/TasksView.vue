@@ -2,18 +2,37 @@
   <div>
     <div class="page-header">
       <h2><el-icon><List /></el-icon> 任务管理</h2>
-      <p>查看所有因子挖掘任务的运行状态、演化进度和历史记录</p>
+      <p>查看因子挖掘与因子融合任务的运行状态、进度和历史记录</p>
     </div>
     <el-card shadow="hover">
-      <template #header><div style="display:flex;align-items:center;justify-content:space-between;"><span style="font-weight:600;">任务列表</span><el-button type="primary" size="small" @click="fetchTasks" :loading="loading"><el-icon><Refresh /></el-icon> 刷新</el-button></div></template>
+      <template #header>
+        <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;">
+          <span style="font-weight:600;">任务列表</span>
+          <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+            <el-date-picker
+              v-model="dateRange"
+              type="daterange"
+              unlink-panels
+              range-separator="至"
+              start-placeholder="开始日期"
+              end-placeholder="结束日期"
+              value-format="YYYY-MM-DD"
+              size="small"
+              @change="fetchTasks"
+            />
+            <el-button type="primary" size="small" @click="fetchTasks" :loading="loading"><el-icon><Refresh /></el-icon> 刷新</el-button>
+          </div>
+        </div>
+      </template>
       <el-table :data="taskList" stripe border size="small" style="width:100%" @row-click="viewDetail">
         <el-table-column prop="task_id" label="任务ID" width="100" />
+        <el-table-column prop="task_type" label="任务类型" width="100" />
         <el-table-column prop="version" label="版本" width="220" show-overflow-tooltip />
         <el-table-column prop="status" label="状态" width="100"><template #default="{row}"><el-tag :type="stType(row.status)" size="small" effect="dark">{{ row.status }}</el-tag></template></el-table-column>
         <el-table-column prop="progress" label="进度" min-width="300" show-overflow-tooltip />
         <el-table-column label="GP演化" width="200"><template #default="{row}"><template v-if="row.gp_progress"><el-progress :percentage="Math.round(row.gp_progress.generation/row.gp_progress.total_generations*100)" :stroke-width="14" :text-inside="true" style="width:100%" /><div style="font-size:11px;color:#606266;margin-top:2px;">{{ row.gp_progress.generation }}/{{ row.gp_progress.total_generations }}代 best={{ row.gp_progress.global_best_penalized?.toFixed(4) }}</div></template><span v-else style="color:#c0c4cc;">-</span></template></el-table-column>
         <el-table-column prop="started_at" label="开始时间" width="180" show-overflow-tooltip />
-        <el-table-column label="操作" width="220"><template #default="{row}"><el-button size="small" type="primary" link @click.stop="viewDetail(row)">详情</el-button><el-button size="small" type="info" link @click.stop="viewLogs(row)">日志</el-button><el-button size="small" type="danger" link @click.stop="handleTerminate(row)" :disabled="row.status !== 'running'">终止</el-button></template></el-table-column>
+        <el-table-column label="操作" width="220"><template #default="{row}"><el-button size="small" type="primary" link @click.stop="viewDetail(row)">详情</el-button><el-button size="small" type="info" link @click.stop="viewLogs(row)">日志</el-button><el-button size="small" type="danger" link @click.stop="handleTerminate(row)" :disabled="!canTerminate(row)">终止</el-button></template></el-table-column>
       </el-table>
       <div v-if="!taskList.length" style="text-align:center;padding:40px;color:#909399;">暂无任务记录</div>
     </el-card>
@@ -48,11 +67,11 @@
 
         <!-- Result summary from DB or memory -->
         <el-card shadow="never" style="margin-bottom:16px;" v-if="dd.result || dd.result_summary || dd.result_overview">
-          <template #header><span style="font-weight:600;">挖掘结论</span></template>
+          <template #header><span style="font-weight:600;">任务结论</span></template>
           <div style="white-space:pre-wrap; line-height:1.6; font-size:13px;">{{ buildResultOverview(dd) }}</div>
         </el-card>
 
-        <template v-if="dd.result_summary">
+        <template v-if="dd.result_summary && !isFusionTask(dd)">
           <el-descriptions :column="1" size="small" border style="margin-bottom:16px;">
             <el-descriptions-item label="入选因子"><el-tag v-for="f in (dd.result_summary.selected_fc_name_list||[])" :key="f" size="small" style="margin:2px;">{{ f }}</el-tag><span v-if="!(dd.result_summary.selected_fc_name_list||[]).length" style="color:#909399;">无</span></el-descriptions-item>
             <el-descriptions-item label="版本">{{ dd.result_summary.version }}</el-descriptions-item>
@@ -60,7 +79,7 @@
             <el-descriptions-item label="消息" v-if="dd.result_summary.message">{{ dd.result_summary.message }}</el-descriptions-item>
           </el-descriptions>
         </template>
-        <template v-if="dd.result">
+        <template v-if="dd.result && !isFusionTask(dd)">
           <el-descriptions :column="1" size="small" border style="margin-bottom:16px;">
             <el-descriptions-item label="入选因子"><el-tag v-for="f in (dd.result.selected_fc_name_list||[])" :key="f" size="small" style="margin:2px;">{{ f }}</el-tag><span v-if="!(dd.result.selected_fc_name_list||[]).length" style="color:#909399;">无</span></el-descriptions-item>
             <el-descriptions-item label="版本">{{ dd.result.version }}</el-descriptions-item>
@@ -68,6 +87,26 @@
             <el-descriptions-item label="集合" v-if="dd.result.collection">{{ dd.result.collection }}</el-descriptions-item>
           </el-descriptions>
           <div v-if="dd.result.nav_data?.nav_curves"><el-card v-for="(curve, name) in dd.result.nav_data.nav_curves" :key="name" class="chart-card" shadow="never" style="margin-bottom:12px;"><NavChart :title="name" :curve-data="curve" height="300px" /><div v-if="resolveFactorFormula(dd, name)" style="margin-top:8px; font-size:12px; color:#606266; white-space:pre-wrap; line-height:1.5;"><strong>Formula:</strong> {{ resolveFactorFormula(dd, name) }}</div></el-card></div>
+        </template>
+
+        <template v-if="isFusionTask(dd)">
+          <el-descriptions :column="1" size="small" border style="margin-bottom:16px;" v-if="fusionResult(dd)">
+            <el-descriptions-item label="落库状态"><el-tag :type="fusionResult(dd).persisted ? 'success' : 'warning'" size="small">{{ fusionResult(dd).persisted ? '已落库' : '未落库' }}</el-tag></el-descriptions-item>
+            <el-descriptions-item label="版本">{{ fusionResult(dd).version }}</el-descriptions-item>
+            <el-descriptions-item label="集合" v-if="fusionResult(dd).collection">{{ fusionResult(dd).collection }}</el-descriptions-item>
+            <el-descriptions-item label="融合因子名" v-if="fusionResult(dd).fusion_factor_name">{{ fusionResult(dd).fusion_factor_name }}</el-descriptions-item>
+            <el-descriptions-item label="融合公式" v-if="fusionResult(dd).fusion_formula"><span style="word-break:break-all;">{{ fusionResult(dd).fusion_formula }}</span></el-descriptions-item>
+          </el-descriptions>
+          <el-card shadow="never" style="margin-bottom:12px;" v-if="(fusionResult(dd)?.selected_factors_detail || []).length">
+            <template #header><span style="font-weight:600;">入选因子明细</span></template>
+            <el-table :data="fusionResult(dd).selected_factors_detail" stripe size="small" max-height="280" style="width:100%">
+              <el-table-column prop="factor_key" label="factor_key" min-width="180" show-overflow-tooltip />
+              <el-table-column prop="collection" label="collection" min-width="120" show-overflow-tooltip />
+              <el-table-column prop="version" label="version" min-width="120" show-overflow-tooltip />
+              <el-table-column prop="factor_name" label="factor_name" min-width="120" show-overflow-tooltip />
+            </el-table>
+          </el-card>
+          <div v-if="fusionResult(dd)?.nav_data?.nav_curves"><el-card v-for="(curve, name) in fusionResult(dd).nav_data.nav_curves" :key="name" class="chart-card" shadow="never" style="margin-bottom:12px;"><NavChart :title="name" :curve-data="curve" height="300px" /></el-card></div>
         </template>
       </template>
     </el-dialog>
@@ -89,16 +128,61 @@ import NavChart from '../components/NavChart.vue'
 
 const loading = ref(false), taskList = ref([]), dlgVisible = ref(false), dd = ref(null)
 const logDlgVisible = ref(false), taskLogs = ref([]), logTaskId = ref('')
+const dateRange = ref([])
 const stType = (s) => s === 'completed' ? 'success' : s === 'failed' ? 'danger' : s === 'terminated' ? 'info' : s === 'interrupted' ? 'warning' : 'warning'
+const isFusionTask = (task) => task?.task_type === '因子融合'
+const canTerminate = (row) => row?.status === 'running' && !isFusionTask(row)
+const fusionResult = (detail) => detail?.result || detail?.result_summary || null
 const getFormulaMap = (detail) => detail?.result?.factor_formulas || detail?.result_summary?.factor_formulas || {}
 const resolveFactorFormula = (detail, factorName) => getFormulaMap(detail)?.[factorName] || ''
+const safeJsonParse = (txt) => {
+  try { return JSON.parse(txt) } catch { return null }
+}
+const formatYearlyDetail = (arr) => {
+  if (!Array.isArray(arr)) return ''
+  return arr
+    .map((it) => `  - ${it.year}: value=${it.value}, threshold=${it.threshold}, pass=${it.pass}`)
+    .join('\n')
+}
+const prettyMessage = (msg) => {
+  if (!msg || typeof msg !== 'string') return msg || ''
+  const parsed = safeJsonParse(msg)
+  if (!parsed || typeof parsed !== 'object') return msg
+  const lines = []
+  Object.entries(parsed).forEach(([k, v]) => {
+    if (k === 'yearly_detail') {
+      lines.push('yearly_detail:')
+      lines.push(formatYearlyDetail(v))
+    } else if (Array.isArray(v)) {
+      lines.push(`${k}: ${v.join(', ')}`)
+    } else {
+      lines.push(`${k}: ${v}`)
+    }
+  })
+  return lines.filter(Boolean).join('\n')
+}
 const buildResultOverview = (detail) => {
   if (!detail) return ''
   if (detail.result_overview) return detail.result_overview
+  if (isFusionTask(detail)) {
+    const source = fusionResult(detail) || {}
+    const metrics = source.final_metrics ? Object.entries(source.final_metrics).map(([k, v]) => `${k}=${Number(v).toFixed(6)}`).join(', ') : ''
+    const metricsOos = source.final_metrics_outsample ? Object.entries(source.final_metrics_outsample).map(([k, v]) => `${k}=${Number(v).toFixed(6)}`).join(', ') : ''
+    return [
+      '因子融合任务结果',
+      `落库状态: ${source.persisted ? '已落库' : '未落库'}`,
+      source.collection ? `集合: ${source.collection}` : '',
+      source.version ? `版本: ${source.version}` : '',
+      source.fusion_factor_name ? `融合因子名: ${source.fusion_factor_name}` : '',
+      source.fusion_formula ? `融合公式: ${source.fusion_formula}` : '',
+      metrics ? `最终指标: ${metrics}` : '',
+      metricsOos ? `样本外指标: ${metricsOos}` : '',
+    ].filter(Boolean).join('\n')
+  }
   const source = detail.result || detail.result_summary || {}
   const selected = source.selected_fc_name_list || []
   const formulaMap = getFormulaMap(detail)
-  const msg = source.message || ''
+  const msg = prettyMessage(source.message || '')
   const version = source.version || (detail.params?.version || '')
   const configPath = source.config_path || source.config_ref || ''
   if (selected.length) {
@@ -109,7 +193,21 @@ const buildResultOverview = (detail) => {
   }
   return `未挖到有效因子\n版本: ${version}\n${msg}`
 }
-const fetchTasks = async () => { loading.value = true; try { const { data } = await getTasks(); taskList.value = data.tasks || [] } catch { /* */ } finally { loading.value = false } }
+const fetchTasks = async () => {
+  loading.value = true
+  try {
+    const [startDate, endDate] = dateRange.value || []
+    const params = {}
+    if (startDate) params.start_date = startDate
+    if (endDate) params.end_date = endDate
+    const { data } = await getTasks(params)
+    taskList.value = data.tasks || []
+  } catch {
+    // noop
+  } finally {
+    loading.value = false
+  }
+}
 const viewDetail = async (row) => { try { const { data } = await getTaskDetail(row.task_id); dd.value = data; dlgVisible.value = true } catch { /* */ } }
 const viewLogs = async (row) => {
   try {
@@ -133,6 +231,11 @@ const handleTerminate = async (row) => {
 }
 let timer = null
 onMounted(() => {
+  const now = new Date()
+  const y = new Date(now)
+  y.setDate(now.getDate() - 1)
+  const fmt = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+  dateRange.value = [fmt(y), fmt(now)]
   fetchTasks()
   timer = setInterval(async () => {
     await fetchTasks()

@@ -89,6 +89,16 @@
       </el-col>
 
       <el-col :xs="24" :sm="24" :md="12" :lg="14" :xl="14">
+        <el-card shadow="hover" style="margin-bottom:16px;" v-if="taskId">
+          <template #header><span style="font-weight:600;">任务状态</span></template>
+          <el-descriptions :column="2" size="small" border>
+            <el-descriptions-item label="任务ID">{{ taskId }}</el-descriptions-item>
+            <el-descriptions-item label="状态"><el-tag :type="taskStatus==='completed' ? 'success' : taskStatus==='failed' ? 'danger' : 'warning'" size="small">{{ taskStatus }}</el-tag></el-descriptions-item>
+            <el-descriptions-item label="进度" :span="2">{{ taskProgress }}</el-descriptions-item>
+          </el-descriptions>
+          <div v-if="taskError" style="margin-top:12px;"><el-alert :title="taskError" type="error" show-icon :closable="false" style="white-space:pre-wrap;font-size:12px;" /></div>
+        </el-card>
+
         <el-card shadow="hover" style="margin-bottom:16px;" v-if="result">
           <template #header><span style="font-weight:600;">融合结果</span></template>
           <el-descriptions :column="1" size="small" border>
@@ -128,9 +138,9 @@
 </template>
 
 <script setup>
-import { computed, reactive, ref, onMounted } from 'vue'
+import { computed, reactive, ref, onMounted, onUnmounted } from 'vue'
 import { ElMessage } from 'element-plus'
-import { getVersions, runFusion } from '../api'
+import { getVersions, startFusion, getFusionStatus } from '../api'
 import NavChart from '../components/NavChart.vue'
 
 const today = () => new Date().toISOString().slice(0, 10).replace(/-/g, '')
@@ -165,8 +175,13 @@ const p = reactive(defaults())
 const loading = ref(false)
 const result = ref(null)
 const navCurves = ref({})
+const taskId = ref('')
+const taskStatus = ref('')
+const taskProgress = ref('')
+const taskError = ref('')
 const collections = ref([])
 const allVersions = ref([])
+let pollTimer = null
 
 const selectedFactors = computed(() => result.value?.selected_factors_detail || [])
 
@@ -193,6 +208,9 @@ const loadMeta = async () => {
 const run = async () => {
   loading.value = true
   try {
+    taskError.value = ''
+    result.value = null
+    navCurves.value = {}
     const payload = {
       ...p,
       candidate_versions: (p.candidate_versions || []).length ? p.candidate_versions : null,
@@ -200,10 +218,30 @@ const run = async () => {
       outsample_start_day: p.outsample_start_day || null,
       outsample_end_day: p.outsample_end_day || null,
     }
-    const { data } = await runFusion(payload)
-    result.value = data
-    navCurves.value = data.nav_data?.nav_curves || {}
-    ElMessage.success('融合完成')
+    const { data } = await startFusion(payload)
+    taskId.value = data.task_id
+    taskStatus.value = data.status || 'running'
+    taskProgress.value = '融合任务已提交...'
+    if (pollTimer) clearInterval(pollTimer)
+    pollTimer = setInterval(async () => {
+      try {
+        const { data: statusData } = await getFusionStatus(taskId.value)
+        taskStatus.value = statusData.status
+        taskProgress.value = statusData.progress || ''
+        taskError.value = statusData.error || ''
+        if (statusData.status === 'completed' || statusData.status === 'terminated') {
+          clearInterval(pollTimer)
+          result.value = statusData.result || null
+          navCurves.value = statusData.result?.nav_data?.nav_curves || {}
+          ElMessage.success('融合完成')
+        } else if (statusData.status === 'failed') {
+          clearInterval(pollTimer)
+          ElMessage.error('融合失败')
+        }
+      } catch {
+        // keep polling
+      }
+    }, 3000)
   } catch (e) {
     ElMessage.error(`融合失败: ${e.response?.data?.detail || e.message}`)
   } finally {
@@ -212,5 +250,6 @@ const run = async () => {
 }
 
 onMounted(loadMeta)
+onUnmounted(() => { if (pollTimer) clearInterval(pollTimer) })
 </script>
 

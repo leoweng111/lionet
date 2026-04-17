@@ -46,22 +46,18 @@
           <template v-for="(item, fn) in resultMap" :key="fn">
             <el-card shadow="hover" style="margin-bottom:12px;">
               <template #header><span style="font-weight:600;">{{ fn }} 绩效</span></template>
-              <el-row :gutter="12">
-                <el-col :span="12">
-                  <el-tag type="success" size="small" style="margin-bottom:6px;">样本内</el-tag>
-                  <el-table :data="item.isSummary" stripe size="small" max-height="220">
-                    <el-table-column v-for="c in item.columns" :key="`is_${fn}_${c}`" :prop="c" :label="c" min-width="100" show-overflow-tooltip />
-                  </el-table>
-                </el-col>
-                <el-col :span="12">
-                  <el-tag type="warning" size="small" style="margin-bottom:6px;">样本外</el-tag>
-                  <el-table :data="item.oosSummary" stripe size="small" max-height="220">
-                    <el-table-column v-for="c in item.columns" :key="`oos_${fn}_${c}`" :prop="c" :label="c" min-width="100" show-overflow-tooltip />
-                  </el-table>
-                </el-col>
-              </el-row>
+              <el-tag type="success" size="small" style="margin-bottom:6px;">样本内</el-tag>
+              <el-table :data="item.isSummary" stripe size="small" max-height="220" style="margin-bottom:10px;">
+                <el-table-column v-for="c in item.columns" :key="`is_${fn}_${c}`" :prop="c" :label="c" min-width="100" show-overflow-tooltip />
+              </el-table>
+              <template v-if="item.hasOos">
+                <el-tag type="warning" size="small" style="margin-bottom:6px;">样本外</el-tag>
+                <el-table :data="item.oosSummary" stripe size="small" max-height="220">
+                  <el-table-column v-for="c in item.columns" :key="`oos_${fn}_${c}`" :prop="c" :label="c" min-width="100" show-overflow-tooltip />
+                </el-table>
+              </template>
             </el-card>
-            <el-card class="chart-card" shadow="hover" style="margin-bottom:24px;"><NavChart :title="fn+' 样本内外净值'" :curve-data="item.curve" :split-date="oosStart" height="360px" /></el-card>
+            <el-card class="chart-card" shadow="hover" style="margin-bottom:24px;"><NavChart :title="fn+' 连续净值曲线'" :curve-data="item.curve" :split-date="item.hasOos ? oosStart : ''" height="360px" /></el-card>
           </template>
         </template>
 
@@ -138,36 +134,6 @@ const pickSummaryByFactor = (summary, fn) => {
   return s.filter(x => x[nameCol] === fn)
 }
 
-const pad = (arr, n, fill = null) => {
-  const out = Array.isArray(arr) ? [...arr] : []
-  while (out.length < n) out.push(fill)
-  return out
-}
-
-const buildCombinedCurve = (isCurve, oosCurve) => {
-  const isTimes = isCurve?.time || []
-  const oosTimes = oosCurve?.time || []
-  const time = [...isTimes, ...oosTimes]
-
-  const isGross = isCurve?.gross_nav || []
-  const isNet = isCurve?.net_nav || []
-  const oosGross = oosCurve?.gross_nav || []
-  const oosNet = oosCurve?.net_nav || []
-
-  const isLen = isTimes.length
-  const oosLen = oosTimes.length
-
-  return {
-    time,
-    gross_nav: [...pad(isGross, isLen), ...new Array(oosLen).fill(null)],
-    net_nav: [...pad(isNet, isLen), ...new Array(oosLen).fill(null)],
-    extra_series: [
-      { name: '样本外净值(Gross)', data: [...new Array(isLen).fill(null), ...pad(oosGross, oosLen)], lineType: 'dashed' },
-      { name: '样本外净值(Net)', data: [...new Array(isLen).fill(null), ...pad(oosNet, oosLen)], lineType: 'dashed' },
-    ],
-  }
-}
-
 const handleBt = async () => {
   if (inputMode.value === 'db') {
     if (!p.version || !p.fc_name_list.length) {
@@ -188,18 +154,31 @@ const handleBt = async () => {
       basePayload.fc_name_list = []
     }
 
-    const { data: isData } = await runBacktest(basePayload)
+    const hasOos = Boolean(oosStart.value && oosEnd.value)
+    const fullPayload = {
+      ...basePayload,
+      start_time: p.start_time,
+      end_time: hasOos ? oosEnd.value : p.end_time,
+    }
+    const { data: fullData } = await runBacktest(fullPayload)
+
+    const isData = hasOos ? (await runBacktest(basePayload)).data : fullData
 
     let oosData = null
-    if (oosStart.value && oosEnd.value) {
+    if (hasOos) {
       const oosPayload = { ...basePayload, start_time: oosStart.value, end_time: oosEnd.value }
       const { data } = await runBacktest(oosPayload)
       oosData = data
     }
 
-    const isCurves = isData?.nav_data?.nav_curves || {}
-    const oosCurves = oosData?.nav_data?.nav_curves || {}
-    const allNames = Array.from(new Set([...Object.keys(isCurves), ...Object.keys(oosCurves)]))
+    const fullCurves = fullData?.nav_data?.nav_curves || {}
+    const allNames = Array.from(
+      new Set([
+        ...Object.keys(fullCurves),
+        ...Object.keys(isData?.nav_data?.nav_curves || {}),
+        ...Object.keys(oosData?.nav_data?.nav_curves || {}),
+      ]),
+    )
 
     const merged = {}
     allNames.forEach((fn) => {
@@ -209,8 +188,9 @@ const handleBt = async () => {
       merged[fn] = {
         isSummary,
         oosSummary,
+        hasOos,
         columns: cols,
-        curve: buildCombinedCurve(isCurves[fn] || { time: [], gross_nav: [], net_nav: [] }, oosCurves[fn] || { time: [], gross_nav: [], net_nav: [] }),
+        curve: fullCurves[fn] || { time: [], gross_nav: [], net_nav: [] },
       }
     })
     resultMap.value = merged

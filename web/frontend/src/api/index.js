@@ -19,12 +19,14 @@ export const runBacktest = (data) => api.post('/api/backtest', data)
 
 // ── Fusion ────────────────────────────────────────────
 export const runFusion = (data) => api.post('/api/fusion/run', data)
+export const startFusion = (data) => api.post('/api/fusion/start', data)
+export const getFusionStatus = (taskId) => api.get(`/api/fusion/status/${taskId}`)
 
 // ── Strategy ──────────────────────────────────────────
 export const runStrategy = (data) => api.post('/api/strategy', data)
 
 // ── Tasks ─────────────────────────────────────────────
-export const getTasks = () => api.get('/api/tasks')
+export const getTasks = (params) => api.get('/api/tasks', { params })
 export const getTaskDetail = (taskId) => api.get(`/api/tasks/detail/${taskId}`)
 
 // ── Health ────────────────────────────────────────────

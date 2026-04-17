@@ -3,10 +3,7 @@ Lionet Factor Mining Web Backend - FastAPI
 """
 
 import asyncio
-import copy
-import json
 import logging
-import os
 import re
 import sys
 import threading
@@ -48,6 +45,19 @@ app.add_middleware(
 # ── In-memory task store ───────────────────────────────────────────────
 tasks: Dict[str, Dict[str, Any]] = {}
 
+GP_TASK_COLLECTION = "gp_task"
+FUSION_TASK_COLLECTION = "fusion_task"
+TASK_TYPE_GP = "gp_mining"
+TASK_TYPE_FUSION = "factor_fusion"
+
+
+def _task_type_label(task_type: Optional[str]) -> str:
+    return "因子融合" if task_type == TASK_TYPE_FUSION else "因子挖掘"
+
+
+def _task_collection(task_type: Optional[str]) -> str:
+    return FUSION_TASK_COLLECTION if task_type == TASK_TYPE_FUSION else GP_TASK_COLLECTION
+
 
 # ── Startup: clean up stale "running" tasks in DB ─────────────────────
 @app.on_event("startup")
@@ -57,18 +67,21 @@ async def _cleanup_stale_tasks():
     When the server process restarts, those tasks are definitely dead.
     """
     try:
-        result = update_many_data(
-            database="task",
-            collection="task_detail",
-            mongo_operator={"status": "running"},
-            update_data={
-                "status": "interrupted",
-                "progress": "服务重启，任务已中断",
-                "finished_at": datetime.now().isoformat(),
-            },
-        )
-        if result.get("modified_count", 0) > 0:
-            print(f"[STARTUP] Marked {result['modified_count']} stale running task(s) as interrupted.")
+        total_modified = 0
+        for collection in (GP_TASK_COLLECTION, FUSION_TASK_COLLECTION):
+            result = update_many_data(
+                database="task",
+                collection=collection,
+                mongo_operator={"status": "running"},
+                update_data={
+                    "status": "interrupted",
+                    "progress": "服务重启，任务已中断",
+                    "finished_at": datetime.now().isoformat(),
+                },
+            )
+            total_modified += int(result.get("modified_count", 0) or 0)
+        if total_modified > 0:
+            print(f"[STARTUP] Marked {total_modified} stale running task(s) as interrupted.")
     except Exception as e:
         print(f"[STARTUP] Failed to clean up stale tasks: {e}")
 
@@ -122,10 +135,11 @@ class _GPProgressHandler(logging.Handler):
             try:
                 update_one_data(
                     database="task",
-                    collection="task_detail",
+                    collection=GP_TASK_COLLECTION,
                     mongo_operator={"task_id": self.task_id},
                     data={
                         "task_id": self.task_id,
+                        "task_type": TASK_TYPE_GP,
                         "status": tasks[self.task_id].get("status", "running"),
                         "progress": tasks[self.task_id].get("progress", ""),
                         "gp_progress": tasks[self.task_id].get("gp_progress"),
@@ -367,8 +381,54 @@ def _build_mining_result_overview(result: Dict[str, Any]) -> str:
                 lines.append(f'  Formula: {formula}')
             extra_metrics = {k: v for k, v in info.items() if k != 'factor_name'}
             if extra_metrics:
-                lines.append(f'  Metrics: {json.dumps(extra_metrics, ensure_ascii=False)}')
+                lines.extend(_format_indicator_metrics_lines(extra_metrics, indent='  '))
     return '\n'.join(lines)
+
+
+def _format_indicator_metrics_lines(metrics: Dict[str, Any], indent: str = '') -> List[str]:
+    lines: List[str] = []
+    for k, v in metrics.items():
+        if k == "yearly_detail" and isinstance(v, list):
+            lines.append(f"{indent}{k}:")
+            for yearly_item in v:
+                if not isinstance(yearly_item, dict):
+                    lines.append(f"{indent}  - {yearly_item}")
+                    continue
+                year = yearly_item.get("year", "N/A")
+                val = yearly_item.get("value")
+                threshold = yearly_item.get("threshold")
+                passed = yearly_item.get("pass")
+                lines.append(
+                    f"{indent}  - {year}: value={val}, threshold={threshold}, pass={passed}"
+                )
+        elif isinstance(v, dict):
+            lines.append(f"{indent}{k}:")
+            lines.extend(_format_indicator_metrics_lines(v, indent=indent + '  '))
+        elif isinstance(v, list):
+            lines.append(f"{indent}{k}:")
+            for item in v:
+                lines.append(f"{indent}  - {item}")
+        else:
+            lines.append(f"{indent}{k}: {v}")
+    return lines
+
+
+def _build_fusion_result_overview(result: Dict[str, Any]) -> str:
+    lines = ["因子融合任务完成。"]
+    lines.append(f"落库状态: {'已落库' if result.get('persisted') else '未落库'}")
+    if result.get("collection") and result.get("version"):
+        lines.append(f"落库位置: factors.{result.get('collection')}@{result.get('version')}")
+    if result.get("fusion_factor_name"):
+        lines.append(f"融合因子名: {result.get('fusion_factor_name')}")
+    if result.get("fusion_formula"):
+        lines.append(f"融合公式: {result.get('fusion_formula')}")
+    if result.get("final_metrics"):
+        lines.append("最终指标:")
+        lines.extend(_format_indicator_metrics_lines(result.get("final_metrics") or {}, indent='  '))
+    if result.get("final_metrics_outsample"):
+        lines.append("样本外指标:")
+        lines.extend(_format_indicator_metrics_lines(result.get("final_metrics_outsample") or {}, indent='  '))
+    return "\n".join(lines)
 
 
 def _extract_strategy_nav_data(strat: Strategy) -> Dict[str, Any]:
@@ -401,11 +461,14 @@ def _extract_strategy_nav_data(strat: Strategy) -> Dict[str, Any]:
 
 
 def _save_task_to_db(task_id: str, params_dict: dict, status: str,
-                     result_summary: Optional[dict] = None):
-    """Persist task detail into MongoDB (database=task, collection=task_detail)."""
+                     result_summary: Optional[dict] = None,
+                     task_type: str = TASK_TYPE_GP,
+                     result: Optional[dict] = None):
+    """Persist task detail into MongoDB (database=task, task-type collection)."""
     try:
         record = {
             "task_id": task_id,
+            "task_type": task_type,
             "status": status,
             "params": params_dict,
             "progress": tasks.get(task_id, {}).get("progress", ""),
@@ -416,15 +479,32 @@ def _save_task_to_db(task_id: str, params_dict: dict, status: str,
         }
         if result_summary:
             record["result_summary"] = result_summary
+        if result is not None:
+            record["result"] = result
         update_one_data(
             database="task",
-            collection="task_detail",
+            collection=_task_collection(task_type),
             mongo_operator={"task_id": task_id},
             data=record,
             upsert=True,
         )
     except Exception as e:
         print(f"[WARNING] Failed to save task {task_id} to DB: {e}")
+
+
+def _load_task_from_db(task_id: str) -> Optional[Dict[str, Any]]:
+    for task_type, collection in ((TASK_TYPE_GP, GP_TASK_COLLECTION), (TASK_TYPE_FUSION, FUSION_TASK_COLLECTION)):
+        try:
+            df = get_data(database="task", collection=collection, mongo_operator={"task_id": task_id})
+            if isinstance(df, pd.DataFrame) and not df.empty:
+                row = df.iloc[0].to_dict()
+                row = {k: _sanitize_nan(v) for k, v in row.items()}
+                if not row.get("task_type"):
+                    row["task_type"] = task_type
+                return row
+        except Exception:
+            continue
+    return None
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -492,6 +572,7 @@ async def start_mining(params: GPMiningParams):
     task_id = str(uuid.uuid4())[:8]
     cancel_event = threading.Event()
     tasks[task_id] = {
+        "task_type": TASK_TYPE_GP,
         "status": "running",
         "started_at": datetime.now().isoformat(),
         "params": params.dict(),
@@ -504,7 +585,7 @@ async def start_mining(params: GPMiningParams):
         "logs": [],
     }
     # Persist initial running record immediately for cross-worker visibility.
-    _save_task_to_db(task_id, params.dict(), "running", {"message": "任务已提交"})
+    _save_task_to_db(task_id, params.dict(), "running", {"message": "任务已提交"}, task_type=TASK_TYPE_GP)
 
     async def _run():
         try:
@@ -522,12 +603,13 @@ async def start_mining(params: GPMiningParams):
                     "factor_formulas": result.get("factor_formulas", {}),
                     "best_failed_indicator_metrics": result.get("best_failed_indicator_metrics"),
                     "result_overview": tasks[task_id]["result_overview"],
-                })
+                }, task_type=TASK_TYPE_GP, result=result)
                 return
             tasks[task_id]["result"] = result
             tasks[task_id]["result_overview"] = _build_mining_result_overview(result)
             tasks[task_id]["status"] = "completed"
             tasks[task_id]["progress"] = "完成"
+            tasks[task_id]["finished_at"] = datetime.now().isoformat()
             _save_task_to_db(task_id, params.dict(), "completed", {
                 "selected_fc_name_list": result.get("selected_fc_name_list", []),
                 "version": result.get("version", ""),
@@ -536,16 +618,18 @@ async def start_mining(params: GPMiningParams):
                 "factor_formulas": result.get("factor_formulas", {}),
                 "best_failed_indicator_metrics": result.get("best_failed_indicator_metrics"),
                 "result_overview": tasks[task_id]["result_overview"],
-            })
+            }, task_type=TASK_TYPE_GP, result=result)
         except Exception as e:
             # If terminated by user, keep status but note the error
             if tasks[task_id]["status"] == "terminated":
                 tasks[task_id]["progress"] = "已终止（用户手动终止）"
+                tasks[task_id]["finished_at"] = datetime.now().isoformat()
                 return
             tasks[task_id]["status"] = "failed"
             tasks[task_id]["error"] = traceback.format_exc()
             tasks[task_id]["progress"] = f"失败: {str(e)}"
-            _save_task_to_db(task_id, params.dict(), "failed", {"error": str(e)})
+            tasks[task_id]["finished_at"] = datetime.now().isoformat()
+            _save_task_to_db(task_id, params.dict(), "failed", {"error": str(e)}, task_type=TASK_TYPE_GP)
 
     asyncio.create_task(_run())
     return {"task_id": task_id, "status": "running"}
@@ -647,9 +731,11 @@ async def mining_status(task_id: str):
     task = tasks[task_id]
     resp = {
         "task_id": task_id,
+        "task_type": task.get("task_type", TASK_TYPE_GP),
         "status": task["status"],
         "progress": task["progress"],
         "started_at": task["started_at"],
+        "finished_at": task.get("finished_at", ""),
         "error": task.get("error"),
         "gp_progress": task.get("gp_progress"),
         "params": task.get("params"),
@@ -674,18 +760,26 @@ async def terminate_mining(task_id: str):
         cancel_event.set()
         task["status"] = "terminated"
         task["progress"] = "已终止（用户手动终止）"
-        _save_task_to_db(task_id, task.get("params", {}), "terminated", {"message": "用户手动终止"})
+        task["finished_at"] = datetime.now().isoformat()
+        _save_task_to_db(
+            task_id,
+            task.get("params", {}),
+            "terminated",
+            {"message": "用户手动终止"},
+            task_type=task.get("task_type", TASK_TYPE_GP),
+            result=task.get("result"),
+        )
         return {"task_id": task_id, "status": "terminated", "message": "任务已终止"}
 
     # ── Case 2: task only exists in DB (e.g. stale after server restart)
     try:
-        df = get_data(database="task", collection="task_detail", mongo_operator={"task_id": task_id})
+        df = get_data(database="task", collection=GP_TASK_COLLECTION, mongo_operator={"task_id": task_id})
         if isinstance(df, pd.DataFrame) and not df.empty:
             current_status = str(df.iloc[0].get("status", "") or "")
             if current_status == "running":
                 update_one_data(
                     database="task",
-                    collection="task_detail",
+                    collection=GP_TASK_COLLECTION,
                     mongo_operator={"task_id": task_id},
                     data={
                         "status": "terminated",
@@ -752,77 +846,168 @@ async def run_backtest(params: BacktestParams):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+def _execute_fusion(params: FusionParams) -> Dict[str, Any]:
+    raw_factor_dict = None
+    if params.candidate_versions:
+        records = get_factor_formula_records(
+            collections=params.collection,
+            versions=params.candidate_versions,
+            database='factors',
+        )
+        if records.empty:
+            raise ValueError(
+                f'No factor formulas found for collections={params.collection}, '
+                f'versions={params.candidate_versions}.'
+            )
+        raw_factor_dict = {}
+        for version, df_v in records.groupby('version', sort=False):
+            names = [str(x) for x in df_v['factor_name'].dropna().astype(str).tolist()]
+            if names:
+                raw_factor_dict[str(version)] = list(dict.fromkeys(names))
+
+    fusioner = FactorFusioner(
+        fusion_method=params.fusion_method,
+        raw_factor_dict=raw_factor_dict,
+        collection=params.collection,
+        instrument_type=params.instrument_type,
+        instrument_id_list=params.instrument_id_list,
+        fc_freq=params.fc_freq,
+        start_time=params.start_time,
+        end_time=params.end_time,
+        portfolio_adjust_method=params.portfolio_adjust_method,
+        interest_method=params.interest_method,
+        risk_free_rate=params.risk_free_rate,
+        apply_weighted_price=params.apply_weighted_price,
+        check_leakage_count=params.check_leakage_count,
+        check_relative=params.check_relative,
+        relative_threshold=params.relative_threshold,
+        relative_check_version_list=params.relative_check_version_list,
+        max_fusion_count=params.max_fusion_count,
+        fusion_metrics=params.fusion_metrics,
+        version=params.version,
+        n_jobs=params.n_jobs,
+        base_col_list=params.base_col_list,
+        consider_outsample=params.consider_outsample,
+        outsample_start_day=params.outsample_start_day,
+        outsample_end_day=params.outsample_end_day,
+    )
+    result = fusioner.fuse()
+    bt = result.get('bt')
+    nav_data = _extract_nav_data(bt) if bt else {'nav_curves': {}, 'performance_summary': []}
+
+    return {
+        'status': 'ok',
+        'version': params.version,
+        'collection': result.get('fusion_collection', 'factor_fusion'),
+        'persisted': bool(result.get('persisted', False)),
+        'fusion_factor_name': result.get('fusion_factor_name'),
+        'fusion_formula': result.get('fusion_formula'),
+        'fusion_info': result.get('fusion_info'),
+        'selected_factor_keys': result.get('selected_factor_keys', []),
+        'selected_factors_detail': result.get('selected_factors_detail', []),
+        'final_metrics': result.get('final_metrics', {}),
+        'final_metrics_outsample': result.get('final_metrics_outsample'),
+        'leakage_check': result.get('leakage_check'),
+        'relative_check': result.get('relative_check'),
+        'consider_outsample': result.get('consider_outsample', False),
+        'outsample_start_day': result.get('outsample_start_day'),
+        'outsample_end_day': result.get('outsample_end_day'),
+        'nav_data': nav_data,
+    }
+
+
+@app.post('/api/fusion/start')
+async def start_fusion(params: FusionParams):
+    task_id = str(uuid.uuid4())[:8]
+    tasks[task_id] = {
+        "task_type": TASK_TYPE_FUSION,
+        "status": "running",
+        "started_at": datetime.now().isoformat(),
+        "params": params.dict(),
+        "progress": "初始化融合任务...",
+        "gp_progress": None,
+        "result": None,
+        "result_overview": None,
+        "error": None,
+        "logs": [],
+    }
+    _save_task_to_db(task_id, params.dict(), "running", {"message": "融合任务已提交"}, task_type=TASK_TYPE_FUSION)
+
+    async def _run():
+        try:
+            tasks[task_id]["progress"] = "正在执行融合计算..."
+            loop = asyncio.get_event_loop()
+            result = await loop.run_in_executor(None, _execute_fusion, params)
+            tasks[task_id]["result"] = result
+            tasks[task_id]["result_overview"] = _build_fusion_result_overview(result)
+            tasks[task_id]["status"] = "completed"
+            tasks[task_id]["progress"] = "完成"
+            tasks[task_id]["finished_at"] = datetime.now().isoformat()
+            _save_task_to_db(
+                task_id,
+                params.dict(),
+                "completed",
+                {
+                    "version": result.get("version", ""),
+                    "collection": result.get("collection"),
+                    "persisted": result.get("persisted"),
+                    "fusion_factor_name": result.get("fusion_factor_name"),
+                    "fusion_formula": result.get("fusion_formula"),
+                    "final_metrics": result.get("final_metrics"),
+                    "selected_factors_detail": result.get("selected_factors_detail", []),
+                    "result_overview": tasks[task_id]["result_overview"],
+                },
+                task_type=TASK_TYPE_FUSION,
+                result=result,
+            )
+        except Exception as e:
+            tasks[task_id]["status"] = "failed"
+            tasks[task_id]["error"] = traceback.format_exc()
+            tasks[task_id]["progress"] = f"失败: {str(e)}"
+            tasks[task_id]["finished_at"] = datetime.now().isoformat()
+            _save_task_to_db(
+                task_id,
+                params.dict(),
+                "failed",
+                {"error": str(e)},
+                task_type=TASK_TYPE_FUSION,
+            )
+
+    asyncio.create_task(_run())
+    return {"task_id": task_id, "task_type": TASK_TYPE_FUSION, "status": "running"}
+
+
+@app.get('/api/fusion/status/{task_id}')
+async def fusion_status(task_id: str):
+    if task_id not in tasks:
+        raise HTTPException(status_code=404, detail="Task not found")
+    task = tasks[task_id]
+    if task.get("task_type") != TASK_TYPE_FUSION:
+        raise HTTPException(status_code=400, detail="Not a fusion task")
+    resp = {
+        "task_id": task_id,
+        "task_type": task.get("task_type"),
+        "status": task["status"],
+        "progress": task["progress"],
+        "started_at": task["started_at"],
+        "finished_at": task.get("finished_at", ""),
+        "error": task.get("error"),
+        "params": task.get("params"),
+        "logs": task.get("logs", [])[-200:],
+    }
+    if task["status"] in ("completed", "terminated") and task.get("result"):
+        resp["result"] = task.get("result")
+        resp["result_overview"] = task.get("result_overview")
+    return resp
+
+
 @app.post('/api/fusion/run')
 async def run_fusion(params: FusionParams):
+    """Backward-compatible sync fusion endpoint."""
     try:
-        raw_factor_dict = None
-        if params.candidate_versions:
-            records = get_factor_formula_records(
-                collections=params.collection,
-                versions=params.candidate_versions,
-                database='factors',
-            )
-            if records.empty:
-                raise ValueError(
-                    f'No factor formulas found for collections={params.collection}, '
-                    f'versions={params.candidate_versions}.'
-                )
-            raw_factor_dict = {}
-            for version, df_v in records.groupby('version', sort=False):
-                names = [str(x) for x in df_v['factor_name'].dropna().astype(str).tolist()]
-                if names:
-                    raw_factor_dict[str(version)] = list(dict.fromkeys(names))
-
-        fusioner = FactorFusioner(
-            fusion_method=params.fusion_method,
-            raw_factor_dict=raw_factor_dict,
-            collection=params.collection,
-            instrument_type=params.instrument_type,
-            instrument_id_list=params.instrument_id_list,
-            fc_freq=params.fc_freq,
-            start_time=params.start_time,
-            end_time=params.end_time,
-            portfolio_adjust_method=params.portfolio_adjust_method,
-            interest_method=params.interest_method,
-            risk_free_rate=params.risk_free_rate,
-            apply_weighted_price=params.apply_weighted_price,
-            check_leakage_count=params.check_leakage_count,
-            check_relative=params.check_relative,
-            relative_threshold=params.relative_threshold,
-            relative_check_version_list=params.relative_check_version_list,
-            max_fusion_count=params.max_fusion_count,
-            fusion_metrics=params.fusion_metrics,
-            version=params.version,
-            n_jobs=params.n_jobs,
-            base_col_list=params.base_col_list,
-            consider_outsample=params.consider_outsample,
-            outsample_start_day=params.outsample_start_day,
-            outsample_end_day=params.outsample_end_day,
-        )
         loop = asyncio.get_event_loop()
-        result = await loop.run_in_executor(None, fusioner.fuse)
-        bt = result.get('bt')
-        nav_data = _extract_nav_data(bt) if bt else {'nav_curves': {}, 'performance_summary': []}
-
-        return {
-            'status': 'ok',
-            'version': params.version,
-            'collection': result.get('fusion_collection', 'factor_fusion'),
-            'persisted': bool(result.get('persisted', False)),
-            'fusion_factor_name': result.get('fusion_factor_name'),
-            'fusion_formula': result.get('fusion_formula'),
-            'fusion_info': result.get('fusion_info'),
-            'selected_factor_keys': result.get('selected_factor_keys', []),
-            'selected_factors_detail': result.get('selected_factors_detail', []),
-            'final_metrics': result.get('final_metrics', {}),
-            'final_metrics_outsample': result.get('final_metrics_outsample'),
-            'leakage_check': result.get('leakage_check'),
-            'relative_check': result.get('relative_check'),
-            'consider_outsample': result.get('consider_outsample', False),
-            'outsample_start_day': result.get('outsample_start_day'),
-            'outsample_end_day': result.get('outsample_end_day'),
-            'nav_data': nav_data,
-        }
+        result = await loop.run_in_executor(None, _execute_fusion, params)
+        return result
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -863,54 +1048,78 @@ async def run_strategy(params: StrategyBatchParams):
 # ── Task list + DB-persisted detail ───────────────────────────────────
 
 @app.get("/api/tasks")
-async def list_tasks():
+async def list_tasks(start_date: Optional[str] = None, end_date: Optional[str] = None):
+    def _in_date_range(ts: str) -> bool:
+        if not ts:
+            return False
+        d = str(ts)[:10]
+        if start_date and d < start_date:
+            return False
+        if end_date and d > end_date:
+            return False
+        return True
+
     task_list = []
     for tid, info in tasks.items():
+        finished_at = info.get("finished_at", "")
+        candidate_time = finished_at or info.get("started_at", "")
+        if (start_date or end_date) and not _in_date_range(candidate_time):
+            continue
         task_list.append({
-            "task_id": tid, "status": info["status"], "progress": info["progress"],
+            "task_id": tid,
+            "task_type": _task_type_label(info.get("task_type")),
+            "status": info["status"],
+            "progress": info["progress"],
             "started_at": info["started_at"],
+            "finished_at": finished_at,
             "version": info.get("params", {}).get("version", ""),
             "gp_progress": info.get("gp_progress"),
         })
     # Also fetch from DB for historical tasks
-    try:
-        db_tasks = get_data(database="task", collection="task_detail", mongo_operator={})
-        if isinstance(db_tasks, pd.DataFrame) and not db_tasks.empty:
-            for _, row in db_tasks.iterrows():
-                tid = _sanitize_nan(row.get("task_id"), "")
-                if tid and tid not in tasks:
-                    db_status = _sanitize_nan(row.get("status"), "unknown")
-                    db_progress = _sanitize_nan(row.get("progress"), "")
-                    # Self-heal: DB task shows "running" but no in-memory counterpart
-                    # means the task is definitely dead (server restarted / crashed).
-                    if db_status == "running":
-                        db_status = "interrupted"
-                        db_progress = "服务重启，任务已中断"
-                        try:
-                            update_one_data(
-                                database="task",
-                                collection="task_detail",
-                                mongo_operator={"task_id": tid},
-                                data={
-                                    "status": "interrupted",
-                                    "progress": db_progress,
-                                    "finished_at": datetime.now().isoformat(),
-                                },
-                                upsert=False,
-                            )
-                        except Exception:
-                            pass
-                    params_val = _sanitize_nan(row.get("params"))
-                    task_list.append({
-                        "task_id": tid,
-                        "status": db_status,
-                        "progress": db_progress,
-                        "started_at": _sanitize_nan(row.get("started_at"), ""),
-                        "version": params_val.get("version", "") if isinstance(params_val, dict) else "",
-                        "gp_progress": _sanitize_nan(row.get("gp_progress")),
-                    })
-    except Exception:
-        pass
+    for task_type, collection in ((TASK_TYPE_GP, GP_TASK_COLLECTION), (TASK_TYPE_FUSION, FUSION_TASK_COLLECTION)):
+        try:
+            db_tasks = get_data(database="task", collection=collection, mongo_operator={})
+            if isinstance(db_tasks, pd.DataFrame) and not db_tasks.empty:
+                for _, row in db_tasks.iterrows():
+                    tid = _sanitize_nan(row.get("task_id"), "")
+                    if tid and tid not in tasks:
+                        db_status = _sanitize_nan(row.get("status"), "unknown")
+                        db_progress = _sanitize_nan(row.get("progress"), "")
+                        if db_status == "running":
+                            db_status = "interrupted"
+                            db_progress = "服务重启，任务已中断"
+                            try:
+                                update_one_data(
+                                    database="task",
+                                    collection=collection,
+                                    mongo_operator={"task_id": tid},
+                                    data={
+                                        "status": "interrupted",
+                                        "progress": db_progress,
+                                        "finished_at": datetime.now().isoformat(),
+                                    },
+                                    upsert=False,
+                                )
+                            except Exception:
+                                pass
+                        params_val = _sanitize_nan(row.get("params"))
+                        started_at = _sanitize_nan(row.get("started_at"), "")
+                        finished_at = _sanitize_nan(row.get("finished_at"), "")
+                        candidate_time = finished_at or started_at
+                        if (start_date or end_date) and not _in_date_range(candidate_time):
+                            continue
+                        task_list.append({
+                            "task_id": tid,
+                            "task_type": _task_type_label(_sanitize_nan(row.get("task_type"), task_type)),
+                            "status": db_status,
+                            "progress": db_progress,
+                            "started_at": started_at,
+                            "finished_at": finished_at,
+                            "version": params_val.get("version", "") if isinstance(params_val, dict) else "",
+                            "gp_progress": _sanitize_nan(row.get("gp_progress")),
+                        })
+        except Exception:
+            pass
     return {"tasks": sorted(task_list, key=lambda x: x.get("started_at", ""), reverse=True)}
 
 
@@ -920,8 +1129,13 @@ async def get_task_detail(task_id: str):
     if task_id in tasks:
         task = tasks[task_id]
         return {
-            "task_id": task_id, "status": task["status"], "progress": task["progress"],
-            "started_at": task["started_at"], "error": task.get("error"),
+            "task_id": task_id,
+            "task_type": _task_type_label(task.get("task_type", TASK_TYPE_GP)),
+            "status": task["status"],
+            "progress": task["progress"],
+            "started_at": task["started_at"],
+            "finished_at": task.get("finished_at", ""),
+            "error": task.get("error"),
             "gp_progress": task.get("gp_progress"), "params": task.get("params"),
             "result": task.get("result") if task["status"] in ("completed", "terminated") else None,
             "result_overview": task.get("result_overview"),
@@ -929,20 +1143,20 @@ async def get_task_detail(task_id: str):
         }
     # Fallback to DB
     try:
-        df = get_data(database="task", collection="task_detail", mongo_operator={"task_id": task_id})
-        if isinstance(df, pd.DataFrame) and not df.empty:
-            row = df.iloc[0].to_dict()
+        row = _load_task_from_db(task_id)
+        if row:
             # Sanitize NaN values from pandas to prevent JSON serialization errors
-            row = {k: _sanitize_nan(v) for k, v in row.items()}
             # Self-heal: if DB says "running" but task is not in memory, it's dead.
             db_status = row.get("status") or "unknown"
+            db_task_type = row.get("task_type") or TASK_TYPE_GP
+            db_collection = _task_collection(db_task_type)
             if db_status == "running":
                 db_status = "interrupted"
                 row["progress"] = "服务重启，任务已中断"
                 try:
                     update_one_data(
                         database="task",
-                        collection="task_detail",
+                        collection=db_collection,
                         mongo_operator={"task_id": task_id},
                         data={
                             "status": "interrupted",
@@ -957,11 +1171,13 @@ async def get_task_detail(task_id: str):
             logs_val = row.get("logs")
             return {
                 "task_id": task_id,
+                "task_type": _task_type_label(db_task_type),
                 "status": db_status,
                 "progress": row.get("progress") or "",
                 "started_at": row.get("started_at") or "",
                 "finished_at": row.get("finished_at") or "",
                 "params": row.get("params"),
+                "result": row.get("result"),
                 "result_summary": result_summary,
                 "result_overview": result_summary.get("result_overview") if isinstance(result_summary, dict) else None,
                 "logs": logs_val if isinstance(logs_val, list) else [],
