@@ -68,10 +68,12 @@
 </template>
 
 <script setup>
-import { ref, reactive, computed } from 'vue'
+import { ref, reactive, computed, watch, onMounted } from 'vue'
 import { ElMessage } from 'element-plus'
 import { getVersions, getFactors, runBacktest } from '../api'
 import NavChart from '../components/NavChart.vue'
+
+const SK = 'lionet_backtest'
 
 const collections = ref([]), versionMap = ref({}), allVersions = ref([]), availableFactors = ref([])
 const loading = ref(false)
@@ -203,7 +205,30 @@ const handleBt = async () => {
   }
 }
 
-const clearResults = () => { resultMap.value = null }
+const clearResults = () => {
+  resultMap.value = null
+  sessionStorage.removeItem(SK)
+}
 
-fetchVersions()
+watch(resultMap, () => {
+  try {
+    if (resultMap.value && Object.keys(resultMap.value).length) {
+      sessionStorage.setItem(SK, JSON.stringify(resultMap.value))
+    } else {
+      sessionStorage.removeItem(SK)
+    }
+  } catch {
+    // noop
+  }
+}, { deep: true })
+
+onMounted(() => {
+  fetchVersions()
+  try {
+    const s = sessionStorage.getItem(SK)
+    if (s) resultMap.value = JSON.parse(s)
+  } catch {
+    // noop
+  }
+})
 </script>

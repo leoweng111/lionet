@@ -106,7 +106,7 @@
               <el-table-column prop="factor_name" label="factor_name" min-width="120" show-overflow-tooltip />
             </el-table>
           </el-card>
-          <div v-if="fusionResult(dd)?.nav_data?.nav_curves"><el-card v-for="(curve, name) in fusionResult(dd).nav_data.nav_curves" :key="name" class="chart-card" shadow="never" style="margin-bottom:12px;"><NavChart :title="name" :curve-data="curve" height="300px" /></el-card></div>
+          <div v-if="fusionResult(dd)?.nav_data?.nav_curves"><el-card v-for="(curve, name) in fusionResult(dd).nav_data.nav_curves" :key="name" class="chart-card" shadow="never" style="margin-bottom:12px;"><NavChart :title="name" :curve-data="curve" :split-date="fusionResult(dd)?.nav_split_date || ''" height="300px" /></el-card></div>
         </template>
       </template>
     </el-dialog>

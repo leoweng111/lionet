@@ -83,8 +83,13 @@ const chartOption = computed(() => {
     )
   }
 
-  const splitDate = (props.splitDate || '').slice(0, 10)
-  const splitIdx = splitDate ? times.findIndex(t => t === splitDate) : -1
+  const rawSplitDate = (props.splitDate || '').replace(/\//g, '-')
+  const normalizedSplitDate = /^\d{8}$/.test(rawSplitDate)
+    ? `${rawSplitDate.slice(0, 4)}-${rawSplitDate.slice(4, 6)}-${rawSplitDate.slice(6, 8)}`
+    : rawSplitDate.slice(0, 10)
+  const splitIdx = normalizedSplitDate
+    ? times.findIndex(t => t >= normalizedSplitDate)
+    : -1
   if (splitIdx >= 0 && series.length > 0) {
     const originalMarkLine = series[0].markLine || {}
     series[0].markLine = {

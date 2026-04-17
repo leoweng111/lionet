@@ -125,7 +125,7 @@
 
         <div v-if="Object.keys(navCurves).length">
           <el-card v-for="(curve, fcName) in navCurves" :key="fcName" class="chart-card" shadow="hover">
-            <NavChart :title="fcName + ' 净值曲线'" :curve-data="curve" height="350px" />
+            <NavChart :title="fcName + ' 净值曲线'" :curve-data="curve" :split-date="result?.nav_split_date || ''" height="350px" />
           </el-card>
         </div>
 

@@ -98,6 +98,20 @@ _GP_GEN_RE = re.compile(
 )
 
 
+def _append_task_log(task_id: str, record: logging.LogRecord, owner_thread_id: Optional[int] = None) -> Optional[str]:
+    if task_id not in tasks:
+        return None
+    if owner_thread_id is not None and int(record.thread) != int(owner_thread_id):
+        return None
+    msg = record.getMessage()
+    log_line = f'{datetime.now().strftime("%Y-%m-%d %H:%M:%S")} - {record.levelname} - {msg}'
+    logs = tasks[task_id].setdefault("logs", [])
+    logs.append(log_line)
+    if len(logs) > 500:
+        del logs[:-500]
+    return msg
+
+
 class _GPProgressHandler(logging.Handler):
     """Attach to the lionet logger to capture GP generation progress."""
 
@@ -107,17 +121,9 @@ class _GPProgressHandler(logging.Handler):
         self.owner_thread_id = owner_thread_id
 
     def emit(self, record):
-        if self.task_id not in tasks:
+        msg = _append_task_log(self.task_id, record, self.owner_thread_id)
+        if msg is None:
             return
-        # Isolate logs by worker thread to avoid cross-task log mixing.
-        if self.owner_thread_id is not None and int(record.thread) != int(self.owner_thread_id):
-            return
-        msg = record.getMessage()
-        log_line = f'{datetime.now().strftime("%Y-%m-%d %H:%M:%S")} - {record.levelname} - {msg}'
-        logs = tasks[self.task_id].setdefault("logs", [])
-        logs.append(log_line)
-        if len(logs) > 500:
-            del logs[:-500]
         m = _GP_GEN_RE.search(msg)
         if m:
             gen_cur, gen_total, best_pen, best_orig = m.group(1), m.group(2), m.group(3), m.group(4)
@@ -150,6 +156,18 @@ class _GPProgressHandler(logging.Handler):
                 )
             except Exception:
                 pass
+
+
+class _FusionLogHandler(logging.Handler):
+    """Capture fusion task logs into the shared in-memory task store."""
+
+    def __init__(self, task_id: str, owner_thread_id: Optional[int] = None):
+        super().__init__()
+        self.task_id = task_id
+        self.owner_thread_id = owner_thread_id
+
+    def emit(self, record):
+        _append_task_log(self.task_id, record, self.owner_thread_id)
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -846,74 +864,116 @@ async def run_backtest(params: BacktestParams):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-def _execute_fusion(params: FusionParams) -> Dict[str, Any]:
-    raw_factor_dict = None
-    if params.candidate_versions:
-        records = get_factor_formula_records(
-            collections=params.collection,
-            versions=params.candidate_versions,
-            database='factors',
-        )
-        if records.empty:
-            raise ValueError(
-                f'No factor formulas found for collections={params.collection}, '
-                f'versions={params.candidate_versions}.'
+def _execute_fusion(params: FusionParams, task_id: Optional[str] = None) -> Dict[str, Any]:
+    handler = None
+    lionet_logger = None
+    if task_id and task_id in tasks:
+        from utils.logging import log as lionet_logger
+        handler = _FusionLogHandler(task_id=task_id, owner_thread_id=threading.get_ident())
+        lionet_logger.addHandler(handler)
+
+    try:
+        raw_factor_dict = None
+        if params.candidate_versions:
+            records = get_factor_formula_records(
+                collections=params.collection,
+                versions=params.candidate_versions,
+                database='factors',
             )
-        raw_factor_dict = {}
-        for version, df_v in records.groupby('version', sort=False):
-            names = [str(x) for x in df_v['factor_name'].dropna().astype(str).tolist()]
-            if names:
-                raw_factor_dict[str(version)] = list(dict.fromkeys(names))
+            if records.empty:
+                raise ValueError(
+                    f'No factor formulas found for collections={params.collection}, '
+                    f'versions={params.candidate_versions}.'
+                )
+            raw_factor_dict = {}
+            for version, df_v in records.groupby('version', sort=False):
+                names = [str(x) for x in df_v['factor_name'].dropna().astype(str).tolist()]
+                if names:
+                    raw_factor_dict[str(version)] = list(dict.fromkeys(names))
 
-    fusioner = FactorFusioner(
-        fusion_method=params.fusion_method,
-        raw_factor_dict=raw_factor_dict,
-        collection=params.collection,
-        instrument_type=params.instrument_type,
-        instrument_id_list=params.instrument_id_list,
-        fc_freq=params.fc_freq,
-        start_time=params.start_time,
-        end_time=params.end_time,
-        portfolio_adjust_method=params.portfolio_adjust_method,
-        interest_method=params.interest_method,
-        risk_free_rate=params.risk_free_rate,
-        apply_weighted_price=params.apply_weighted_price,
-        check_leakage_count=params.check_leakage_count,
-        check_relative=params.check_relative,
-        relative_threshold=params.relative_threshold,
-        relative_check_version_list=params.relative_check_version_list,
-        max_fusion_count=params.max_fusion_count,
-        fusion_metrics=params.fusion_metrics,
-        version=params.version,
-        n_jobs=params.n_jobs,
-        base_col_list=params.base_col_list,
-        consider_outsample=params.consider_outsample,
-        outsample_start_day=params.outsample_start_day,
-        outsample_end_day=params.outsample_end_day,
-    )
-    result = fusioner.fuse()
-    bt = result.get('bt')
-    nav_data = _extract_nav_data(bt) if bt else {'nav_curves': {}, 'performance_summary': []}
+        fusioner = FactorFusioner(
+            fusion_method=params.fusion_method,
+            raw_factor_dict=raw_factor_dict,
+            collection=params.collection,
+            instrument_type=params.instrument_type,
+            instrument_id_list=params.instrument_id_list,
+            fc_freq=params.fc_freq,
+            start_time=params.start_time,
+            end_time=params.end_time,
+            portfolio_adjust_method=params.portfolio_adjust_method,
+            interest_method=params.interest_method,
+            risk_free_rate=params.risk_free_rate,
+            apply_weighted_price=params.apply_weighted_price,
+            check_leakage_count=params.check_leakage_count,
+            check_relative=params.check_relative,
+            relative_threshold=params.relative_threshold,
+            relative_check_version_list=params.relative_check_version_list,
+            max_fusion_count=params.max_fusion_count,
+            fusion_metrics=params.fusion_metrics,
+            version=params.version,
+            n_jobs=params.n_jobs,
+            base_col_list=params.base_col_list,
+            consider_outsample=params.consider_outsample,
+            outsample_start_day=params.outsample_start_day,
+            outsample_end_day=params.outsample_end_day,
+        )
+        result = fusioner.fuse()
+        bt = result.get('bt')
+        nav_data = _extract_nav_data(bt) if bt else {'nav_curves': {}, 'performance_summary': []}
 
-    return {
-        'status': 'ok',
-        'version': params.version,
-        'collection': result.get('fusion_collection', 'factor_fusion'),
-        'persisted': bool(result.get('persisted', False)),
-        'fusion_factor_name': result.get('fusion_factor_name'),
-        'fusion_formula': result.get('fusion_formula'),
-        'fusion_info': result.get('fusion_info'),
-        'selected_factor_keys': result.get('selected_factor_keys', []),
-        'selected_factors_detail': result.get('selected_factors_detail', []),
-        'final_metrics': result.get('final_metrics', {}),
-        'final_metrics_outsample': result.get('final_metrics_outsample'),
-        'leakage_check': result.get('leakage_check'),
-        'relative_check': result.get('relative_check'),
-        'consider_outsample': result.get('consider_outsample', False),
-        'outsample_start_day': result.get('outsample_start_day'),
-        'outsample_end_day': result.get('outsample_end_day'),
-        'nav_data': nav_data,
-    }
+        fusion_formula = result.get('fusion_formula')
+        nav_split_date = None
+        if fusion_formula and params.outsample_start_day and params.outsample_end_day:
+            # Build a continuous in-sample + out-of-sample curve in one run.
+            bt_full = BackTester(
+                collection='genetic_programming',
+                instrument_type=params.instrument_type,
+                instrument_id_list=params.instrument_id_list,
+                fc_freq=params.fc_freq,
+                start_time=params.start_time,
+                end_time=params.outsample_end_day,
+                portfolio_adjust_method=params.portfolio_adjust_method,
+                interest_method=params.interest_method,
+                risk_free_rate=params.risk_free_rate,
+                calculate_baseline=True,
+                apply_weighted_price=params.apply_weighted_price,
+                n_jobs=params.n_jobs,
+                formula=fusion_formula,
+                version=params.version or '__formula__',
+                fc_name_list=['formula_factor'],
+            )
+            bt_full.backtest()
+            nav_data = _extract_nav_data(bt_full)
+            if 'formula_factor' in nav_data.get('nav_curves', {}):
+                nav_data['nav_curves'][fusion_formula] = nav_data['nav_curves'].pop('formula_factor')
+                for rec in nav_data.get('performance_summary', []):
+                    if rec.get('Factor Name') == 'formula_factor':
+                        rec['Factor Name'] = fusion_formula
+            nav_split_date = params.outsample_start_day
+
+        return {
+            'status': 'ok',
+            'version': params.version,
+            'collection': result.get('fusion_collection', 'factor_fusion'),
+            'persisted': bool(result.get('persisted', False)),
+            'fusion_factor_name': result.get('fusion_factor_name'),
+            'fusion_formula': fusion_formula,
+            'fusion_info': result.get('fusion_info'),
+            'selected_factor_keys': result.get('selected_factor_keys', []),
+            'selected_factors_detail': result.get('selected_factors_detail', []),
+            'final_metrics': result.get('final_metrics', {}),
+            'final_metrics_outsample': result.get('final_metrics_outsample'),
+            'leakage_check': result.get('leakage_check'),
+            'relative_check': result.get('relative_check'),
+            'consider_outsample': result.get('consider_outsample', False),
+            'outsample_start_day': result.get('outsample_start_day'),
+            'outsample_end_day': result.get('outsample_end_day'),
+            'nav_split_date': nav_split_date,
+            'nav_data': nav_data,
+        }
+    finally:
+        if handler is not None and lionet_logger is not None:
+            lionet_logger.removeHandler(handler)
 
 
 @app.post('/api/fusion/start')
@@ -937,7 +997,7 @@ async def start_fusion(params: FusionParams):
         try:
             tasks[task_id]["progress"] = "正在执行融合计算..."
             loop = asyncio.get_event_loop()
-            result = await loop.run_in_executor(None, _execute_fusion, params)
+            result = await loop.run_in_executor(None, _execute_fusion, params, task_id)
             tasks[task_id]["result"] = result
             tasks[task_id]["result_overview"] = _build_fusion_result_overview(result)
             tasks[task_id]["status"] = "completed"
@@ -972,6 +1032,8 @@ async def start_fusion(params: FusionParams):
                 {"error": str(e)},
                 task_type=TASK_TYPE_FUSION,
             )
+        finally:
+            pass
 
     asyncio.create_task(_run())
     return {"task_id": task_id, "task_type": TASK_TYPE_FUSION, "status": "running"}
@@ -1006,7 +1068,7 @@ async def run_fusion(params: FusionParams):
     """Backward-compatible sync fusion endpoint."""
     try:
         loop = asyncio.get_event_loop()
-        result = await loop.run_in_executor(None, _execute_fusion, params)
+        result = await loop.run_in_executor(None, _execute_fusion, params, None)
         return result
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
