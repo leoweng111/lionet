@@ -16,8 +16,9 @@
           </template>
           <div class="param-scroll-panel">
           <el-form :model="params" label-width="auto" label-position="right" size="small">
-
-            <div class="param-section"><el-divider content-position="left">基础参数</el-divider>
+            <el-row :gutter="16" class="param-section-grid">
+              <el-col :xs="24" :sm="24" :md="12" :lg="12" :xl="12">
+            <div class="param-section"><el-divider content-position="center">基础参数</el-divider>
               <el-row :gutter="12">
                 <el-col :span="12"><el-form-item label="合约"><el-input v-model="params.instrument_id_list" /></el-form-item></el-col>
                 <el-col :span="12"><el-form-item label="版本号"><el-input v-model="params.version" /></el-form-item></el-col>
@@ -45,8 +46,10 @@
               </el-row>
               <el-form-item label="最小窗口"><el-input-number v-model="params.min_window_size" :min="1" :max="200" style="width:100%" /></el-form-item>
             </div>
+              </el-col>
 
-            <div class="param-section"><el-divider content-position="left">滚动标准化</el-divider>
+              <el-col :xs="24" :sm="24" :md="12" :lg="12" :xl="12">
+            <div class="param-section"><el-divider content-position="center">滚动标准化</el-divider>
               <el-form-item label="启用"><el-switch v-model="params.apply_rolling_norm" /></el-form-item>
               <el-row :gutter="12">
                 <el-col :span="12"><el-form-item label="窗口"><el-input-number v-model="params.rolling_norm_window" :min="1" :max="200" style="width:100%" /></el-form-item></el-col>
@@ -57,16 +60,20 @@
                 <el-col :span="12"><el-form-item label="Clip"><el-input-number v-model="params.rolling_norm_clip" :min="0.5" :max="20" :step="0.5" :precision="1" style="width:100%" /></el-form-item></el-col>
               </el-row>
             </div>
+              </el-col>
 
-            <div class="param-section"><el-divider content-position="left">去重 / 泄露检查</el-divider>
+              <el-col :xs="24" :sm="24" :md="12" :lg="12" :xl="12">
+            <div class="param-section"><el-divider content-position="center">去重 / 泄露检查</el-divider>
               <el-row :gutter="12">
                 <el-col :span="12"><el-form-item label="泄露抽样"><el-input-number v-model="params.check_leakage_count" :min="0" :max="200" style="width:100%" /></el-form-item></el-col>
                 <el-col :span="12"><el-form-item label="相关阈值"><el-input-number v-model="params.relative_threshold" :min="0" :max="1" :step="0.05" :precision="2" style="width:100%" /></el-form-item></el-col>
               </el-row>
               <el-form-item label="相关去重"><el-switch v-model="params.check_relative" /></el-form-item>
             </div>
+              </el-col>
 
-            <div class="param-section"><el-divider content-position="left">GP 核心参数</el-divider>
+              <el-col :xs="24" :sm="24" :md="12" :lg="12" :xl="12">
+            <div class="param-section"><el-divider content-position="center">GP 核心参数</el-divider>
               <el-row :gutter="12">
                 <el-col :span="12"><el-form-item label="演化代数"><el-input-number v-model="params.gp_generations" :min="1" :max="500" style="width:100%" /></el-form-item></el-col>
                 <el-col :span="12"><el-form-item label="种群规模"><el-input-number v-model="params.gp_population_size" :min="10" :max="5000" :step="50" style="width:100%" /></el-form-item></el-col>
@@ -90,8 +97,10 @@
               <el-form-item label="窗口集合"><el-select v-model="params.gp_window_choices" multiple style="width:100%"><el-option v-for="w in [3,5,10,15,20,30,60]" :key="w" :label="w" :value="w" /></el-select></el-form-item>
               <el-form-item label="随机种子"><el-input v-model.number="params.random_seed" placeholder="留空=随机" clearable /></el-form-item>
             </div>
+              </el-col>
 
-            <div class="param-section"><el-divider content-position="left">GP 高级参数</el-divider>
+              <el-col :xs="24" :sm="24" :md="12" :lg="12" :xl="12">
+            <div class="param-section"><el-divider content-position="center">GP 高级参数</el-divider>
               <el-row :gutter="12">
                 <el-col :span="12"><el-form-item label="早停代数"><el-input-number v-model="params.gp_early_stopping_generation_count" :min="1" :max="200" style="width:100%" /></el-form-item></el-col>
                 <el-col :span="12"><el-form-item label="日志间隔"><el-input-number v-model="params.gp_log_interval" :min="1" :max="100" style="width:100%" /></el-form-item></el-col>
@@ -113,8 +122,10 @@
                 <el-col :span="12"><el-form-item label="Shock代数"><el-input-number v-model="params.gp_max_shock_generation" :min="0" :max="20" style="width:100%" /></el-form-item></el-col>
               </el-row>
             </div>
+              </el-col>
 
-            <div class="param-section"><el-divider content-position="left">筛选阈值</el-divider>
+              <el-col :xs="24" :sm="24" :md="12" :lg="12" :xl="12">
+            <div class="param-section"><el-divider content-position="center">筛选阈值</el-divider>
               <el-row :gutter="12">
                 <el-col :span="12"><el-form-item label="净收益均值"><el-input-number v-model="params.filter_net_return_mean" :step="0.01" :precision="3" style="width:100%" /></el-form-item></el-col>
                 <el-col :span="12"><el-form-item label="净收益年度"><el-input-number v-model="params.filter_net_return_yearly" :step="0.01" :precision="3" style="width:100%" /></el-form-item></el-col>
@@ -124,6 +135,8 @@
                 <el-col :span="12"><el-form-item label="Sharpe年度"><el-input-number v-model="params.filter_net_sharpe_yearly" :step="0.1" :precision="2" style="width:100%" /></el-form-item></el-col>
               </el-row>
             </div>
+              </el-col>
+            </el-row>
 
               </el-form>
           </div>
@@ -132,9 +145,9 @@
 
     </el-row>
 
-    <el-row :gutter="20" class="responsive-row" style="margin-top:16px;">
-      <el-col :xs="24" :sm="24" :md="8" :lg="6" :xl="6">
-        <el-card shadow="hover" style="margin-bottom:16px;">
+    <el-row :gutter="20" class="responsive-row bottom-panel-row" style="margin-top:16px;">
+      <el-col :xs="24" :sm="24" :md="8" :lg="6" :xl="6" class="bottom-panel-col">
+        <el-card shadow="hover" class="action-panel-card" style="margin-bottom:16px;">
           <template #header><span style="font-weight:600;">启动挖掘</span></template>
           <el-button type="primary" size="large" :loading="mining" @click="handleStartMining" style="width:100%;">
             <el-icon v-if="!mining"><VideoPlay /></el-icon>
@@ -146,7 +159,7 @@
         </el-card>
       </el-col>
 
-      <el-col :xs="24" :sm="24" :md="16" :lg="18" :xl="18">
+      <el-col :xs="24" :sm="24" :md="16" :lg="18" :xl="18" class="bottom-panel-col">
         <el-card shadow="hover" style="margin-bottom:16px;" v-if="taskId">
           <template #header><span style="font-weight:600;">任务状态</span></template>
           <el-descriptions :column="2" size="small" border>
@@ -176,7 +189,7 @@
             <NavChart :title="fcName + ' 净值曲线'" :curve-data="curve" height="350px" />
           </el-card>
         </div>
-        <el-card v-if="!taskId" shadow="hover"><el-empty description="配置参数后点击「启动因子挖掘」开始" /></el-card>
+        <el-card v-if="!taskId" shadow="hover" class="hint-panel-card" style="margin-bottom:16px;"><template #header><span style="font-weight:600;">操作提示</span></template><el-empty description="配置参数后点击「启动因子挖掘」开始" /></el-card>
       </el-col>
     </el-row>
   </div>
@@ -274,4 +287,66 @@ const startPolling = () => {
   }, 3000)
 }
 </script>
+
+<style scoped>
+.param-section-grid .param-section {
+  height: 100%;
+}
+
+.param-scroll-panel {
+  max-height: 62vh;
+  overflow: auto;
+  padding-right: 4px;
+}
+
+.param-section {
+  border: 1px solid var(--el-border-color-lighter);
+  border-radius: 8px;
+  background: var(--el-fill-color-extra-light);
+  padding: 6px 10px 2px;
+  margin-bottom: 10px;
+}
+
+.param-section :deep(.el-divider) {
+  margin: 6px 0 14px;
+}
+
+.param-section :deep(.el-divider__text) {
+  font-weight: 600;
+  color: var(--el-text-color-primary);
+}
+
+.param-scroll-panel :deep(.el-input),
+.param-scroll-panel :deep(.el-select),
+.param-scroll-panel :deep(.el-input-number) {
+  width: 100%;
+  max-width: 100%;
+}
+
+.bottom-panel-row {
+  align-items: stretch;
+}
+
+.bottom-panel-col {
+  display: flex;
+}
+
+.action-panel-card,
+.hint-panel-card {
+  width: 100%;
+  height: 100%;
+}
+
+.action-panel-card :deep(.el-card__body),
+.hint-panel-card :deep(.el-card__body) {
+  min-height: 140px;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+}
+
+.hint-panel-card :deep(.el-card__body) {
+  align-items: center;
+}
+</style>
 
