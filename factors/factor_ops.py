@@ -6,7 +6,7 @@ backtest can share the same operator space.
 
 import ast
 from enum import Enum
-from typing import Any, Dict, Optional, Sequence, Type
+from typing import Any, Dict, Optional, Sequence, Tuple, Type
 
 import numpy as np
 import pandas as pd
@@ -183,6 +183,16 @@ def infer_node_type(node: FactorNode) -> FactorDataType:
         if lt == FactorDataType.BOOLEAN:
             raise TypeError(f'{node.__class__.__name__} does not accept boolean operands.')
         node.data_type = lt
+        return node.data_type
+
+    if isinstance(node, OpNanMean):
+        child_types = [infer_node_type(c) for c in node.children]
+        first = child_types[0]
+        if any(t != first for t in child_types):
+            raise TypeError(f'OpNanMean requires all children same type, got {child_types}.')
+        if first == FactorDataType.BOOLEAN:
+            raise TypeError('OpNanMean does not accept boolean operands.')
+        node.data_type = first
         return node.data_type
 
     if isinstance(node, OpMul):
@@ -382,6 +392,31 @@ class OpAdd(FactorNode):
 
     def to_formula(self) -> str:
         return f"Add({self.left}, {self.right})"
+
+
+class OpNanMean(FactorNode):
+    """NaN-safe mean over *N* child factors.  Equivalent to
+    ``pd.concat(children, axis=1).mean(axis=1, skipna=True)`` — each row's
+    result is the average of its non-NaN children.  If **all** children are NaN
+    on a row, the result is NaN.
+
+    Accepts an arbitrary number of children (≥ 2).
+    Formula: ``NanMean(child1, child2, ...)``
+    """
+
+    def __init__(self, *children: FactorNode):
+        if len(children) < 2:
+            raise ValueError('OpNanMean requires at least 2 children.')
+        self.children: Tuple[FactorNode, ...] = children
+
+    def calc(self, df: pd.DataFrame) -> pd.Series:
+        cols = [c.calc(df) for c in self.children]
+        combined = pd.concat(cols, axis=1)
+        return combined.mean(axis=1, skipna=True)
+
+    def to_formula(self) -> str:
+        inner = ', '.join(str(c) for c in self.children)
+        return f"NanMean({inner})"
 
 
 class OpSub(FactorNode):
@@ -1341,6 +1376,7 @@ OP_CLASS_BY_NAME: Dict[str, Type[Any]] = {
 }
 OP_CLASS_BY_NAME['OpRollNorm'] = OpRollNorm
 OP_CLASS_BY_NAME['RollNorm'] = OpRollNorm
+OP_CLASS_BY_NAME['NanMean'] = OpNanMean
 
 OP_ALIAS_BY_NAME: Dict[str, Type[Any]] = {
     # Case-insensitive aliases.
@@ -1488,6 +1524,10 @@ def parse_formula_to_node(formula: str,
                     _parse_positive_float_arg(node.args[3], 'eps'),
                     _parse_positive_float_arg(node.args[4], 'clip'),
                 )
+            if op_cls is OpNanMean:
+                if len(node.args) < 2:
+                    raise ValueError(f'{op_name} expects at least 2 args.')
+                return OpNanMean(*[_build(a) for a in node.args])
 
         raise ValueError(f'Unsupported formula node: {ast.dump(node)}')
 

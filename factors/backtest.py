@@ -182,6 +182,11 @@ class BackTester:
         if self.apply_weighted_price:
             self.data = get_weighted_price(self.data)
 
+        # Ensure consistent sort order for rolling/groupby operations.
+        # Fusion pipeline sorts by ['instrument_id', 'time'] before computing factors;
+        # BackTester must do the same to guarantee identical results.
+        self.data = self.data.sort_values(['instrument_id', 'time']).reset_index(drop=True)
+
         if self.formula:
             # Compute factor values from formula expression
             from factors.factor_ops import calc_formula_series

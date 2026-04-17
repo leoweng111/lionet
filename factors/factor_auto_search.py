@@ -2010,10 +2010,10 @@ class FactorFusioner:
         cleaned = [str(x).strip() for x in formula_list if str(x).strip()]
         if not cleaned:
             raise ValueError('Cannot build fusion formula from empty formula_list.')
-        formula = cleaned[0]
-        for item in cleaned[1:]:
-            formula = f'Add({formula}, {item})'
-        return formula
+        if len(cleaned) == 1:
+            return cleaned[0]
+        inner = ', '.join(cleaned)
+        return f'NanMean({inner})'
 
     def _build_fusion_formula(self,
                               selected_factor_keys: Sequence[str],
@@ -2027,10 +2027,7 @@ class FactorFusioner:
             missing_keys = [k for k, f in zip(selected_factor_keys, selected_formulas) if not f]
             raise ValueError(f'Missing formulas for fusion factor keys: {missing_keys}')
 
-        add_formula = self._build_add_formula(selected_formulas)
-        if self.fusion_method == 'avg_weight' and len(selected_formulas) > 1:
-            return f'Div({add_formula}, {len(selected_formulas)})'
-        return add_formula
+        return self._build_add_formula(selected_formulas)
 
     def fuse(self) -> Dict[str, Any]:
         """Run stepwise forward-selection fusion and return fusion artifacts."""
@@ -2137,7 +2134,7 @@ class FactorFusioner:
                 trial_keys = selected_factor_keys + [cand_key]
                 if self.fusion_method == 'avg_weight':
                     # 等权融合：对组合内每个因子截面值直接取均值。
-                    fused_series = eval_df[trial_keys].mean(axis=1)
+                    fused_series = eval_df[trial_keys].mean(axis=1, skipna=True)
                 else:
                     raise ValueError(f'Unsupported fusion_method={self.fusion_method}')
 
@@ -2188,7 +2185,7 @@ class FactorFusioner:
 
         # 3) 生成最终融合信号，并进行一次完整回测用于落库与返回。
         final_fused_df = eval_df[['time', 'instrument_id', 'future_ret']].copy()
-        final_fused_df[fusion_col] = pd.to_numeric(eval_df[selected_factor_keys].mean(axis=1), errors='coerce')
+        final_fused_df[fusion_col] = pd.to_numeric(eval_df[selected_factor_keys].mean(axis=1, skipna=True), errors='coerce')
         for key in selected_factor_keys:
             final_fused_df[key] = pd.to_numeric(eval_df[key], errors='coerce')
         final_bt = self._run_backtest_for_signal(
@@ -2297,6 +2294,38 @@ class FactorFusioner:
 
         # 5) 构建融合后的公式表达式，并将结果写入 factors.fusion_factor。
         fusion_formula = self._build_fusion_formula(selected_factor_keys, factor_records)
+
+        # 5.1) Formula consistency check: recompute from formula and compare against
+        #      the pre-computed mean to catch any formula/eval mismatch early.
+        if len(selected_factor_keys) > 1:
+            calc_df = base_df[['time', 'instrument_id'] + self.base_col_list].copy()
+            formula_series = calc_formula_series(df=calc_df, formula=fusion_formula, data_fields=self.base_col_list)
+            formula_series = pd.to_numeric(formula_series, errors='coerce')
+            precomputed_series = final_fused_df[fusion_col].values
+            formula_values = formula_series.values
+
+            both_valid = ~(pd.isna(precomputed_series) | pd.isna(formula_values))
+            if both_valid.sum() > 0:
+                max_diff = float(np.nanmax(np.abs(precomputed_series[both_valid] - formula_values[both_valid])))
+                corr = float(np.corrcoef(precomputed_series[both_valid], formula_values[both_valid])[0, 1])
+                nan_precomputed = int(pd.isna(precomputed_series).sum())
+                nan_formula = int(pd.isna(formula_values).sum())
+                log.info(
+                    f'[Fusion][FormulaCheck] formula={fusion_formula[:120]}..., '
+                    f'max_abs_diff={max_diff:.10f}, corr={corr:.8f}, '
+                    f'nan_precomputed={nan_precomputed}, nan_formula={nan_formula}, '
+                    f'valid_count={int(both_valid.sum())}'
+                )
+                if max_diff > 1e-6:
+                    log.warning(
+                        f'[Fusion][FormulaCheck] MISMATCH detected! '
+                        f'Formula recomputation differs from precomputed mean. '
+                        f'max_abs_diff={max_diff:.10f}. '
+                        f'The persisted formula may produce different results than the fusion evaluation.'
+                    )
+            else:
+                log.warning('[Fusion][FormulaCheck] no overlapping valid values between formula and precomputed series.')
+
         fusion_collection = 'factor_fusion'
         fusion_idx = max(0, len(selected_factor_keys_by_perf) - 1)
         fusion_factor_name = f'fusion_{self.fusion_method}_{fusion_idx}'
