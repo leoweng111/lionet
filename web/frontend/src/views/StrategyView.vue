@@ -18,9 +18,10 @@
             </div>
             <div class="param-section"><el-divider content-position="left">基础参数</el-divider>
               <el-form-item label="合约"><el-input v-model="sp.instrument_id" /></el-form-item>
-              <el-row :gutter="12"><el-col :span="12"><el-form-item label="开始"><el-input v-model="sp.start_time" /></el-form-item></el-col><el-col :span="12"><el-form-item label="结束"><el-input v-model="sp.end_time" /></el-form-item></el-col></el-row>
               <el-form-item label="数据库"><el-input v-model="sp.database" /></el-form-item>
             </div>
+            <div class="param-section"><el-divider content-position="left">样本内区间</el-divider><el-row :gutter="8"><el-col :span="12"><el-form-item label="开始"><el-input v-model="sp.start_time" /></el-form-item></el-col><el-col :span="12"><el-form-item label="结束"><el-input v-model="sp.end_time" /></el-form-item></el-col></el-row></div>
+            <div class="param-section"><el-divider content-position="left">样本外区间</el-divider><el-row :gutter="8"><el-col :span="12"><el-form-item label="开始"><el-input v-model="oosStart" placeholder="20250101" /></el-form-item></el-col><el-col :span="12"><el-form-item label="结束"><el-input v-model="oosEnd" placeholder="20251231" /></el-form-item></el-col></el-row></div>
             <div class="param-section"><el-divider content-position="left">资金与费用</el-divider>
               <el-form-item label="初始资金"><el-input-number v-model="sp.initial_capital" :min="1000" :max="100000000" :step="10000" style="width:100%" /></el-form-item>
               <el-row :gutter="12"><el-col :span="12"><el-form-item label="保证金率"><el-input-number v-model="sp.margin_rate" :min="0.01" :max="1" :step="0.01" :precision="3" style="width:100%" /></el-form-item></el-col><el-col :span="12"><el-form-item label="每手手续费"><el-input-number v-model="sp.fee_per_lot" :min="0" :max="100" :step="0.5" :precision="2" style="width:100%" /></el-form-item></el-col></el-row>
@@ -40,9 +41,10 @@
         <div v-if="results.length" style="text-align:right;margin-bottom:12px;"><el-button size="small" type="danger" plain @click="clearResults"><el-icon><Delete /></el-icon> 清空结果</el-button></div>
         <template v-for="(item, idx) in results" :key="'strat_'+idx">
           <el-card shadow="hover" style="margin-bottom:12px;"><template #header><span style="font-weight:600;"><el-tag type="primary" size="small" style="margin-right:6px;">策略</el-tag>{{ item.factor_name }} 绩效概览</span></template>
+            <el-descriptions :column="1" size="small" border style="margin-bottom:10px;" v-if="item.factor_formula"><el-descriptions-item label="策略公式"><span style="word-break:break-all;">{{ item.factor_formula }}</span></el-descriptions-item></el-descriptions>
             <el-table :data="item.nav_data.performance_summary" stripe size="small" max-height="200"><el-table-column v-for="c in (item.nav_data.performance_summary?.length ? Object.keys(item.nav_data.performance_summary[0]) : [])" :key="'ss_'+item.factor_name+c" :prop="c" :label="c" min-width="100" show-overflow-tooltip /></el-table>
           </el-card>
-          <el-card v-for="(curve, name) in item.nav_data.nav_curves" :key="'sc_'+name" class="chart-card" shadow="hover" style="margin-bottom:16px;"><NavChart :title="name+' 策略净值'" :curve-data="curve" height="350px" /></el-card>
+          <el-card v-for="(curve, name) in item.nav_data.nav_curves" :key="'sc_'+name" class="chart-card" shadow="hover" style="margin-bottom:16px;"><NavChart :title="name+' 策略净值'" :curve-data="curve" :split-date="item.split_date || ''" height="350px" /></el-card>
           <el-card shadow="hover" style="margin-bottom:24px;" v-if="item.nav_data.trade_detail?.length">
             <template #header><div style="display:flex;align-items:center;justify-content:space-between;"><span style="font-weight:600;">{{ item.factor_name }} 逐日交易明细</span><el-tag size="small">{{ item.nav_data.trade_detail.length }} 条</el-tag></div></template>
             <el-table :data="item.nav_data.trade_detail" stripe border size="small" max-height="300" style="width:100%">
@@ -68,13 +70,60 @@ import NavChart from '../components/NavChart.vue'
 const SK = 'lionet_strat'
 const collections = ref([]), versionMap = ref({}), allVersions = ref([]), availableFactors = ref([])
 const running = ref(false), results = ref([])
+const factorFormulaMap = ref({})
+const oosStart = ref('20250101')
+const oosEnd = ref('20251231')
 const sp = reactive({ version: '', factor_name_list: [], instrument_id: 'C0', start_time: '20200101', end_time: '20241231', database: 'factors', collection: 'genetic_programming', initial_capital: 1000000, margin_rate: 0.1, fee_per_lot: 2.0, slippage: 1.0, apply_rolling_norm: true, rolling_norm_window: 30, rolling_norm_min_periods: 20, rolling_norm_eps: 1e-8, rolling_norm_clip: 5.0, signal_delay_days: 1, min_open_ratio: 1.0 })
-const resetParams = () => { const kv = sp.version, kf = [...sp.factor_name_list], kc = sp.collection; Object.assign(sp, { version: kv, factor_name_list: kf, instrument_id: 'C0', start_time: '20200101', end_time: '20241231', database: 'factors', collection: kc, initial_capital: 1000000, margin_rate: 0.1, fee_per_lot: 2.0, slippage: 1.0, apply_rolling_norm: true, rolling_norm_window: 30, rolling_norm_min_periods: 20, rolling_norm_eps: 1e-8, rolling_norm_clip: 5.0, signal_delay_days: 1, min_open_ratio: 1.0 }) }
+const resetParams = () => { const kv = sp.version, kf = [...sp.factor_name_list], kc = sp.collection; Object.assign(sp, { version: kv, factor_name_list: kf, instrument_id: 'C0', start_time: '20200101', end_time: '20241231', database: 'factors', collection: kc, initial_capital: 1000000, margin_rate: 0.1, fee_per_lot: 2.0, slippage: 1.0, apply_rolling_norm: true, rolling_norm_window: 30, rolling_norm_min_periods: 20, rolling_norm_eps: 1e-8, rolling_norm_clip: 5.0, signal_delay_days: 1, min_open_ratio: 1.0 }); oosStart.value = '20250101'; oosEnd.value = '20251231' }
 const filteredVersions = computed(() => sp.collection && versionMap.value[sp.collection] ? versionMap.value[sp.collection] : allVersions.value)
 const fetchVersions = async () => { try { const { data } = await getVersions(); collections.value = data.collections || []; versionMap.value = data.version_map || {}; allVersions.value = data.all_versions || [] } catch { /* */ } }
-const onCollChange = () => { sp.version = ''; sp.factor_name_list = []; availableFactors.value = [] }
-const onVerChange = async () => { sp.factor_name_list = []; if (!sp.version) { availableFactors.value = []; return }; try { const q = { version: sp.version }; if (sp.collection) q.collection = sp.collection; const { data } = await getFactors(q); availableFactors.value = (data.factors || []).map(f => f.factor_name) } catch { availableFactors.value = [] } }
-const handleRun = async () => { if (!sp.version || !sp.factor_name_list.length) { ElMessage.warning('请选择版本和因子'); return }; running.value = true; try { const { data } = await runStrategy(sp); results.value = data.results || []; ElMessage.success('策略模拟完成') } catch (e) { ElMessage.error('策略模拟失败: ' + (e.response?.data?.detail || e.message)) } finally { running.value = false } }
+const onCollChange = () => { sp.version = ''; sp.factor_name_list = []; availableFactors.value = []; factorFormulaMap.value = {} }
+const pickFormulaFromRecord = (rec) => String(rec?.formula || rec?.factor_formula || rec?.['Factor Formula'] || rec?.expr || '')
+const onVerChange = async () => {
+  sp.factor_name_list = []
+  if (!sp.version) { availableFactors.value = []; factorFormulaMap.value = {}; return }
+  try {
+    const q = { version: sp.version }
+    if (sp.collection) q.collection = sp.collection
+    const { data } = await getFactors(q)
+    const factors = data.factors || []
+    availableFactors.value = factors.map(f => f.factor_name)
+    const m = {}
+    factors.forEach((f) => {
+      if (!f?.factor_name) return
+      const formula = pickFormulaFromRecord(f)
+      if (formula) m[f.factor_name] = formula
+    })
+    factorFormulaMap.value = m
+  } catch {
+    availableFactors.value = []
+    factorFormulaMap.value = {}
+  }
+}
+const handleRun = async () => {
+  if (!sp.version || !sp.factor_name_list.length) { ElMessage.warning('请选择版本和因子'); return }
+  running.value = true
+  try {
+    const hasOos = Boolean(oosStart.value && oosEnd.value)
+    const payload = {
+      ...sp,
+      start_time: sp.start_time,
+      end_time: hasOos ? oosEnd.value : sp.end_time,
+    }
+    const { data } = await runStrategy(payload)
+    const splitDate = hasOos ? oosStart.value : ''
+    results.value = (data.results || []).map((item) => ({
+      ...item,
+      factor_formula: factorFormulaMap.value[item.factor_name] || '',
+      split_date: splitDate,
+    }))
+    ElMessage.success('策略模拟完成')
+  } catch (e) {
+    ElMessage.error('策略模拟失败: ' + (e.response?.data?.detail || e.message))
+  } finally {
+    running.value = false
+  }
+}
 const clearResults = () => { results.value = []; sessionStorage.removeItem(SK) }
 watch(results, () => { try { sessionStorage.setItem(SK, JSON.stringify(results.value)) } catch { /* */ } }, { deep: true })
 onMounted(() => { fetchVersions(); try { const s = sessionStorage.getItem(SK); if (s) results.value = JSON.parse(s) } catch { /* */ } })

@@ -46,6 +46,9 @@
           <template v-for="(item, fn) in resultMap" :key="fn">
             <el-card shadow="hover" style="margin-bottom:12px;">
               <template #header><span style="font-weight:600;">{{ fn }} 绩效</span></template>
+              <el-descriptions :column="1" size="small" border style="margin-bottom:10px;" v-if="item.formula">
+                <el-descriptions-item label="因子公式"><span style="word-break:break-all;">{{ item.formula }}</span></el-descriptions-item>
+              </el-descriptions>
               <el-tag type="success" size="small" style="margin-bottom:6px;">样本内</el-tag>
               <el-table :data="item.isSummary" stripe size="small" max-height="220" style="margin-bottom:10px;">
                 <el-table-column v-for="c in item.columns" :key="`is_${fn}_${c}`" :prop="c" :label="c" min-width="100" show-overflow-tooltip />
@@ -76,6 +79,7 @@ import NavChart from '../components/NavChart.vue'
 const SK = 'lionet_backtest'
 
 const collections = ref([]), versionMap = ref({}), allVersions = ref([]), availableFactors = ref([])
+const factorFormulaMap = ref({})
 const loading = ref(false)
 const inputMode = ref('db')
 const formulaInput = ref('')
@@ -114,17 +118,44 @@ const fetchVersions = async () => {
   }
 }
 
-const onCollChange = () => { p.version = ''; p.fc_name_list = []; availableFactors.value = [] }
+const onCollChange = () => {
+  p.version = ''
+  p.fc_name_list = []
+  availableFactors.value = []
+  factorFormulaMap.value = {}
+}
+
+const pickFormulaFromRecord = (rec) => {
+  if (!rec || typeof rec !== 'object') return ''
+  return String(
+    rec.formula
+    || rec.factor_formula
+    || rec['Factor Formula']
+    || rec.expr
+    || ''
+  )
+}
+
 const onVerChange = async () => {
   p.fc_name_list = []
-  if (!p.version) { availableFactors.value = []; return }
+  if (!p.version) { availableFactors.value = []; factorFormulaMap.value = {}; return }
   try {
     const q = { version: p.version }
     if (p.collection) q.collection = p.collection
     const { data } = await getFactors(q)
-    availableFactors.value = (data.factors || []).map(f => f.factor_name)
+    const factors = data.factors || []
+    availableFactors.value = factors.map(f => f.factor_name)
+    const m = {}
+    factors.forEach((f) => {
+      const fn = f?.factor_name
+      if (!fn) return
+      const formula = pickFormulaFromRecord(f)
+      if (formula) m[fn] = formula
+    })
+    factorFormulaMap.value = m
   } catch {
     availableFactors.value = []
+    factorFormulaMap.value = {}
   }
 }
 
@@ -187,7 +218,11 @@ const handleBt = async () => {
       const isSummary = pickSummaryByFactor(isData?.nav_data?.performance_summary || [], fn)
       const oosSummary = pickSummaryByFactor(oosData?.nav_data?.performance_summary || [], fn)
       const cols = isSummary.length ? Object.keys(isSummary[0]) : (oosSummary.length ? Object.keys(oosSummary[0]) : [])
+      const formula = inputMode.value === 'formula'
+        ? String(formulaInput.value || '').trim()
+        : (factorFormulaMap.value[fn] || '')
       merged[fn] = {
+        formula,
         isSummary,
         oosSummary,
         hasOos,
