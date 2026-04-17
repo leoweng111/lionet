@@ -167,6 +167,37 @@ const pickSummaryByFactor = (summary, fn) => {
   return s.filter(x => x[nameCol] === fn)
 }
 
+const toYearNumber = (v) => {
+  if (v == null) return null
+  const n = Number(v)
+  return Number.isFinite(n) ? n : null
+}
+
+const pickSummaryByFactorAndYearRange = (summary, fn, startDay, endDay, includeAllWhenNoRange = false) => {
+  const scoped = pickSummaryByFactor(summary, fn)
+  if (!scoped.length) return []
+
+  const startYear = toYearNumber(String(startDay || '').slice(0, 4))
+  const endYear = toYearNumber(String(endDay || '').slice(0, 4))
+
+  if (!startYear || !endYear) {
+    return includeAllWhenNoRange ? scoped : scoped.filter((r) => String(r.year || '').toLowerCase() !== 'all')
+  }
+
+  return scoped.filter((r) => {
+    const y = toYearNumber(r.year)
+    return y != null && y >= startYear && y <= endYear
+  })
+}
+
+const buildWindowSummaryFromContinuous = (summary, fn, startDay, endDay) => {
+  const yearRows = pickSummaryByFactorAndYearRange(summary, fn, startDay, endDay)
+  if (yearRows.length === 1) {
+    return [...yearRows, { ...yearRows[0], year: 'all' }]
+  }
+  return yearRows
+}
+
 const handleBt = async () => {
   if (inputMode.value === 'db') {
     if (!p.version || !p.fc_name_list.length) {
@@ -195,28 +226,19 @@ const handleBt = async () => {
     }
     const { data: fullData } = await runBacktest(fullPayload)
 
-    const isData = hasOos ? (await runBacktest(basePayload)).data : fullData
-
-    let oosData = null
-    if (hasOos) {
-      const oosPayload = { ...basePayload, start_time: oosStart.value, end_time: oosEnd.value }
-      const { data } = await runBacktest(oosPayload)
-      oosData = data
-    }
-
     const fullCurves = fullData?.nav_data?.nav_curves || {}
-    const allNames = Array.from(
-      new Set([
-        ...Object.keys(fullCurves),
-        ...Object.keys(isData?.nav_data?.nav_curves || {}),
-        ...Object.keys(oosData?.nav_data?.nav_curves || {}),
-      ]),
-    )
+    const fullSummary = fullData?.nav_data?.performance_summary || []
+    const allNames = Object.keys(fullCurves)
 
     const merged = {}
     allNames.forEach((fn) => {
-      const isSummary = pickSummaryByFactor(isData?.nav_data?.performance_summary || [], fn)
-      const oosSummary = pickSummaryByFactor(oosData?.nav_data?.performance_summary || [], fn)
+      const isSummary = hasOos
+        ? buildWindowSummaryFromContinuous(fullSummary, fn, p.start_time, p.end_time)
+        : pickSummaryByFactor(fullSummary, fn)
+      const oosSummary = hasOos
+        ? buildWindowSummaryFromContinuous(fullSummary, fn, oosStart.value, oosEnd.value)
+        : []
+
       const cols = isSummary.length ? Object.keys(isSummary[0]) : (oosSummary.length ? Object.keys(oosSummary[0]) : [])
       const formula = inputMode.value === 'formula'
         ? String(formulaInput.value || '').trim()
