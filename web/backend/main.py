@@ -922,8 +922,12 @@ def _execute_fusion(params: FusionParams, task_id: Optional[str] = None) -> Dict
         nav_data = _extract_nav_data(bt) if bt else {'nav_curves': {}, 'performance_summary': []}
 
         fusion_formula = result.get('fusion_formula')
-        nav_split_date = None
-        if fusion_formula and params.outsample_start_day and params.outsample_end_day:
+        fusion_curve_name = result.get('fusion_factor_name') or (fusion_formula if fusion_formula else 'fusion_factor')
+        has_oos = bool(params.outsample_start_day and params.outsample_end_day)
+        nav_split_date = params.outsample_start_day if has_oos else None
+        curve_end_time = params.outsample_end_day if has_oos else params.end_time
+
+        if fusion_formula and has_oos:
             # Build a continuous in-sample + out-of-sample curve in one run.
             bt_full = BackTester(
                 collection='genetic_programming',
@@ -931,7 +935,7 @@ def _execute_fusion(params: FusionParams, task_id: Optional[str] = None) -> Dict
                 instrument_id_list=params.instrument_id_list,
                 fc_freq=params.fc_freq,
                 start_time=params.start_time,
-                end_time=params.outsample_end_day,
+                end_time=curve_end_time,
                 portfolio_adjust_method=params.portfolio_adjust_method,
                 interest_method=params.interest_method,
                 risk_free_rate=params.risk_free_rate,
@@ -945,11 +949,61 @@ def _execute_fusion(params: FusionParams, task_id: Optional[str] = None) -> Dict
             bt_full.backtest()
             nav_data = _extract_nav_data(bt_full)
             if 'formula_factor' in nav_data.get('nav_curves', {}):
-                nav_data['nav_curves'][fusion_formula] = nav_data['nav_curves'].pop('formula_factor')
+                nav_data['nav_curves'][fusion_curve_name] = nav_data['nav_curves'].pop('formula_factor')
                 for rec in nav_data.get('performance_summary', []):
                     if rec.get('Factor Name') == 'formula_factor':
-                        rec['Factor Name'] = fusion_formula
-            nav_split_date = params.outsample_start_day
+                        rec['Factor Name'] = fusion_curve_name
+
+        # Add NAV curves of raw factors selected for fusion so users can compare before/after fusion.
+        selected_details = result.get('selected_factors_detail') or []
+        grouped_raw: Dict[tuple, List[str]] = {}
+        for item in selected_details:
+            if not isinstance(item, dict):
+                continue
+            raw_collection = str(item.get('collection') or '')
+            raw_version = str(item.get('version') or '')
+            raw_factor_name = str(item.get('factor_name') or '')
+            if not (raw_collection and raw_version and raw_factor_name):
+                continue
+            grouped_raw.setdefault((raw_collection, raw_version), [])
+            grouped_raw[(raw_collection, raw_version)].append(raw_factor_name)
+
+        for (raw_collection, raw_version), raw_names in grouped_raw.items():
+            raw_names = list(dict.fromkeys(raw_names))
+            if not raw_names:
+                continue
+            try:
+                bt_raw = BackTester(
+                    collection=raw_collection,
+                    instrument_type=params.instrument_type,
+                    instrument_id_list=params.instrument_id_list,
+                    fc_freq=params.fc_freq,
+                    start_time=params.start_time,
+                    end_time=curve_end_time,
+                    portfolio_adjust_method=params.portfolio_adjust_method,
+                    interest_method=params.interest_method,
+                    risk_free_rate=params.risk_free_rate,
+                    calculate_baseline=True,
+                    apply_weighted_price=params.apply_weighted_price,
+                    n_jobs=params.n_jobs,
+                    version=raw_version,
+                    fc_name_list=raw_names,
+                )
+                bt_raw.backtest()
+                raw_nav = _extract_nav_data(bt_raw)
+                for raw_name, raw_curve in raw_nav.get('nav_curves', {}).items():
+                    base_key = f"{raw_version} | {raw_name}"
+                    final_key = base_key
+                    dup_idx = 2
+                    while final_key in nav_data['nav_curves']:
+                        final_key = f"{base_key} #{dup_idx}"
+                        dup_idx += 1
+                    nav_data['nav_curves'][final_key] = raw_curve
+            except Exception as e:
+                logging.warning(
+                    'Failed to append raw factor NAV for fusion task '
+                    f'(collection={raw_collection}, version={raw_version}): {e}'
+                )
 
         return {
             'status': 'ok',
@@ -957,6 +1011,7 @@ def _execute_fusion(params: FusionParams, task_id: Optional[str] = None) -> Dict
             'collection': result.get('fusion_collection', 'factor_fusion'),
             'persisted': bool(result.get('persisted', False)),
             'fusion_factor_name': result.get('fusion_factor_name'),
+            'fusion_curve_name': fusion_curve_name,
             'fusion_formula': fusion_formula,
             'fusion_info': result.get('fusion_info'),
             'selected_factor_keys': result.get('selected_factor_keys', []),

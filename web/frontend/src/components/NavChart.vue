@@ -20,6 +20,7 @@ use([
 
 const props = defineProps({
   title: { type: String, default: '' },
+  titleTooltip: { type: String, default: '' },
   curveData: { type: Object, default: () => ({}) },
   showBaseline: { type: Boolean, default: true },
   height: { type: String, default: '400px' },
@@ -102,7 +103,20 @@ const chartOption = computed(() => {
   }
 
   return {
-    title: { text: props.title, left: 'center', textStyle: { fontSize: 14 } },
+    title: {
+      text: props.title,
+      left: 'center',
+      tooltip: {
+        show: Boolean(props.titleTooltip || props.title),
+        formatter: props.titleTooltip || props.title,
+      },
+      textStyle: {
+        fontSize: 14,
+        width: 560,
+        overflow: 'truncate',
+        ellipsis: '...',
+      },
+    },
     tooltip: {
       trigger: 'axis',
       formatter(params) {

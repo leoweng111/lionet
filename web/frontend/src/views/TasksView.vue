@@ -106,7 +106,7 @@
               <el-table-column prop="factor_name" label="factor_name" min-width="120" show-overflow-tooltip />
             </el-table>
           </el-card>
-          <div v-if="fusionResult(dd)?.nav_data?.nav_curves"><el-card v-for="(curve, name) in fusionResult(dd).nav_data.nav_curves" :key="name" class="chart-card" shadow="never" style="margin-bottom:12px;"><NavChart :title="name" :curve-data="curve" :split-date="fusionResult(dd)?.nav_split_date || ''" height="300px" /></el-card></div>
+          <div v-if="fusionResult(dd)?.nav_data?.nav_curves"><el-card v-for="(curve, name) in fusionResult(dd).nav_data.nav_curves" :key="name" class="chart-card" shadow="never" style="margin-bottom:12px;"><NavChart :title="name" :title-tooltip="fusionChartTooltip(dd, name)" :curve-data="curve" :split-date="fusionResult(dd)?.nav_split_date || ''" height="300px" /></el-card></div>
         </template>
       </template>
     </el-dialog>
@@ -133,6 +133,14 @@ const stType = (s) => s === 'completed' ? 'success' : s === 'failed' ? 'danger' 
 const isFusionTask = (task) => task?.task_type === '因子融合'
 const canTerminate = (row) => row?.status === 'running' && !isFusionTask(row)
 const fusionResult = (detail) => detail?.result || detail?.result_summary || null
+const fusionChartTooltip = (detail, curveName) => {
+  const fr = fusionResult(detail)
+  const fusionName = fr?.fusion_curve_name || fr?.fusion_factor_name
+  if (fusionName && curveName === fusionName && fr?.fusion_formula) {
+    return `Fusion Formula: ${fr.fusion_formula}`
+  }
+  return curveName
+}
 const getFormulaMap = (detail) => detail?.result?.factor_formulas || detail?.result_summary?.factor_formulas || {}
 const resolveFactorFormula = (detail, factorName) => getFormulaMap(detail)?.[factorName] || ''
 const safeJsonParse = (txt) => {

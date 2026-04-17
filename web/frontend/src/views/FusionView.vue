@@ -125,7 +125,13 @@
 
         <div v-if="Object.keys(navCurves).length">
           <el-card v-for="(curve, fcName) in navCurves" :key="fcName" class="chart-card" shadow="hover">
-            <NavChart :title="fcName + ' 净值曲线'" :curve-data="curve" :split-date="result?.nav_split_date || ''" height="350px" />
+            <NavChart
+              :title="fcName + ' 净值曲线'"
+              :title-tooltip="chartTitleTooltip(fcName)"
+              :curve-data="curve"
+              :split-date="result?.nav_split_date || ''"
+              height="350px"
+            />
           </el-card>
         </div>
 
@@ -192,6 +198,14 @@ const resetParams = () => {
 const formatMetrics = (m) => {
   if (!m) return ''
   return Object.keys(m).map(k => `${k}=${Number(m[k]).toFixed(6)}`).join(', ')
+}
+
+const chartTitleTooltip = (fcName) => {
+  const fusionName = result.value?.fusion_curve_name || result.value?.fusion_factor_name
+  if (fusionName && fcName === fusionName && result.value?.fusion_formula) {
+    return `Fusion Formula: ${result.value.fusion_formula}`
+  }
+  return fcName
 }
 
 const loadMeta = async () => {
