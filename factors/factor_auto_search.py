@@ -1638,6 +1638,34 @@ class FactorFusioner:
         self.outsample_start_day = str(outsample_start_day).strip() if outsample_start_day is not None else ''
         self.outsample_end_day = str(outsample_end_day).strip() if outsample_end_day is not None else ''
 
+        self._effective_end_time = str(self.end_time).strip() if self.end_time is not None else ''
+        if self.consider_outsample:
+            if not (self.outsample_start_day and self.outsample_end_day):
+                raise ValueError(
+                    'consider_outsample=True requires both outsample_start_day and outsample_end_day.'
+                )
+            try:
+                out_start = pd.to_datetime(self.outsample_start_day)
+                out_end = pd.to_datetime(self.outsample_end_day)
+                in_start = pd.to_datetime(self.start_time)
+                in_end = pd.to_datetime(self.end_time)
+            except Exception as e:
+                raise ValueError(
+                    'Invalid outsample date format. '
+                    f'outsample_start_day={self.outsample_start_day}, outsample_end_day={self.outsample_end_day}'
+                ) from e
+            if out_end < out_start:
+                raise ValueError(
+                    f'outsample_end_day must be >= outsample_start_day, got '
+                    f'{self.outsample_start_day}~{self.outsample_end_day}.'
+                )
+            if out_start < in_start:
+                raise ValueError(
+                    f'outsample_start_day must be >= start_time, got start_time={self.start_time}, '
+                    f'outsample_start_day={self.outsample_start_day}.'
+                )
+            self._effective_end_time = max(str(self.end_time), self.outsample_end_day)
+
         if not self.version:
             raise ValueError('FactorFusioner requires non-empty `version` and it must be explicitly provided.')
 
@@ -1747,7 +1775,7 @@ class FactorFusioner:
             df = get_futures_continuous_contract_price(
                 instrument_id=self.instrument_id_list,
                 start_date=self.start_time,
-                end_date=self.end_time,
+                end_date=self._effective_end_time,
                 from_database=True,
             )
 
@@ -1962,7 +1990,7 @@ class FactorFusioner:
             fc_freq=self.fc_freq,
             data=eval_df[bt_cols].copy(),
             start_time=self.start_time,
-            end_time=self.end_time,
+            end_time=self._effective_end_time,
             portfolio_adjust_method=self.portfolio_adjust_method,
             interest_method=self.interest_method,
             risk_free_rate=self.risk_free_rate,
@@ -2038,11 +2066,13 @@ class FactorFusioner:
             out_end = pd.to_datetime(self.outsample_end_day)
             outsample_eval_df = eval_df[(eval_df['time'] >= out_start) & (eval_df['time'] <= out_end)].copy()
             if outsample_eval_df.empty:
-                log.warning(
-                    '[Fusion][Outsample] empty outsample range, fallback to full sample optimization. '
-                    f'outsample_start_day={self.outsample_start_day}, outsample_end_day={self.outsample_end_day}'
+                raise ValueError(
+                    '[Fusion][Outsample] empty outsample range under consider_outsample=True. '
+                    f'Please ensure end_time covers outsample_end_day and data exists in '
+                    f'{self.outsample_start_day}~{self.outsample_end_day}. '
+                    f'Current start_time={self.start_time}, end_time={self.end_time}, '
+                    f'effective_end_time={self._effective_end_time}.'
                 )
-                use_outsample = False
             else:
                 optimize_eval_df = outsample_eval_df
                 log.info(
@@ -2170,9 +2200,56 @@ class FactorFusioner:
         final_metrics_outsample: Optional[Dict[str, float]] = None
         if use_outsample and outsample_eval_df is not None:
             out_df = cast(pd.DataFrame, outsample_eval_df)
-            out_fused_df = out_df[['time', 'instrument_id', 'future_ret']].copy()
-            out_fused_df[fusion_col] = pd.to_numeric(out_df[selected_factor_keys].mean(axis=1), errors='coerce')
-            final_metrics_outsample = self._evaluate_metrics(out_fused_df, fusion_col)
+            out_start = pd.to_datetime(self.outsample_start_day)
+            out_end = pd.to_datetime(self.outsample_end_day)
+
+            # Use the same continuous fused signal path (with full warmup history)
+            # to avoid mismatch between reported outsample metrics and NAV curves.
+            out_fused_df = final_fused_df[
+                (final_fused_df['time'] >= out_start) & (final_fused_df['time'] <= out_end)
+            ].copy()
+            if out_fused_df.empty:
+                raise ValueError(
+                    'Outsample slice is empty when computing final_metrics_outsample. '
+                    f'outsample_start_day={self.outsample_start_day}, '
+                    f'outsample_end_day={self.outsample_end_day}'
+                )
+
+            # IC on outsample window from continuous fused signal.
+            out_ic_df, _ = get_annualized_ts_ic_and_t_corr(
+                out_fused_df[['time', 'instrument_id', 'future_ret', fusion_col]].copy(),
+                fc_col=fusion_col,
+                fc_freq=self.fc_freq,
+                portfolio_adjust_method=self.portfolio_adjust_method,
+            )
+            out_ic_value = float(
+                pd.to_numeric(out_ic_df.loc['all', 'TS IC'], errors='coerce')
+            ) if 'all' in out_ic_df.index else float('nan')
+
+            # Sharpe from continuous net return series (keeps boundary position continuity).
+            instrument_id = self.instrument_id_list[0]
+            net_ret_df = final_bt.performance_dc[instrument_id][fusion_col]['daily_net_ret'].copy()
+            net_ret_df = net_ret_df[
+                (pd.to_datetime(net_ret_df['time']) >= out_start)
+                & (pd.to_datetime(net_ret_df['time']) <= out_end)
+            ].copy()
+            if net_ret_df.empty:
+                raise ValueError(
+                    'Outsample daily_net_ret is empty when computing final_metrics_outsample. '
+                    f'outsample_start_day={self.outsample_start_day}, '
+                    f'outsample_end_day={self.outsample_end_day}'
+                )
+            out_ret = get_annualized_ret(net_ret_df, fusion_col, self.interest_method)
+            out_vol = get_annualized_volatility(net_ret_df, fusion_col)
+            out_sharpe_df = get_annualized_sharpe(out_ret, out_vol)
+            out_sharpe_value = float(
+                pd.to_numeric(out_sharpe_df.loc['all', fusion_col], errors='coerce')
+            ) if 'all' in out_sharpe_df.index else float('nan')
+
+            final_metrics_outsample = {
+                'ic': out_ic_value,
+                'sharpe': out_sharpe_value,
+            }
         leakage_result = self.check_if_leakage(
             fc_name_list=[fusion_col],
             generated_df=final_fused_df[['time', 'instrument_id', fusion_col]].copy(),
