@@ -33,6 +33,9 @@
 
             <div class="param-section"><el-divider content-position="left">样本内区间</el-divider><el-row :gutter="8"><el-col :span="12"><el-form-item label="开始"><el-input v-model="p.start_time" /></el-form-item></el-col><el-col :span="12"><el-form-item label="结束"><el-input v-model="p.end_time" /></el-form-item></el-col></el-row></div>
             <div class="param-section"><el-divider content-position="left">样本外区间</el-divider><el-row :gutter="8"><el-col :span="12"><el-form-item label="开始"><el-input v-model="oosStart" placeholder="20250101" /></el-form-item></el-col><el-col :span="12"><el-form-item label="结束"><el-input v-model="oosEnd" placeholder="20251231" /></el-form-item></el-col></el-row></div>
+            <div class="param-section"><el-divider content-position="left">实际样本外区间</el-divider>
+              <el-row :gutter="8"><el-col :span="24"><el-form-item label="启用"><el-switch v-model="enableRealOos" /></el-form-item></el-col></el-row>
+              <el-row :gutter="8"><el-col :span="12"><el-form-item label="开始"><el-input v-model="realOosStart" placeholder="20260101" :disabled="!enableRealOos" /></el-form-item></el-col><el-col :span="12"><el-form-item label="结束"><el-input v-model="realOosEnd" placeholder="20260330" :disabled="!enableRealOos" /></el-form-item></el-col></el-row></div>
 
             <el-form-item><el-button type="primary" @click="handleBt" :loading="loading" style="width:100%"><el-icon v-if="!loading"><CaretRight /></el-icon>{{ loading ? '回测中...' : '运行回测' }}</el-button></el-form-item>
           </el-form></div>
@@ -55,12 +58,18 @@
               </el-table>
               <template v-if="item.hasOos">
                 <el-tag type="warning" size="small" style="margin-bottom:6px;">样本外</el-tag>
-                <el-table :data="item.oosSummary" stripe size="small" max-height="220">
+                <el-table :data="item.oosSummary" stripe size="small" max-height="220" style="margin-bottom:10px;">
                   <el-table-column v-for="c in item.columns" :key="`oos_${fn}_${c}`" :prop="c" :label="c" min-width="100" show-overflow-tooltip />
                 </el-table>
               </template>
+              <template v-if="item.hasRealOos">
+                <el-tag type="danger" size="small" style="margin-bottom:6px;">实际样本外</el-tag>
+                <el-table :data="item.realOosSummary" stripe size="small" max-height="220">
+                  <el-table-column v-for="c in item.columns" :key="`real_oos_${fn}_${c}`" :prop="c" :label="c" min-width="100" show-overflow-tooltip />
+                </el-table>
+              </template>
             </el-card>
-            <el-card class="chart-card" shadow="hover" style="margin-bottom:24px;"><NavChart :title="fn+' 连续净值曲线'" :curve-data="item.curve" :split-date="item.hasOos ? oosStart : ''" height="360px" /></el-card>
+            <el-card class="chart-card" shadow="hover" style="margin-bottom:24px;"><NavChart :title="fn+' 连续净值曲线'" :curve-data="item.curve" :split-dates="item.splitDates" height="360px" /></el-card>
           </template>
         </template>
 
@@ -85,6 +94,9 @@ const inputMode = ref('db')
 const formulaInput = ref('')
 const oosStart = ref('20250101')
 const oosEnd = ref('20251231')
+const enableRealOos = ref(false)
+const realOosStart = ref('20260101')
+const realOosEnd = ref('20260330')
 const resultMap = ref(null)
 
 const p = reactive({
@@ -103,6 +115,9 @@ const resetParams = () => {
   })
   oosStart.value = '20250101'
   oosEnd.value = '20251231'
+  enableRealOos.value = false
+  realOosStart.value = '20260101'
+  realOosEnd.value = '20260330'
   formulaInput.value = ''
   resultMap.value = null
 }
@@ -219,10 +234,16 @@ const handleBt = async () => {
     }
 
     const hasOos = Boolean(oosStart.value && oosEnd.value)
+    const hasRealOos = enableRealOos.value && Boolean(realOosStart.value && realOosEnd.value)
+    // 计算最终结束时间：取样本内、样本外、实际样本外的最大结束时间
+    const endTimes = [p.end_time]
+    if (hasOos) endTimes.push(oosEnd.value)
+    if (hasRealOos) endTimes.push(realOosEnd.value)
+    const finalEndTime = endTimes.reduce((max, t) => t > max ? t : max, '')
     const fullPayload = {
       ...basePayload,
       start_time: p.start_time,
-      end_time: hasOos ? oosEnd.value : p.end_time,
+      end_time: finalEndTime,
     }
     const { data: fullData } = await runBacktest(fullPayload)
 
@@ -232,23 +253,33 @@ const handleBt = async () => {
 
     const merged = {}
     allNames.forEach((fn) => {
-      const isSummary = hasOos
+      const isSummary = hasOos || hasRealOos
         ? buildWindowSummaryFromContinuous(fullSummary, fn, p.start_time, p.end_time)
         : pickSummaryByFactor(fullSummary, fn)
       const oosSummary = hasOos
         ? buildWindowSummaryFromContinuous(fullSummary, fn, oosStart.value, oosEnd.value)
         : []
+      const realOosSummary = hasRealOos
+        ? buildWindowSummaryFromContinuous(fullSummary, fn, realOosStart.value, realOosEnd.value)
+        : []
 
-      const cols = isSummary.length ? Object.keys(isSummary[0]) : (oosSummary.length ? Object.keys(oosSummary[0]) : [])
+      const cols = isSummary.length ? Object.keys(isSummary[0]) : (oosSummary.length ? Object.keys(oosSummary[0]) : (realOosSummary.length ? Object.keys(realOosSummary[0]) : []))
       const formula = inputMode.value === 'formula'
         ? String(formulaInput.value || '').trim()
         : (factorFormulaMap.value[fn] || '')
+      // 构建分割日期数组：样本外开始和实际样本外开始
+      const splitDates = []
+      if (hasOos) splitDates.push(oosStart.value)
+      if (hasRealOos) splitDates.push(realOosStart.value)
       merged[fn] = {
         formula,
         isSummary,
         oosSummary,
+        realOosSummary,
         hasOos,
+        hasRealOos,
         columns: cols,
+        splitDates,
         curve: fullCurves[fn] || { time: [], gross_nav: [], net_nav: [] },
       }
     })
