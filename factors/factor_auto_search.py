@@ -1047,6 +1047,39 @@ class LLMPromptFactorGenerator(FactorGenerator):
                  llm_early_stopping_round: int = 20,
                  llm_user_requirement: str = '生成期货的日频量价因子',
                  version: Optional[str] = None):
+        """LLM提示因子生成器。
+
+        参数说明（中文）：
+        - instrument_type: 数据品种类型，目前仅支持期货连续合约。
+        - instrument_id_list: 合约列表（如 'C0' 或 ['C0','FG0']）。
+        - fc_freq: 因子频率（1m/5m/1d）。
+        - data: 直接传入的价格数据（优先使用）。
+        - start_time/end_time: 回测区间起止时间。
+        - portfolio_adjust_method: 收益对齐周期（min/1D/1M/1Q）。
+        - interest_method: 利息计算方式（simple/compound）。
+        - risk_free_rate: 是否加入无风险利率。
+        - calculate_baseline: 是否计算基准表现。
+        - apply_weighted_price: 是否对价格做复权处理。
+        - n_jobs: 并行进程/线程数。
+        - base_col_list: 可用基础字段列表（默认 OHLCV+position）。
+        - min_window_size: 最小窗口长度。
+        - max_factor_count: 最终返回的最大因子数量。
+        - apply_rolling_norm: 是否对因子做滚动标准化（LLM生成因子默认为False）。
+        - rolling_norm_window: 滚动标准化窗口长度。
+        - rolling_norm_min_periods: 滚动标准化最小样本数。
+        - rolling_norm_eps: 标准化数值稳定项。
+        - rolling_norm_clip: 标准化后的截断范围。
+        - check_leakage_count: 泄露检查抽样次数。
+        - check_relative: 是否与历史库做相关性去重。
+        - relative_threshold: 相对相关性阈值（Spearman abs）。
+        - relative_check_version_list: 相对检查的版本白名单。
+        - model_name: 使用的LLM模型名称（目前仅支持deepseek）。
+        - llm_temperature: LLM生成温度，控制随机性。
+        - llm_factor_count: 每轮LLM请求生成的因子数量。
+        - llm_early_stopping_round: 连续多少轮无新因子则早停。
+        - llm_user_requirement: 用户需求描述，用于指导LLM生成因子。
+        - version: 本次生成的版本标识。
+        """
         super().__init__(
             instrument_type=instrument_type,
             instrument_id_list=instrument_id_list,
