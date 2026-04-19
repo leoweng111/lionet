@@ -22,6 +22,9 @@
             </div>
             <div class="param-section"><el-divider content-position="left">样本内区间</el-divider><el-row :gutter="8"><el-col :span="12"><el-form-item label="开始"><el-input v-model="sp.start_time" /></el-form-item></el-col><el-col :span="12"><el-form-item label="结束"><el-input v-model="sp.end_time" /></el-form-item></el-col></el-row></div>
             <div class="param-section"><el-divider content-position="left">样本外区间</el-divider><el-row :gutter="8"><el-col :span="12"><el-form-item label="开始"><el-input v-model="oosStart" placeholder="20250101" /></el-form-item></el-col><el-col :span="12"><el-form-item label="结束"><el-input v-model="oosEnd" placeholder="20251231" /></el-form-item></el-col></el-row></div>
+            <div class="param-section"><el-divider content-position="left">实际样本外区间</el-divider>
+              <el-row :gutter="8"><el-col :span="24"><el-form-item label="启用"><el-switch v-model="enableRealOos" /></el-form-item></el-col></el-row>
+              <el-row :gutter="8"><el-col :span="12"><el-form-item label="开始"><el-input v-model="realOosStart" placeholder="20260101" :disabled="!enableRealOos" /></el-form-item></el-col><el-col :span="12"><el-form-item label="结束"><el-input v-model="realOosEnd" placeholder="20260330" :disabled="!enableRealOos" /></el-form-item></el-col></el-row></div>
             <div class="param-section"><el-divider content-position="left">资金与费用</el-divider>
               <el-form-item label="初始资金"><el-input-number v-model="sp.initial_capital" :min="1000" :max="100000000" :step="10000" style="width:100%" /></el-form-item>
               <el-row :gutter="12"><el-col :span="12"><el-form-item label="保证金率"><el-input-number v-model="sp.margin_rate" :min="0.01" :max="1" :step="0.01" :precision="3" style="width:100%" /></el-form-item></el-col><el-col :span="12"><el-form-item label="每手手续费"><el-input-number v-model="sp.fee_per_lot" :min="0" :max="100" :step="0.5" :precision="2" style="width:100%" /></el-form-item></el-col></el-row>
@@ -40,11 +43,40 @@
       <el-col :xs="24" :sm="24" :md="12" :lg="14" :xl="14">
         <div v-if="results.length" style="text-align:right;margin-bottom:12px;"><el-button size="small" type="danger" plain @click="clearResults"><el-icon><Delete /></el-icon> 清空结果</el-button></div>
         <template v-for="(item, idx) in results" :key="'strat_'+idx">
-          <el-card shadow="hover" style="margin-bottom:12px;"><template #header><span style="font-weight:600;"><el-tag type="primary" size="small" style="margin-right:6px;">策略</el-tag>{{ item.factor_name }} 绩效概览</span></template>
+          <!-- 绩效概览：样本内 / 样本外 / 实际样本外 -->
+          <el-card shadow="hover" style="margin-bottom:12px;">
+            <template #header><span style="font-weight:600;"><el-tag type="primary" size="small" style="margin-right:6px;">策略</el-tag>{{ item.factor_name }} 绩效概览</span></template>
             <el-descriptions :column="1" size="small" border style="margin-bottom:10px;" v-if="item.factor_formula"><el-descriptions-item label="策略公式"><span style="word-break:break-all;">{{ item.factor_formula }}</span></el-descriptions-item></el-descriptions>
-            <el-table :data="item.nav_data.performance_summary" stripe size="small" max-height="200"><el-table-column v-for="c in (item.nav_data.performance_summary?.length ? Object.keys(item.nav_data.performance_summary[0]) : [])" :key="'ss_'+item.factor_name+c" :prop="c" :label="c" min-width="100" show-overflow-tooltip /></el-table>
+
+            <!-- 样本内绩效 -->
+            <el-tag type="success" size="small" style="margin-bottom:6px;">样本内</el-tag>
+            <el-table :data="item.isSummary" stripe size="small" max-height="200" style="margin-bottom:10px;">
+              <el-table-column v-for="c in (item.columns || [])" :key="'is_ss_'+item.factor_name+c" :prop="c" :label="c" min-width="100" show-overflow-tooltip />
+            </el-table>
+
+            <!-- 样本外绩效 -->
+            <template v-if="item.hasOos">
+              <el-tag type="warning" size="small" style="margin-bottom:6px;">样本外</el-tag>
+              <el-table :data="item.oosSummary" stripe size="small" max-height="200" style="margin-bottom:10px;">
+                <el-table-column v-for="c in (item.columns || [])" :key="'oos_ss_'+item.factor_name+c" :prop="c" :label="c" min-width="100" show-overflow-tooltip />
+              </el-table>
+            </template>
+
+            <!-- 实际样本外绩效 -->
+            <template v-if="item.hasRealOos">
+              <el-tag type="danger" size="small" style="margin-bottom:6px;">实际样本外</el-tag>
+              <el-table :data="item.realOosSummary" stripe size="small" max-height="200">
+                <el-table-column v-for="c in (item.columns || [])" :key="'roos_ss_'+item.factor_name+c" :prop="c" :label="c" min-width="100" show-overflow-tooltip />
+              </el-table>
+            </template>
           </el-card>
-          <el-card v-for="(curve, name) in item.nav_data.nav_curves" :key="'sc_'+name" class="chart-card" shadow="hover" style="margin-bottom:16px;"><NavChart :title="name+' 策略净值'" :curve-data="curve" :split-date="item.split_date || ''" height="350px" /></el-card>
+
+          <!-- 净值曲线图（带所有分界点） -->
+          <el-card v-for="(curve, name) in item.nav_data.nav_curves" :key="'sc_'+name" class="chart-card" shadow="hover" style="margin-bottom:16px;">
+            <NavChart :title="name+' 策略净值'" :curve-data="curve" :split-dates="item.split_dates || []" height="350px" />
+          </el-card>
+
+          <!-- 逐日交易明细 -->
           <el-card shadow="hover" style="margin-bottom:24px;" v-if="item.nav_data.trade_detail?.length">
             <template #header><div style="display:flex;align-items:center;justify-content:space-between;"><span style="font-weight:600;">{{ item.factor_name }} 逐日交易明细</span><el-tag size="small">{{ item.nav_data.trade_detail.length }} 条</el-tag></div></template>
             <el-table :data="item.nav_data.trade_detail" stripe border size="small" max-height="300" style="width:100%">
@@ -71,14 +103,67 @@ const SK = 'lionet_strat'
 const collections = ref([]), versionMap = ref({}), allVersions = ref([]), availableFactors = ref([])
 const running = ref(false), results = ref([])
 const factorFormulaMap = ref({})
+
+// IS / OOS / Real-OOS range params
 const oosStart = ref('20250101')
 const oosEnd = ref('20251231')
-const sp = reactive({ version: '', factor_name_list: [], instrument_id: 'C0', start_time: '20200101', end_time: '20241231', database: 'factors', collection: 'genetic_programming', initial_capital: 1000000, margin_rate: 0.1, fee_per_lot: 2.0, slippage: 1.0, apply_rolling_norm: true, rolling_norm_window: 30, rolling_norm_min_periods: 20, rolling_norm_eps: 1e-8, rolling_norm_clip: 5.0, signal_delay_days: 1, min_open_ratio: 1.0 })
-const resetParams = () => { const kv = sp.version, kf = [...sp.factor_name_list], kc = sp.collection; Object.assign(sp, { version: kv, factor_name_list: kf, instrument_id: 'C0', start_time: '20200101', end_time: '20241231', database: 'factors', collection: kc, initial_capital: 1000000, margin_rate: 0.1, fee_per_lot: 2.0, slippage: 1.0, apply_rolling_norm: true, rolling_norm_window: 30, rolling_norm_min_periods: 20, rolling_norm_eps: 1e-8, rolling_norm_clip: 5.0, signal_delay_days: 1, min_open_ratio: 1.0 }); oosStart.value = '20250101'; oosEnd.value = '20251231' }
-const filteredVersions = computed(() => sp.collection && versionMap.value[sp.collection] ? versionMap.value[sp.collection] : allVersions.value)
-const fetchVersions = async () => { try { const { data } = await getVersions(); collections.value = data.collections || []; versionMap.value = data.version_map || {}; allVersions.value = data.all_versions || [] } catch { /* */ } }
-const onCollChange = () => { sp.version = ''; sp.factor_name_list = []; availableFactors.value = []; factorFormulaMap.value = {} }
-const pickFormulaFromRecord = (rec) => String(rec?.formula || rec?.factor_formula || rec?.['Factor Formula'] || rec?.expr || '')
+const enableRealOos = ref(false)
+const realOosStart = ref('20260101')
+const realOosEnd = ref('20260330')
+
+const sp = reactive({
+  version: '', factor_name_list: [], instrument_id: 'C0',
+  start_time: '20200101', end_time: '20241231',
+  database: 'factors', collection: 'genetic_programming',
+  initial_capital: 1000000, margin_rate: 0.1, fee_per_lot: 2.0,
+  slippage: 1.0, apply_rolling_norm: true,
+  rolling_norm_window: 30, rolling_norm_min_periods: 20,
+  rolling_norm_eps: 1e-8, rolling_norm_clip: 5.0,
+  signal_delay_days: 1, min_open_ratio: 1.0,
+})
+
+const filteredVersions = computed(() =>
+  sp.collection && versionMap.value[sp.collection]
+    ? versionMap.value[sp.collection]
+    : allVersions.value
+)
+
+const resetParams = () => {
+  const kv = sp.version, kf = [...sp.factor_name_list], kc = sp.collection
+  Object.assign(sp, {
+    version: kv, factor_name_list: kf, instrument_id: 'C0',
+    start_time: '20200101', end_time: '20241231',
+    database: 'factors', collection: kc,
+    initial_capital: 1000000, margin_rate: 0.1, fee_per_lot: 2.0,
+    slippage: 1.0, apply_rolling_norm: true,
+    rolling_norm_window: 30, rolling_norm_min_periods: 20,
+    rolling_norm_eps: 1e-8, rolling_norm_clip: 5.0,
+    signal_delay_days: 1, min_open_ratio: 1.0,
+  })
+  oosStart.value = '20250101'
+  oosEnd.value = '20251231'
+  enableRealOos.value = false
+  realOosStart.value = '20260101'
+  realOosEnd.value = '20260330'
+}
+
+const fetchVersions = async () => {
+  try {
+    const { data } = await getVersions()
+    collections.value = data.collections || []
+    versionMap.value = data.version_map || {}
+    allVersions.value = data.all_versions || []
+  } catch { /* */ }
+}
+
+const onCollChange = () => {
+  sp.version = ''; sp.factor_name_list = []
+  availableFactors.value = []; factorFormulaMap.value = {}
+}
+
+const pickFormulaFromRecord = (rec) =>
+  String(rec?.formula || rec?.factor_formula || rec?.['Factor Formula'] || rec?.expr || '')
+
 const onVerChange = async () => {
   sp.factor_name_list = []
   if (!sp.version) { availableFactors.value = []; factorFormulaMap.value = {}; return }
@@ -96,27 +181,86 @@ const onVerChange = async () => {
     })
     factorFormulaMap.value = m
   } catch {
-    availableFactors.value = []
-    factorFormulaMap.value = {}
+    availableFactors.value = []; factorFormulaMap.value = {}
   }
 }
+
+// ── Performance summary helpers ──────────────────────────────────────
+
+const toYearNumber = (v) => {
+  if (v == null) return null
+  const n = Number(v)
+  return Number.isFinite(n) ? n : null
+}
+
+const buildWindowSummary = (summary, startDay, endDay) => {
+  if (!summary || !summary.length) return []
+  const startYear = toYearNumber(String(startDay || '').slice(0, 4))
+  const endYear = toYearNumber(String(endDay || '').slice(0, 4))
+  if (!startYear || !endYear) return []
+
+  const yearRows = summary.filter((r) => {
+    const y = toYearNumber(r.year)
+    return y != null && y >= startYear && y <= endYear
+  })
+
+  if (yearRows.length === 1) {
+    return [...yearRows, { ...yearRows[0], year: 'all' }]
+  }
+  return yearRows
+}
+
+// ── Handle run ──────────────────────────────────────────────────────
+
 const handleRun = async () => {
-  if (!sp.version || !sp.factor_name_list.length) { ElMessage.warning('请选择版本和因子'); return }
+  if (!sp.version || !sp.factor_name_list.length) {
+    ElMessage.warning('请选择版本和因子'); return
+  }
   running.value = true
   try {
     const hasOos = Boolean(oosStart.value && oosEnd.value)
+    const hasRealOos = enableRealOos.value && Boolean(realOosStart.value && realOosEnd.value)
+
+    // 计算请求的结束时间：取样本内、样本外、实际样本外的最大结束时间
+    const endTimes = [sp.end_time]
+    if (hasOos) endTimes.push(oosEnd.value)
+    if (hasRealOos) endTimes.push(realOosEnd.value)
+    const finalEndTime = endTimes.reduce((max, t) => t > max ? t : max, '')
+
     const payload = {
       ...sp,
       start_time: sp.start_time,
-      end_time: hasOos ? oosEnd.value : sp.end_time,
+      end_time: finalEndTime,
     }
+
     const { data } = await runStrategy(payload)
-    const splitDate = hasOos ? oosStart.value : ''
-    results.value = (data.results || []).map((item) => ({
-      ...item,
-      factor_formula: factorFormulaMap.value[item.factor_name] || '',
-      split_date: splitDate,
-    }))
+
+    // 构建分割点数组（传给 NavChart）
+    const splitDates = []
+    if (hasOos) splitDates.push(oosStart.value)
+    if (hasRealOos) splitDates.push(realOosStart.value)
+
+    results.value = (data.results || []).map((item) => {
+      const summary = item.nav_data?.performance_summary || []
+      const isSummary = buildWindowSummary(summary, sp.start_time, sp.end_time)
+      const oosSummary = hasOos ? buildWindowSummary(summary, oosStart.value, oosEnd.value) : []
+      const realOosSummary = hasRealOos ? buildWindowSummary(summary, realOosStart.value, realOosEnd.value) : []
+      const cols = isSummary.length
+        ? Object.keys(isSummary[0])
+        : (oosSummary.length ? Object.keys(oosSummary[0]) : (realOosSummary.length ? Object.keys(realOosSummary[0]) : []))
+
+      return {
+        ...item,
+        factor_formula: factorFormulaMap.value[item.factor_name] || '',
+        isSummary,
+        oosSummary,
+        realOosSummary,
+        hasOos,
+        hasRealOos,
+        columns: cols,
+        split_dates: splitDates,
+      }
+    })
     ElMessage.success('策略模拟完成')
   } catch (e) {
     ElMessage.error('策略模拟失败: ' + (e.response?.data?.detail || e.message))
@@ -124,7 +268,16 @@ const handleRun = async () => {
     running.value = false
   }
 }
+
 const clearResults = () => { results.value = []; sessionStorage.removeItem(SK) }
-watch(results, () => { try { sessionStorage.setItem(SK, JSON.stringify(results.value)) } catch { /* */ } }, { deep: true })
-onMounted(() => { fetchVersions(); try { const s = sessionStorage.getItem(SK); if (s) results.value = JSON.parse(s) } catch { /* */ } })
+watch(results, () => {
+  try { sessionStorage.setItem(SK, JSON.stringify(results.value)) } catch { /* */ }
+}, { deep: true })
+onMounted(() => {
+  fetchVersions()
+  try {
+    const s = sessionStorage.getItem(SK)
+    if (s) results.value = JSON.parse(s)
+  } catch { /* */ }
+})
 </script>

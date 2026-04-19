@@ -120,3 +120,5 @@ if str(PROJECT_ROOT) not in sys.path:
 ```
 
 This ensures imports like `from factors.factor_auto_search import ...` work when running scripts from subdirectories.
+
+请使用中文输出最终的回答和概述。
