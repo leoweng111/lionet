@@ -482,6 +482,66 @@ def calc_fitness_and_sign(tree: FactorNode,
                           rolling_norm_clip: float = 10.0,
                           small_factor_penalty_coef: float = 0.0,
                           assumed_initial_capital: float = 1_000_000.0) -> Tuple[float, float, int]:
+    """计算因子树的适应度分数，并自动选择最优符号方向。
+
+    该函数对给定因子树进行评估：首先对其应用滚动归一化（可选），然后计算
+    因子与目标收益之间的 IC（或其他度量），并尝试正负两种符号方向，取较优者。
+    同时支持深度惩罚和小因子惩罚来引导 GP 搜索更优的因子结构。
+
+    Parameters
+    ----------
+    tree : FactorNode
+        要评估的因子 AST 根节点。
+    df : pd.DataFrame
+        包含因子计算所需字段（如 close、volume 等）及目标收益列的数据表。
+    fitness_metric : str, optional
+        适应度评价指标，支持 'ic'（默认）、'rank_ic'、'returns'、'sharpe' 等，
+        实际支持指标由 ``_metric_score`` 函数定义。
+    target_col : str, optional
+        目标收益列名，默认为 'future_ret'（未来收益率）。
+    depth_penalty_coef : float, optional
+        深度惩罚系数，根据树的深度对适应度进行折扣。默认 0.0 表示不惩罚。
+    depth_penalty_start_depth : int, optional
+        开始施加深度惩罚的最小深度，低于此深度的节点不受惩罚。默认 0。
+    depth_penalty_linear_coef : float, optional
+        线性深度惩罚系数，与 (depth - start_depth) 成正比。默认 0.0。
+    depth_penalty_quadratic_coef : float, optional
+        二次深度惩罚系数，与 (depth - start_depth)^2 成正比。默认 0.0。
+    apply_rolling_norm : bool, optional
+        是否在计算前对因子值应用滚动归一化。默认 True。
+    rolling_norm_window : int, optional
+        滚动归一化的窗口大小，仅在 apply_rolling_norm=True 时生效。默认 30。
+    rolling_norm_min_periods : int, optional
+        滚动归一化的最小样本数，低于此值则结果为 NaN。默认 20。
+    rolling_norm_eps : float, optional
+        滚动归一化中防止除零的小常数。默认 1e-8。
+    rolling_norm_clip : float, optional
+        滚动归一化后因子值的裁剪阈值（绝对值），防止极端值。默认 10.0。
+    small_factor_penalty_coef : float, optional
+        小因子惩罚系数。当因子绝对值过小时（可能导致杠杆过高或收益不稳定）
+        施加额外惩罚。默认 0.0 表示不惩罚。
+    assumed_initial_capital : float, optional
+        估算小因子惩罚时假设的初始资金，用于归一化因子规模。默认 1_000_000.0。
+
+    Returns
+    -------
+    Tuple[float, float, int]
+        ``(penalized_fitness, original_fitness, sign)``：
+        - penalized_fitness : 施加深度惩罚和小因子惩罚后的最终适应度。
+        - original_fitness : 未施加惩罚的原始适应度。
+        - sign : 最优方向，1 表示因子保持原符号，-1 表示因子取反后更优。
+
+    Notes
+    -----
+    函数内部会同时计算正负两个方向的适应度，取较高者作为最终结果。
+    若计算过程中出现异常（除零、无效值等），安全返回 ``(0.0, 0.0, 1)``。
+
+    See Also
+    --------
+    _metric_score : 实际计算 IC/rank_ic/returns/sharpe 等指标的内部函数。
+    _calc_depth_penalty : 深度惩罚的具体计算逻辑。
+    _calc_small_factor_penalty : 小因子惩罚的具体计算逻辑。
+    """
     try:
         eval_node: FactorNode = tree
         if apply_rolling_norm:
