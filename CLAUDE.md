@@ -25,11 +25,20 @@ npm run dev        # Dev server at http://localhost:5173
 npm run build      # Production build
 ```
 
-### Quick Test
+### Integration Test (Required After Code Changes)
 ```bash
-# Run GP smoke test with typed leaf features
-python -u test/typed_gp_smoke.py
+# Run full integration test: single-factor backtest, fusion-factor backtest, frontend build
+python -u test/integration_test.py
 ```
+This must pass before submitting any code changes. 
+
+It verifies:
+1. Single-factor backtest consistency across 4 methods (fc_name, formula, frontend-DB, frontend-formula)
+2. Fusion-factor backtest consistency across 4 methods
+3. Frontend build success
+Pay attention to the last words that it prints.
+If it prints RESULT: false (some tests failed), means one or more tests failed, you need to check the logs above to find out which test(s) failed and fix the issue before submitting code changes.
+If it prints RESULT: true  (all tests passed), means all three tests passed successfully.
 
 ## Architecture
 
