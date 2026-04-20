@@ -28,8 +28,8 @@
                 <el-col :span="12"><el-form-item label="结束日期"><el-input v-model="params.end_time" /></el-form-item></el-col>
               </el-row>
               <el-row :gutter="12">
-                <el-col :span="12"><el-form-item label="适应度"><el-select v-model="params.fitness_metric" style="width:100%"><el-option label="IC" value="ic" /><el-option label="Sharpe" value="sharpe" /></el-select></el-form-item></el-col>
                 <el-col :span="12"><el-form-item label="最大因子数"><el-input-number v-model="params.max_factor_count" :min="1" :max="500" style="width:100%" /></el-form-item></el-col>
+                <el-col :span="12"><el-form-item label="最小窗口"><el-input-number v-model="params.min_window_size" :min="1" :max="200" style="width:100%" /></el-form-item></el-col>
               </el-row>
               <el-row :gutter="12">
                 <el-col :span="12"><el-form-item label="因子频率"><el-select v-model="params.fc_freq" style="width:100%"><el-option label="1d" value="1d" /><el-option label="5m" value="5m" /><el-option label="1m" value="1m" /></el-select></el-form-item></el-col>
@@ -44,7 +44,20 @@
                 <el-col :span="8"><el-form-item label="无风险"><el-switch v-model="params.risk_free_rate" /></el-form-item></el-col>
                 <el-col :span="8"><el-form-item label="复权"><el-switch v-model="params.apply_weighted_price" /></el-form-item></el-col>
               </el-row>
-              <el-form-item label="最小窗口"><el-input-number v-model="params.min_window_size" :min="1" :max="200" style="width:100%" /></el-form-item>
+            </div>
+              </el-col>
+
+              <el-col :xs="24" :sm="24" :md="12" :lg="12" :xl="12">
+            <div class="param-section"><el-divider content-position="center">适应度权重</el-divider>
+              <div v-for="indicator in supportedIndicators" :key="`fitness-${indicator}`" class="indicator-row">
+                <span class="indicator-label">{{ indicator }}</span>
+                <el-input
+                  v-model="params.fitness_indicator_dict[indicator]"
+                  placeholder="0"
+                  clearable
+                  size="small"
+                />
+              </div>
             </div>
               </el-col>
 
@@ -126,14 +139,13 @@
 
               <el-col :xs="24" :sm="24" :md="12" :lg="12" :xl="12">
             <div class="param-section"><el-divider content-position="center">筛选阈值</el-divider>
-              <el-row :gutter="12">
-                <el-col :span="12"><el-form-item label="净收益均值"><el-input-number v-model="params.filter_net_return_mean" :step="0.01" :precision="3" style="width:100%" /></el-form-item></el-col>
-                <el-col :span="12"><el-form-item label="净收益年度"><el-input-number v-model="params.filter_net_return_yearly" :step="0.01" :precision="3" style="width:100%" /></el-form-item></el-col>
-              </el-row>
-              <el-row :gutter="12">
-                <el-col :span="12"><el-form-item label="Sharpe均值"><el-input-number v-model="params.filter_net_sharpe_mean" :step="0.1" :precision="2" style="width:100%" /></el-form-item></el-col>
-                <el-col :span="12"><el-form-item label="Sharpe年度"><el-input-number v-model="params.filter_net_sharpe_yearly" :step="0.1" :precision="2" style="width:100%" /></el-form-item></el-col>
-              </el-row>
+              <div v-for="indicator in supportedIndicators" :key="`filter-${indicator}`" class="filter-row">
+                <div class="filter-row-title">{{ indicator }}（方向: {{ (indicatorDirection[indicator] || 1) === 1 ? '越大越好' : '越小越好' }}）</div>
+                <el-row :gutter="12">
+                  <el-col :span="12"><el-input v-model="params.filter_indicator_dict[indicator].mean_threshold" placeholder="均值阈值（空=不筛选）" clearable size="small" /></el-col>
+                  <el-col :span="12"><el-input v-model="params.filter_indicator_dict[indicator].yearly_threshold" placeholder="年度阈值（空=不筛选）" clearable size="small" /></el-col>
+                </el-row>
+              </div>
             </div>
               </el-col>
             </el-row>
@@ -196,10 +208,41 @@
 </template>
 
 <script setup>
-import { ref, reactive, computed } from 'vue'
+import { ref, reactive, computed, onMounted } from 'vue'
 import { ElMessage } from 'element-plus'
-import { startMining, getMiningStatus, getTasks } from '../api'
+import { startMining, getMiningStatus, getTasks, getMiningIndicatorOptions } from '../api'
 import NavChart from '../components/NavChart.vue'
+
+const supportedIndicators = ref(['Net Return', 'Net Sharpe', 'TS IC'])
+const indicatorDirection = ref({ 'Net Return': 1, 'Net Sharpe': 1, 'TS IC': 1 })
+
+const _buildDefaultFitnessIndicatorWeight = (indicators) => {
+  const out = {}
+  indicators.forEach((indicator) => {
+    out[indicator] = indicator === 'TS IC' ? 1 : 0
+  })
+  return out
+}
+
+const _buildDefaultFilterIndicatorDict = (indicators, directionMap) => {
+  const out = {}
+  indicators.forEach((indicator) => {
+    out[indicator] = {
+      mean_threshold: null,
+      yearly_threshold: null,
+      direction: directionMap[indicator] ?? 1,
+    }
+  })
+  if (out['Net Return']) {
+    out['Net Return'].mean_threshold = 0.05
+    out['Net Return'].yearly_threshold = 0.03
+  }
+  if (out['Net Sharpe']) {
+    out['Net Sharpe'].mean_threshold = 0.5
+    out['Net Sharpe'].yearly_threshold = 0.3
+  }
+  return out
+}
 
 const defaultParams = () => ({
   instrument_type: 'futures_continuous_contract', instrument_id_list: 'C0', fc_freq: '1d',
@@ -207,7 +250,9 @@ const defaultParams = () => ({
   version: new Date().toISOString().slice(0,10).replace(/-/g,'') + '_gp_test',
   portfolio_adjust_method: '1D', interest_method: 'simple', risk_free_rate: false,
   calculate_baseline: true, apply_weighted_price: true, n_jobs: 5, max_factor_count: 50,
-  min_window_size: 30, fitness_metric: 'ic',
+  min_window_size: 30,
+  fitness_metric: 'ic',
+  fitness_indicator_dict: _buildDefaultFitnessIndicatorWeight(supportedIndicators.value),
   apply_rolling_norm: true, rolling_norm_window: 30, rolling_norm_min_periods: 20,
   rolling_norm_eps: 1e-8, rolling_norm_clip: 5.0,
   check_leakage_count: 20, check_relative: true, relative_threshold: 0.7,
@@ -220,16 +265,62 @@ const defaultParams = () => ({
   gp_depth_penalty_quadratic_coef: 0.0, gp_log_interval: 1,
   gp_small_factor_penalty_coef: 0.0, gp_assumed_initial_capital: 100000,
   gp_elite_stagnation_generation_count: 4, gp_max_shock_generation: 3,
+  filter_indicator_dict: _buildDefaultFilterIndicatorDict(supportedIndicators.value, indicatorDirection.value),
+  // Legacy fields kept for backward compatibility with older backend contracts.
   filter_net_return_mean: 0.05, filter_net_return_yearly: 0.03,
   filter_net_sharpe_mean: 0.5, filter_net_sharpe_yearly: 0.3,
 })
 const params = reactive(defaultParams())
 const resetParams = () => Object.assign(params, defaultParams())
 
+onMounted(async () => {
+  try {
+    const { data } = await getMiningIndicatorOptions()
+    supportedIndicators.value = data.supported_indicator || supportedIndicators.value
+    indicatorDirection.value = data.indicator_direction || indicatorDirection.value
+
+    const nextDefault = defaultParams()
+    Object.assign(params, nextDefault)
+  } catch {
+    // fallback to local defaults when backend metadata endpoint is unavailable
+  }
+})
+
 const mining = ref(false), taskId = ref(''), taskStatus = ref(''), taskProgress = ref(''), taskError = ref('')
 const miningResult = ref(null), navCurves = ref({}), perfSummary = ref([]), perfColumns = ref([])
 const statusTag = computed(() => taskStatus.value==='completed'?'success':taskStatus.value==='failed'?'danger':'warning')
 let pollTimer = null
+
+const _toNullableNumber = (raw) => {
+  if (raw === '' || raw === null || raw === undefined) return null
+  const n = Number(raw)
+  return Number.isFinite(n) ? n : null
+}
+
+const _buildMiningPayload = () => {
+  const fitnessIndicatorDict = {}
+  supportedIndicators.value.forEach((indicator) => {
+    const n = _toNullableNumber(params.fitness_indicator_dict?.[indicator])
+    fitnessIndicatorDict[indicator] = n === null ? 0 : n
+  })
+
+  const filterIndicatorDict = {}
+  supportedIndicators.value.forEach((indicator) => {
+    const conf = params.filter_indicator_dict?.[indicator] || {}
+    filterIndicatorDict[indicator] = {
+      mean_threshold: _toNullableNumber(conf.mean_threshold),
+      yearly_threshold: _toNullableNumber(conf.yearly_threshold),
+      direction: Number(indicatorDirection.value?.[indicator] ?? 1),
+    }
+  })
+
+  return {
+    ...params,
+    random_seed: params.random_seed || null,
+    fitness_indicator_dict: fitnessIndicatorDict,
+    filter_indicator_dict: filterIndicatorDict,
+  }
+}
 
 const handleStartMining = async () => {
   const version = String(params.version || '').trim()
@@ -257,7 +348,7 @@ const handleStartMining = async () => {
       // If pre-check fails, still try backend submission; backend has the final duplicate guard.
     }
 
-    const { data } = await startMining({ ...params, random_seed: params.random_seed || null })
+    const { data } = await startMining(_buildMiningPayload())
     taskId.value = data.task_id; taskStatus.value = 'running'; taskProgress.value = '任务已提交...'
     ElMessage.success('挖掘任务已启动: ' + data.task_id)
     startPolling()
@@ -314,6 +405,32 @@ const startPolling = () => {
 .param-section :deep(.el-divider__text) {
   font-weight: 600;
   color: var(--el-text-color-primary);
+}
+
+.indicator-row {
+  display: grid;
+  grid-template-columns: 1fr 120px;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+
+.indicator-label {
+  font-size: 12px;
+  color: var(--el-text-color-regular);
+}
+
+.filter-row {
+  border: 1px dashed var(--el-border-color-lighter);
+  border-radius: 6px;
+  padding: 8px;
+  margin-bottom: 8px;
+}
+
+.filter-row-title {
+  font-size: 12px;
+  color: var(--el-text-color-regular);
+  margin-bottom: 6px;
 }
 
 .param-scroll-panel :deep(.el-input),

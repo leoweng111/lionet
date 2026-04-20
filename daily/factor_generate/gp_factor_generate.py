@@ -61,6 +61,7 @@ def run_gp_factor_generate(
     gp_const_prob: float = 0.02,
     gp_window_choices: Optional[Sequence[int]] = None,
     fitness_metric: str = 'ic',
+    fitness_indicator_dict: Optional[dict] = None,
     random_seed: Optional[int] = None,
     gp_early_stopping_generation_count: int = 20,
     gp_depth_penalty_coef: float = 0.0,
@@ -78,6 +79,13 @@ def run_gp_factor_generate(
     version = version or datetime.now().strftime('%Y%m%d')
     total_attempts = max(1, int(attempt_time))
     last_result = None
+    if fitness_indicator_dict is None:
+        metric = str(fitness_metric).strip().lower()
+        if metric == 'sharpe':
+            fitness_indicator_dict = {'Gross Sharpe': 1.0}
+        else:
+            fitness_indicator_dict = {'TS IC': 1.0}
+
     for attempt_idx in range(total_attempts):
         fg = GeneticFactorGenerator(
             instrument_type=instrument_type,
@@ -114,7 +122,7 @@ def run_gp_factor_generate(
             gp_leaf_prob=gp_leaf_prob,
             gp_const_prob=gp_const_prob,
             gp_window_choices=gp_window_choices,
-            fitness_metric=fitness_metric,
+            fitness_indicator_dict=fitness_indicator_dict,
             random_seed=random_seed,
             gp_early_stopping_generation_count=gp_early_stopping_generation_count,
             gp_depth_penalty_coef=gp_depth_penalty_coef,

@@ -13,6 +13,7 @@ export const getFactors = (params) => api.get('/api/factors', { params })
 export const startMining = (data) => api.post('/api/mining/start', data)
 export const getMiningStatus = (taskId) => api.get(`/api/mining/status/${taskId}`)
 export const terminateMining = (taskId) => api.post(`/api/mining/terminate/${taskId}`)
+export const getMiningIndicatorOptions = () => api.get('/api/mining/indicator-options')
 
 // ── Backtest ──────────────────────────────────────────
 export const runBacktest = (data) => api.post('/api/backtest', data)

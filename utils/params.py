@@ -59,8 +59,10 @@ FUTURES_CONTRACT_MULTIPLIER = {
 DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
 DEEPSEEK_BASE_URL = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
 
-# Supported indicator names for factor filtering.
-SUPPORTED_FILTER_INDICATORS = [
+# Unified indicator names for both GP fitness construction and threshold filtering.
+# NOTE:
+# - `count` (annualized instrument count) is intentionally excluded.
+GP_SUPPORTED_INDICATOR = [
     'Gross Return', 'Net Return',
     'Gross Volatility', 'Net Volatility',
     'Gross Sharpe', 'Net Sharpe',
@@ -68,8 +70,43 @@ SUPPORTED_FILTER_INDICATORS = [
     'Gross MaxDD', 'Net MaxDD',
     'Gross Calmar', 'Net Calmar',
     'Gross Win Rate', 'Net Win Rate',
-    'Turnover', 'TS IC', 'TS RankIC', 'T-corr', 'count',
+    'Turnover', 'TS IC', 'TS RankIC', 'T-corr',
 ]
+
+# Direction for threshold comparison:
+#  1: larger is better, -1: smaller is better.
+GP_INDICATOR_DIRECTION = {
+    'Gross Return': 1,
+    'Net Return': 1,
+    'Gross Volatility': -1,
+    'Net Volatility': -1,
+    'Gross Sharpe': 1,
+    'Net Sharpe': 1,
+    'Gross Sortino': 1,
+    'Net Sortino': 1,
+    'Gross MaxDD': -1,
+    'Net MaxDD': -1,
+    'Gross Calmar': 1,
+    'Net Calmar': 1,
+    'Gross Win Rate': 1,
+    'Net Win Rate': 1,
+    'Turnover': -1,
+    'TS IC': 1,
+    'TS RankIC': 1,
+    'T-corr': 1,
+}
+
+# Default fitness weights: keep current behavior (IC-driven) by default.
+GP_DEFAULT_FITNESS_INDICATOR_WEIGHT = {
+    'TS IC': 1.0,
+}
+
+# Default filter threshold config:
+# indicator -> (mean_threshold, yearly_threshold, direction)
+GP_DEFAULT_FILTER_INDICATOR_DICT = {
+    'Net Return': (0.05, 0.03, 1),
+    'Net Sharpe': (0.5, 0.3, 1),
+}
 
 # Supported options for factor fusion.
 FusionSupportedMethods = {'avg_weight'}

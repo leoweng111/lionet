@@ -30,6 +30,12 @@ from mongo.mongify import get_data, list_collection_names, update_one_data, upda
 from factors.factor_auto_search import GeneticFactorGenerator, FactorFusioner
 from factors.backtest import BackTester
 from strategy.strategy import Strategy
+from utils.params import (
+    GP_DEFAULT_FILTER_INDICATOR_DICT,
+    GP_DEFAULT_FITNESS_INDICATOR_WEIGHT,
+    GP_INDICATOR_DIRECTION,
+    GP_SUPPORTED_INDICATOR,
+)
 
 # ── App Init ───────────────────────────────────────────────────────────
 app = FastAPI(title="Lionet Factor Mining Platform", version="1.0.0")
@@ -190,6 +196,7 @@ class GPMiningParams(BaseModel):
     max_factor_count: int = 50
     min_window_size: int = 30
     fitness_metric: str = "ic"
+    fitness_indicator_dict: Dict[str, Optional[float]] = Field(default_factory=lambda: dict(GP_DEFAULT_FITNESS_INDICATOR_WEIGHT))
     apply_rolling_norm: bool = True
     rolling_norm_window: int = 30
     rolling_norm_min_periods: int = 20
@@ -224,6 +231,8 @@ class GPMiningParams(BaseModel):
     filter_net_return_yearly: float = 0.03
     filter_net_sharpe_mean: float = 0.5
     filter_net_sharpe_yearly: float = 0.3
+    # indicator -> {mean_threshold, yearly_threshold, direction}
+    filter_indicator_dict: Dict[str, Dict[str, Optional[float]]] = Field(default_factory=dict)
 
 
 class BacktestParams(BaseModel):
@@ -317,6 +326,70 @@ def _sanitize_nan(v, default=None):
     if isinstance(v, float) and (np.isnan(v) or np.isinf(v)):
         return default
     return v
+
+
+def _normalize_fitness_indicator_dict(params: GPMiningParams) -> Dict[str, float]:
+    indicator_weight_raw = dict(params.fitness_indicator_dict or {})
+    indicator_weight: Dict[str, float] = {}
+
+    for indicator in GP_SUPPORTED_INDICATOR:
+        raw_weight = indicator_weight_raw.get(indicator, None)
+        if raw_weight is None:
+            continue
+        try:
+            weight = float(raw_weight)
+        except (TypeError, ValueError):
+            continue
+        if abs(weight) <= 1e-12:
+            continue
+        indicator_weight[indicator] = weight
+
+    # 兼容旧参数：未提供新字典时，沿用 fitness_metric。
+    if not indicator_weight:
+        metric = str(params.fitness_metric or '').strip().lower()
+        if metric == 'sharpe':
+            indicator_weight = {'Gross Sharpe': 1.0}
+        else:
+            indicator_weight = {'TS IC': 1.0}
+    return indicator_weight
+
+
+def _normalize_filter_indicator_dict(
+    params: GPMiningParams,
+) -> Dict[str, tuple[Optional[float], Optional[float], int]]:
+    raw = dict(params.filter_indicator_dict or {})
+    out: Dict[str, tuple[Optional[float], Optional[float], int]] = {}
+
+    for indicator, conf in raw.items():
+        if indicator not in GP_SUPPORTED_INDICATOR:
+            continue
+        conf = conf or {}
+
+        mean_threshold_raw = conf.get('mean_threshold')
+        yearly_threshold_raw = conf.get('yearly_threshold')
+        direction_raw = conf.get('direction')
+
+        mean_threshold = None if mean_threshold_raw is None else float(mean_threshold_raw)
+        yearly_threshold = None if yearly_threshold_raw is None else float(yearly_threshold_raw)
+
+        direction_default = int(GP_INDICATOR_DIRECTION.get(indicator, 1))
+        direction = direction_default if direction_raw is None else int(direction_raw)
+        if direction not in (1, -1):
+            direction = direction_default
+
+        out[indicator] = (mean_threshold, yearly_threshold, direction)
+
+    # 兼容旧参数：若新结构为空，使用原有 Net Return / Net Sharpe 阈值。
+    if not out:
+        for indicator, (default_mean, default_yearly, default_direction) in GP_DEFAULT_FILTER_INDICATOR_DICT.items():
+            if indicator == 'Net Return':
+                out[indicator] = (float(params.filter_net_return_mean), float(params.filter_net_return_yearly), default_direction)
+            elif indicator == 'Net Sharpe':
+                out[indicator] = (float(params.filter_net_sharpe_mean), float(params.filter_net_sharpe_yearly), default_direction)
+            else:
+                out[indicator] = (default_mean, default_yearly, default_direction)
+
+    return out
 
 
 def _df_to_records(df: pd.DataFrame) -> List[Dict]:
@@ -569,6 +642,22 @@ async def list_factors(version: Optional[str] = None, collection: Optional[str] 
 
 # ── GP Mining ─────────────────────────────────────────────────────────
 
+@app.get('/api/mining/indicator-options')
+async def get_mining_indicator_options():
+    return {
+        'supported_indicator': list(GP_SUPPORTED_INDICATOR),
+        'indicator_direction': dict(GP_INDICATOR_DIRECTION),
+        'default_fitness_indicator_weight': dict(GP_DEFAULT_FITNESS_INDICATOR_WEIGHT),
+        'default_filter_indicator_dict': {
+            k: {
+                'mean_threshold': v[0],
+                'yearly_threshold': v[1],
+                'direction': v[2],
+            }
+            for k, v in GP_DEFAULT_FILTER_INDICATOR_DICT.items()
+        },
+    }
+
 @app.post("/api/mining/start")
 async def start_mining(params: GPMiningParams):
     req_version = str(params.version).strip()
@@ -656,6 +745,9 @@ async def start_mining(params: GPMiningParams):
 def _execute_mining(params: GPMiningParams, task_id: str, cancel_event: threading.Event) -> Dict[str, Any]:
     tasks[task_id]["progress"] = "创建 GeneticFactorGenerator..."
 
+    fitness_indicator_dict = _normalize_fitness_indicator_dict(params)
+    filter_indicator_dict = _normalize_filter_indicator_dict(params)
+
     # Attach log handler to capture GP progress
     from utils.logging import log as lionet_logger
     handler = _GPProgressHandler(task_id=task_id, owner_thread_id=threading.get_ident())
@@ -685,7 +777,7 @@ def _execute_mining(params: GPMiningParams, task_id: str, cancel_event: threadin
             check_relative=params.check_relative,
             relative_threshold=params.relative_threshold,
             gp_generations=params.gp_generations,
-            fitness_metric=params.fitness_metric,
+            fitness_indicator_dict=fitness_indicator_dict,
             gp_max_depth=params.gp_max_depth,
             gp_population_size=params.gp_population_size,
             gp_elite_size=params.gp_elite_size,
@@ -712,10 +804,6 @@ def _execute_mining(params: GPMiningParams, task_id: str, cancel_event: threadin
         # Attach cancel_event so GP evolution can be interrupted
         fg.cancel_event = cancel_event
 
-        filter_indicator_dict = {
-            "Net Return": (params.filter_net_return_mean, params.filter_net_return_yearly, 1),
-            "Net Sharpe": (params.filter_net_sharpe_mean, params.filter_net_sharpe_yearly, 1),
-        }
 
         tasks[task_id]["progress"] = "正在运行遗传算法挖掘因子 (0/" + str(params.gp_generations) + " 代)..."
         result = fg.auto_mine_select_and_save_fc(

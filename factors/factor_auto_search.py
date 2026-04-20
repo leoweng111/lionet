@@ -20,7 +20,12 @@ from data import (
 )
 from mongo.mongify import get_data
 from utils.logging import log
-from utils.params import FusionSupportedMethods, FusionSupportedMetrics, SUPPORTED_FILTER_INDICATORS
+from utils.params import (
+    FusionSupportedMethods,
+    FusionSupportedMetrics,
+    GP_DEFAULT_FITNESS_INDICATOR_WEIGHT,
+    GP_SUPPORTED_INDICATOR,
+)
 
 from .backtest import BackTester
 from .factor_indicators import (
@@ -261,10 +266,10 @@ class FactorGenerator:
 
     @classmethod
     def validate_filter_indicator_dict(cls,
-                                       filter_indicator_dict: Dict[str, Tuple[float, float, int]]) -> None:
+                                       filter_indicator_dict: Dict[str, Tuple[Optional[float], Optional[float], int]]) -> None:
         if not filter_indicator_dict:
             raise ValueError('filter_indicator_dict is required and cannot be empty.')
-        available_indicator_list = list(SUPPORTED_FILTER_INDICATORS)
+        available_indicator_list = list(GP_SUPPORTED_INDICATOR)
         invalid_indicator_list = [k for k in filter_indicator_dict.keys() if k not in available_indicator_list]
         if invalid_indicator_list:
             raise ValueError(
@@ -278,13 +283,17 @@ class FactorGenerator:
                     f'Invalid filter config for `{indicator}`: {conf}. '
                     'Expected tuple(mean_threshold, yearly_threshold, direction).'
                 )
-            _, _, direction = conf
+            mean_threshold, yearly_threshold, direction = conf
+            if mean_threshold is not None:
+                float(mean_threshold)
+            if yearly_threshold is not None:
+                float(yearly_threshold)
             if direction not in [1, -1]:
                 raise ValueError(f'Invalid direction for `{indicator}`: {direction}. Use 1 (>=) or -1 (<=).')
 
     def filter_fc_by_threshold(self,
                                performance_summary: Optional[pd.DataFrame] = None,
-                               filter_indicator_dict: Dict[str, Tuple[float, float, int]] = None,
+                               filter_indicator_dict: Dict[str, Tuple[Optional[float], Optional[float], int]] = None,
                                require_all_row: bool = True,
                                require_all_instruments: bool = True) -> List[str]:
         if performance_summary is None:
@@ -305,7 +314,14 @@ class FactorGenerator:
         if not filter_indicator_dict:
             raise ValueError('filter_indicator_dict is required and cannot be empty.')
 
-        indicator_list = list(filter_indicator_dict.keys())
+        active_indicator_dict = {
+            k: v for k, v in filter_indicator_dict.items()
+            if v[0] is not None or v[1] is not None
+        }
+        if not active_indicator_dict:
+            return summary_df['Factor Name'].dropna().astype(str).unique().tolist()
+
+        indicator_list = list(active_indicator_dict.keys())
         for indicator in indicator_list:
             if indicator not in summary_df.columns:
                 raise ValueError(f'performance_summary does not contain required indicator: {indicator}')
@@ -314,11 +330,13 @@ class FactorGenerator:
         summary_df['__year_str__'] = summary_df['year'].astype(str)
         summary_df['__is_yearly__'] = summary_df['__year_str__'] != 'all'
 
-        for indicator, conf in filter_indicator_dict.items():
+        for indicator, conf in active_indicator_dict.items():
             _, yearly_threshold, direction = conf
             numeric_series = pd.to_numeric(summary_df[indicator], errors='coerce')
             pass_col = f'__pass_yearly__{indicator}'
-            if direction == 1:
+            if yearly_threshold is None:
+                summary_df[pass_col] = True
+            elif direction == 1:
                 summary_df[pass_col] = (~summary_df['__is_yearly__']) | (numeric_series >= float(yearly_threshold))
             else:
                 summary_df[pass_col] = (~summary_df['__is_yearly__']) | (numeric_series <= float(yearly_threshold))
@@ -332,17 +350,17 @@ class FactorGenerator:
             if df_year.empty:
                 return False
 
-            for indicator, conf in filter_indicator_dict.items():
+            for indicator, conf in active_indicator_dict.items():
                 mean_threshold, _, direction = conf
                 yearly_values = pd.to_numeric(df_year[indicator], errors='coerce').dropna()
-                if yearly_values.empty:
-                    return False
-
-                yearly_mean = float(yearly_values.mean())
-                if direction == 1 and not (yearly_mean >= float(mean_threshold)):
-                    return False
-                if direction == -1 and not (yearly_mean <= float(mean_threshold)):
-                    return False
+                if mean_threshold is not None:
+                    if yearly_values.empty:
+                        return False
+                    yearly_mean = float(yearly_values.mean())
+                    if direction == 1 and not (yearly_mean >= float(mean_threshold)):
+                        return False
+                    if direction == -1 and not (yearly_mean <= float(mean_threshold)):
+                        return False
 
                 pass_col = f'__pass_yearly__{indicator}'
                 if not bool(df_group.loc[df_group['__is_yearly__'], pass_col].all()):
@@ -369,7 +387,7 @@ class FactorGenerator:
 
     def summarize_best_failed_indicator_metrics(self,
                                                 performance_summary: pd.DataFrame,
-                                                filter_indicator_dict: Dict[str, Tuple[float, float, int]],
+                                                filter_indicator_dict: Dict[str, Tuple[Optional[float], Optional[float], int]],
                                                 selected_fc_name_list: Sequence[str],
                                                 require_all_row: bool = True,
                                                 require_all_instruments: bool = True) -> Dict[str, Dict[str, Any]]:
@@ -383,11 +401,20 @@ class FactorGenerator:
 
         summary_df['__year_str__'] = summary_df['year'].astype(str)
         summary_df['__is_yearly__'] = summary_df['__year_str__'] != 'all'
-        for indicator, conf in filter_indicator_dict.items():
+        active_indicator_dict = {
+            k: v for k, v in filter_indicator_dict.items()
+            if v[0] is not None or v[1] is not None
+        }
+        if not active_indicator_dict:
+            return {}
+
+        for indicator, conf in active_indicator_dict.items():
             _, yearly_threshold, direction = conf
             numeric_series = pd.to_numeric(summary_df[indicator], errors='coerce')
             pass_col = f'__pass_yearly__{indicator}'
-            if direction == 1:
+            if yearly_threshold is None:
+                summary_df[pass_col] = True
+            elif direction == 1:
                 summary_df[pass_col] = (~summary_df['__is_yearly__']) | (numeric_series >= float(yearly_threshold))
             else:
                 summary_df[pass_col] = (~summary_df['__is_yearly__']) | (numeric_series <= float(yearly_threshold))
@@ -404,7 +431,7 @@ class FactorGenerator:
                 record['__group_valid__'] = True
 
             df_year = group_df.loc[group_df['__is_yearly__']].copy()
-            for indicator, _ in filter_indicator_dict.items():
+            for indicator, _ in active_indicator_dict.items():
                 yearly_values = pd.to_numeric(df_year[indicator], errors='coerce').dropna()
                 record[f'__mean__{indicator}'] = float(yearly_values.mean()) if not yearly_values.empty else np.nan
                 pass_col = f'__pass_yearly__{indicator}'
@@ -422,7 +449,7 @@ class FactorGenerator:
             return {}
 
         best_metric_map: Dict[str, Dict[str, Any]] = {}
-        for indicator, conf in filter_indicator_dict.items():
+        for indicator, conf in active_indicator_dict.items():
             mean_threshold, _, direction = conf
             metric_col = f'__mean__{indicator}'
             pass_col = f'__yearly_pass__{indicator}'
@@ -469,11 +496,13 @@ class FactorGenerator:
                             year_value = float(vals.min()) if direction == 1 else float(vals.max())
                         else:
                             year_value = float(vals.max()) if direction == 1 else float(vals.min())
-                        year_pass = (year_value >= float(conf[1])) if direction == 1 else (year_value <= float(conf[1]))
+                        year_pass = True if conf[1] is None else (
+                            (year_value >= float(conf[1])) if direction == 1 else (year_value <= float(conf[1]))
+                        )
                         yearly_detail.append({
                             'year': str(year_text),
                             'value': year_value,
-                            'threshold': float(conf[1]),
+                            'threshold': None if conf[1] is None else float(conf[1]),
                             'pass': bool(year_pass),
                         })
                 else:
@@ -482,21 +511,25 @@ class FactorGenerator:
                         if vals.empty:
                             continue
                         year_value = float(vals.mean())
-                        year_pass = (year_value >= float(conf[1])) if direction == 1 else (year_value <= float(conf[1]))
+                        year_pass = True if conf[1] is None else (
+                            (year_value >= float(conf[1])) if direction == 1 else (year_value <= float(conf[1]))
+                        )
                         yearly_detail.append({
                             'year': str(year_text),
                             'value': year_value,
-                            'threshold': float(conf[1]),
+                            'threshold': None if conf[1] is None else float(conf[1]),
                             'pass': bool(year_pass),
                         })
 
-            mean_pass = (yearly_mean >= float(mean_threshold)) if direction == 1 else (yearly_mean <= float(mean_threshold))
+            mean_pass = True if mean_threshold is None else (
+                (yearly_mean >= float(mean_threshold)) if direction == 1 else (yearly_mean <= float(mean_threshold))
+            )
             yearly_all_pass = bool(all(item['pass'] for item in yearly_detail)) if yearly_detail else False
 
             # Compute whole-filter pass/fail for this factor across all indicators.
             df_factor_group = per_group_df.loc[per_group_df['Factor Name'] == str(best_row['factor_name'])].copy()
             failed_indicators: List[str] = []
-            for ind_all, conf_all in filter_indicator_dict.items():
+            for ind_all, conf_all in active_indicator_dict.items():
                 mean_thr_all, _, direction_all = conf_all
                 metric_col_all = f'__mean__{ind_all}'
                 pass_col_all = f'__yearly_pass__{ind_all}'
@@ -514,7 +547,9 @@ class FactorGenerator:
                     agg_yearly_pass_all = bool(df_factor_group[pass_col_all].any())
                     agg_group_valid_all = bool(df_factor_group['__group_valid__'].any())
 
-                mean_pass_all = (agg_mean_all >= float(mean_thr_all)) if direction_all == 1 else (agg_mean_all <= float(mean_thr_all))
+                mean_pass_all = True if mean_thr_all is None else (
+                    (agg_mean_all >= float(mean_thr_all)) if direction_all == 1 else (agg_mean_all <= float(mean_thr_all))
+                )
                 if not (mean_pass_all and agg_yearly_pass_all and agg_group_valid_all):
                     failed_indicators.append(ind_all)
             overall_pass = len(failed_indicators) == 0
@@ -530,10 +565,10 @@ class FactorGenerator:
             best_metric_map[indicator] = {
                 'factor_name': str(best_row['factor_name']),
                 'yearly_mean': yearly_mean,
-                'mean_threshold': float(mean_threshold),
-                'yearly_threshold': float(conf[1]),
+                'mean_threshold': None if mean_threshold is None else float(mean_threshold),
+                'yearly_threshold': None if conf[1] is None else float(conf[1]),
                 'direction': int(direction),
-                f'gap_to_{indicator}_mean_threshold': float(yearly_mean - float(mean_threshold)),
+                f'gap_to_{indicator}_mean_threshold': 0.0 if mean_threshold is None else float(yearly_mean - float(mean_threshold)),
                 'yearly_pass': bool(best_row['yearly_pass']),
                 'group_valid': bool(best_row.get('group_valid', True)),
                 'mean_pass': bool(mean_pass),
@@ -550,7 +585,7 @@ class FactorGenerator:
 
     def summarize_selected_indicator_metrics(self,
                                              performance_summary: pd.DataFrame,
-                                             filter_indicator_dict: Dict[str, Tuple[float, float, int]],
+                                             filter_indicator_dict: Dict[str, Tuple[Optional[float], Optional[float], int]],
                                              selected_fc_name_list: Sequence[str]) -> Dict[str, Dict[str, Any]]:
         """Build per-factor indicator summary for logging before DB persistence."""
         if not selected_fc_name_list:
@@ -583,8 +618,8 @@ class FactorGenerator:
                 payload: Dict[str, Any] = {
                     'yearly_mean': yearly_mean,
                     'yearly_worst': yearly_worst,
-                    'mean_threshold': float(mean_threshold),
-                    'yearly_threshold': float(yearly_threshold),
+                    'mean_threshold': None if mean_threshold is None else float(mean_threshold),
+                    'yearly_threshold': None if yearly_threshold is None else float(yearly_threshold),
                     'direction': int(direction),
                 }
 
@@ -702,7 +737,7 @@ class FactorGenerator:
             summary_df = summary_df.reset_index()
 
         metric_cols = [
-            c for c in SUPPORTED_FILTER_INDICATORS
+            c for c in GP_SUPPORTED_INDICATOR
             if c in summary_df.columns
         ]
 
@@ -842,7 +877,7 @@ class FactorGenerator:
         )
 
     def auto_mine_select_and_save_fc(self,
-                                     filter_indicator_dict: Dict[str, Tuple[float, float, int]],
+                                     filter_indicator_dict: Dict[str, Tuple[Optional[float], Optional[float], int]],
                                      n_jobs: Optional[int] = None,
                                      require_all_row: bool = True,
                                      require_all_instruments: bool = True) -> dict:
@@ -1330,7 +1365,8 @@ class GeneticFactorGenerator(FactorGenerator):
                  gp_leaf_prob: float = 0.2,
                  gp_const_prob: float = 0.02,
                  gp_window_choices: Optional[Sequence[int]] = None,
-                 fitness_metric: str = 'ic',
+                 fitness_indicator_dict: Optional[Dict[str, float]] = None,
+                 fitness_metric: Optional[str] = None,
                  random_seed: Optional[int] = None,
                  gp_early_stopping_generation_count: int = 20,
                  gp_depth_penalty_coef: float = 0.0,
@@ -1380,7 +1416,7 @@ class GeneticFactorGenerator(FactorGenerator):
         - gp_leaf_prob: 叶子生成概率。
         - gp_const_prob: 常数叶子概率。
         - gp_window_choices: 时序算子可用窗口集合。
-        - fitness_metric: 适应度指标（ic/sharpe）。
+        - fitness_indicator_dict: 适应度指标权重字典，形如 {indicator: weight}。
         - random_seed: 随机种子。
         - gp_early_stopping_generation_count: 连续多少代无提升则早停。
         - gp_depth_penalty_coef: 深度惩罚系数（线性）。
@@ -1432,7 +1468,30 @@ class GeneticFactorGenerator(FactorGenerator):
         self.gp_leaf_prob = gp_leaf_prob
         self.gp_const_prob = gp_const_prob
         self.gp_window_choices = list(gp_window_choices) if gp_window_choices else [3, 5, 10, 20, 30]
-        self.fitness_metric = fitness_metric
+        if fitness_indicator_dict is not None:
+            raw_fitness_indicator_dict = dict(fitness_indicator_dict)
+        else:
+            metric_text = str(fitness_metric or '').strip().lower()
+            if metric_text == 'sharpe':
+                raw_fitness_indicator_dict = {'Gross Sharpe': 1.0}
+            elif metric_text == 'ic' or metric_text == '':
+                raw_fitness_indicator_dict = dict(GP_DEFAULT_FITNESS_INDICATOR_WEIGHT)
+            else:
+                raise ValueError(f'Unsupported fitness_metric={fitness_metric}, use ic/sharpe.')
+        self.fitness_indicator_dict: Dict[str, float] = {}
+        for indicator, weight in raw_fitness_indicator_dict.items():
+            if indicator not in GP_SUPPORTED_INDICATOR:
+                raise ValueError(
+                    f'Unsupported fitness indicator: {indicator}. '
+                    f'Available indicators: {GP_SUPPORTED_INDICATOR}'
+                )
+            w = float(weight)
+            if abs(w) <= 1e-12:
+                continue
+            self.fitness_indicator_dict[str(indicator)] = w
+        if not self.fitness_indicator_dict:
+            self.fitness_indicator_dict = dict(GP_DEFAULT_FITNESS_INDICATOR_WEIGHT)
+
         self.random_seed = random_seed
         self.gp_early_stopping_generation_count = int(gp_early_stopping_generation_count)
         self.gp_depth_penalty_coef = float(gp_depth_penalty_coef)
@@ -1449,9 +1508,6 @@ class GeneticFactorGenerator(FactorGenerator):
 
         self.factor_tree_map: Dict[str, Any] = {}
         self.cancel_event = None  # threading.Event, set externally to cancel GP
-
-        assert self.fitness_metric in ['ic', 'sharpe'], \
-            f'Unsupported fitness_metric={self.fitness_metric}, use ic/sharpe.'
 
     def _prepare_df_for_gp(self, df: pd.DataFrame) -> pd.DataFrame:
         base_cols = ['time', 'instrument_id', 'open', 'high', 'low', 'close', 'volume', 'position']
@@ -1491,7 +1547,8 @@ class GeneticFactorGenerator(FactorGenerator):
             self.factor_tree_map[fc_name] = cand.node
             self.factor_formula_map[fc_name] = cand.formula
             self.factor_fitness_map[fc_name] = {
-                self.fitness_metric: {
+                'fitness': {
+                    'indicator_weight': self.fitness_indicator_dict,
                     'original': float(cand.original_fitness),
                     'penalized': float(cand.penalized_fitness),
                 }
@@ -1535,7 +1592,7 @@ class GeneticFactorGenerator(FactorGenerator):
         candidates = run_gp_evolution(
             df=df_eval,
             data_fields=self.base_col_list,
-            fitness_metric=self.fitness_metric,
+            fitness_indicator_dict=self.fitness_indicator_dict,
             max_factor_count=limit,
             generations=self.gp_generations,
             population_size=self.gp_population_size,

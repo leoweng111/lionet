@@ -9,18 +9,24 @@ import random
 import re
 import threading
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Sequence, Tuple, cast
+from typing import Any, Dict, List, Optional, Sequence, Tuple, Union, cast
 
 import numpy as np
 import pandas as pd
 
 from utils.logging import log
-from utils.params import FUTURES_CONTRACT_MULTIPLIER
+from utils.params import FUTURES_CONTRACT_MULTIPLIER, GP_DEFAULT_FITNESS_INDICATOR_WEIGHT, GP_SUPPORTED_INDICATOR
 from .factor_indicators import (
+    get_annualized_calmar_ratio,
+    get_annualized_drawdown,
     get_annualized_ret,
     get_annualized_sharpe,
+    get_annualized_sortino_ratio,
     get_annualized_ts_ic_and_t_corr,
+    get_annualized_turnover,
     get_annualized_volatility,
+    get_annualized_win_rate,
+    get_ts_ret_and_turnover,
 )
 from .factor_ops import (
     BINARY_CHILD_OPS,
@@ -376,69 +382,171 @@ def _collect_yearly_metric_values(metric_df: pd.DataFrame,
     return values
 
 
-def _calc_ic_fitness_from_factor_indicators(eval_df: pd.DataFrame,
-                                            factor_col: str = 'factor') -> float:
-    yearly_values: List[float] = []
-    for _, df_ins in eval_df.groupby('instrument_id', sort=False):
-        if len(df_ins) < 50:
+def _normalize_fitness_indicator_dict(
+    fitness_indicator_dict: Optional[Union[str, Dict[str, float]]]
+) -> Dict[str, float]:
+    """Normalize fitness config to {indicator: weight} and keep legacy compatibility."""
+    if fitness_indicator_dict is None:
+        return dict(GP_DEFAULT_FITNESS_INDICATOR_WEIGHT)
+
+    if isinstance(fitness_indicator_dict, str):
+        metric = str(fitness_indicator_dict).strip().lower()
+        if metric == 'ic':
+            return {'TS IC': 1.0}
+        if metric == 'sharpe':
+            return {'Gross Sharpe': 1.0}
+        raise ValueError(f'Unsupported fitness_metric: {fitness_indicator_dict}')
+
+    out: Dict[str, float] = {}
+    for indicator, weight in dict(fitness_indicator_dict).items():
+        if indicator not in GP_SUPPORTED_INDICATOR:
+            raise ValueError(
+                f'Unsupported fitness indicator `{indicator}`. '
+                f'Available indicators: {GP_SUPPORTED_INDICATOR}'
+            )
+        w = float(weight)
+        if abs(w) <= 1e-12:
             continue
+        out[str(indicator)] = w
+    return out or dict(GP_DEFAULT_FITNESS_INDICATOR_WEIGHT)
+
+
+def _calc_indicator_yearly_values_for_one_instrument(
+    df_ins: pd.DataFrame,
+    requested_indicators: Sequence[str],
+    factor_col: str = 'factor',
+) -> Dict[str, List[float]]:
+    """Compute yearly values for requested indicators on one instrument."""
+    values_map: Dict[str, List[float]] = {k: [] for k in requested_indicators}
+    requested_set = set(requested_indicators)
+
+    if len(df_ins) < 50:
+        return values_map
+
+    # Normalize factor/future_ret for numerical stability.
+    df_local = df_ins[['time', 'instrument_id', 'future_ret', factor_col]].copy()
+    df_local[factor_col] = pd.to_numeric(df_local[factor_col], errors='coerce').replace([np.inf, -np.inf], np.nan).fillna(0.0)
+    df_local[factor_col] = df_local[factor_col].clip(-20.0, 20.0)
+    df_local['future_ret'] = pd.to_numeric(df_local['future_ret'], errors='coerce').replace([np.inf, -np.inf], np.nan).fillna(0.0)
+    df_local['future_ret'] = df_local['future_ret'].clip(-1.0, 1.0)
+
+    # IC/T-corr family.
+    if requested_set & {'TS IC', 'TS RankIC', 'T-corr'}:
         try:
-            ic_df, _ = get_annualized_ts_ic_and_t_corr(
-                df_ins[['time', 'instrument_id', 'future_ret', factor_col]].copy(),
+            ic_df, tcorr_df = get_annualized_ts_ic_and_t_corr(
+                df_local[['time', 'instrument_id', 'future_ret', factor_col]].copy(),
                 fc_col=factor_col,
                 fc_freq='1d',
                 portfolio_adjust_method='1D',
             )
+            if 'TS IC' in requested_set:
+                values_map['TS IC'].extend(_collect_yearly_metric_values(ic_df, 'TS IC'))
+            if 'TS RankIC' in requested_set:
+                values_map['TS RankIC'].extend(_collect_yearly_metric_values(ic_df, 'TS RankIC'))
+            if 'T-corr' in requested_set:
+                values_map['T-corr'].extend(_collect_yearly_metric_values(tcorr_df, 'T-corr'))
         except Exception:
-            continue
+            pass
 
-        vals = _collect_yearly_metric_values(ic_df, 'TS RankIC')
-        yearly_values.extend(vals)
+    perf_needed = requested_set & {
+        'Gross Return', 'Net Return',
+        'Gross Volatility', 'Net Volatility',
+        'Gross Sharpe', 'Net Sharpe',
+        'Gross Sortino', 'Net Sortino',
+        'Gross MaxDD', 'Net MaxDD',
+        'Gross Calmar', 'Net Calmar',
+        'Gross Win Rate', 'Net Win Rate',
+        'Turnover',
+    }
+    if not perf_needed:
+        return values_map
 
-    if not yearly_values:
-        return 0.0
-    return float(np.mean(yearly_values))
+    try:
+        gross_ret_ts, net_ret_ts, turnover_ts = get_ts_ret_and_turnover(
+            df_local[['time', 'instrument_id', 'future_ret', factor_col]].copy(),
+            factor_col,
+        )
+        gross_ret_ts = gross_ret_ts.reset_index()
+        net_ret_ts = net_ret_ts.reset_index()
+        turnover_ts = turnover_ts.reset_index()
+    except Exception:
+        return values_map
 
+    def _calc_perf_bundle(ret_ts: pd.DataFrame, prefix: str) -> Dict[str, pd.DataFrame]:
+        annual_ret = get_annualized_ret(ret_ts, factor_col, interest_method='simple')
+        annual_vol = get_annualized_volatility(ret_ts, factor_col)
+        annual_sharpe = get_annualized_sharpe(annual_ret[[factor_col]], annual_vol[[factor_col]])
+        annual_sortino = get_annualized_sortino_ratio(ret_ts, factor_col, interest_method='simple')
+        _, annual_maxdd = get_annualized_drawdown(ret_ts, factor_col)
+        annual_calmar = get_annualized_calmar_ratio(annual_ret[[factor_col]], annual_vol[[factor_col]])
+        annual_win_rate = get_annualized_win_rate(ret_ts, factor_col)
+        return {
+            f'{prefix} Return': annual_ret,
+            f'{prefix} Volatility': annual_vol,
+            f'{prefix} Sharpe': annual_sharpe,
+            f'{prefix} Sortino': annual_sortino,
+            f'{prefix} MaxDD': annual_maxdd,
+            f'{prefix} Calmar': annual_calmar,
+            f'{prefix} Win Rate': annual_win_rate,
+        }
 
-def _calc_sharpe_fitness_from_factor_indicators(eval_df: pd.DataFrame,
-                                                factor_col: str = 'factor') -> float:
-    yearly_values: List[float] = []
-    for _, df_ins in eval_df.groupby('instrument_id', sort=False):
-        if len(df_ins) < 50:
-            continue
+    try:
+        gross_bundle = _calc_perf_bundle(gross_ret_ts, 'Gross')
+        for indicator in ['Gross Return', 'Gross Volatility', 'Gross Sharpe', 'Gross Sortino',
+                          'Gross MaxDD', 'Gross Calmar', 'Gross Win Rate']:
+            if indicator in requested_set:
+                values_map[indicator].extend(_collect_yearly_metric_values(gross_bundle[indicator], factor_col))
+    except Exception:
+        pass
 
-        ret_df = df_ins[['time']].copy()
-        signal = pd.to_numeric(df_ins[factor_col], errors='coerce').replace([np.inf, -np.inf], np.nan).fillna(0.0)
-        future_ret = pd.to_numeric(df_ins['future_ret'], errors='coerce').replace([np.inf, -np.inf], np.nan).fillna(0.0)
+    try:
+        net_bundle = _calc_perf_bundle(net_ret_ts, 'Net')
+        for indicator in ['Net Return', 'Net Volatility', 'Net Sharpe', 'Net Sortino',
+                          'Net MaxDD', 'Net Calmar', 'Net Win Rate']:
+            if indicator in requested_set:
+                values_map[indicator].extend(_collect_yearly_metric_values(net_bundle[indicator], factor_col))
+    except Exception:
+        pass
 
-        # Keep GP fitness numerically stable on extreme formulas.
-        signal = signal.clip(-20.0, 20.0)
-        strategy_ret = (signal * future_ret).replace([np.inf, -np.inf], np.nan).fillna(0.0)
-        strategy_ret = strategy_ret.clip(-1.0, 1.0)
-        ret_df[factor_col] = strategy_ret
-
+    if 'Turnover' in requested_set:
         try:
-            # Use simple annualization to avoid cumprod overflow in compound path.
-            annual_ret = get_annualized_ret(ret_df, factor_col, interest_method='simple')
-            annual_vol = get_annualized_volatility(ret_df, factor_col)
-            annual_sharpe = get_annualized_sharpe(annual_ret[[factor_col]], annual_vol[[factor_col]])
+            annual_turnover = get_annualized_turnover(turnover_ts, factor_col)
+            values_map['Turnover'].extend(_collect_yearly_metric_values(annual_turnover, factor_col))
         except Exception:
+            pass
+
+    return values_map
+
+
+def _metric_score(eval_df: pd.DataFrame,
+                  fitness_indicator_dict: Optional[Union[str, Dict[str, float]]]) -> float:
+    indicator_weight = _normalize_fitness_indicator_dict(fitness_indicator_dict)
+    indicator_values_map: Dict[str, List[float]] = {k: [] for k in indicator_weight.keys()}
+
+    for _, df_ins in eval_df.groupby('instrument_id', sort=False):
+        one_map = _calc_indicator_yearly_values_for_one_instrument(
+            df_ins=df_ins,
+            requested_indicators=list(indicator_weight.keys()),
+            factor_col='factor',
+        )
+        for indicator in indicator_values_map:
+            indicator_values_map[indicator].extend(one_map.get(indicator, []))
+
+    score = 0.0
+    has_valid_metric = False
+    for indicator, weight in indicator_weight.items():
+        vals = indicator_values_map.get(indicator, [])
+        if not vals:
             continue
+        metric_value = float(np.mean(vals))
+        if not np.isfinite(metric_value):
+            continue
+        score += float(weight) * metric_value
+        has_valid_metric = True
 
-        vals = _collect_yearly_metric_values(annual_sharpe, factor_col)
-        yearly_values.extend(vals)
-
-    if not yearly_values:
+    if not has_valid_metric:
         return 0.0
-    return float(np.mean(yearly_values))
-
-
-def _metric_score(eval_df: pd.DataFrame, fitness_metric: str) -> float:
-    if fitness_metric == 'ic':
-        return _calc_ic_fitness_from_factor_indicators(eval_df, factor_col='factor')
-    if fitness_metric == 'sharpe':
-        return _calc_sharpe_fitness_from_factor_indicators(eval_df, factor_col='factor')
-    raise ValueError(f'Unsupported fitness_metric: {fitness_metric}')
+    return float(score)
 
 
 def _infer_root_instrument(instrument_id: Any) -> str:
@@ -483,7 +591,7 @@ def _calc_small_factor_penalty(eval_df: pd.DataFrame,
 
 def calc_fitness_and_sign(tree: FactorNode,
                           df: pd.DataFrame,
-                          fitness_metric: str = 'ic',
+                          fitness_indicator_dict: Optional[Union[str, Dict[str, float]]] = None,
                           target_col: str = 'future_ret',
                           depth_penalty_coef: float = 0.0,
                           depth_penalty_start_depth: int = 0,
@@ -508,9 +616,10 @@ def calc_fitness_and_sign(tree: FactorNode,
         要评估的因子 AST 根节点。
     df : pd.DataFrame
         包含因子计算所需字段（如 close、volume 等）及目标收益列的数据表。
-    fitness_metric : str, optional
-        适应度评价指标，支持 'ic'（默认）、'rank_ic'、'returns'、'sharpe' 等，
-        实际支持指标由 ``_metric_score`` 函数定义。
+    fitness_indicator_dict : Optional[Union[str, Dict[str, float]]], optional
+        适应度配置。推荐传入 ``{indicator: weight}``，例如
+        ``{'TS RankIC': 1.0, 'Gross Sharpe': 0.2}``。
+        为兼容旧逻辑，也支持 ``'ic'`` 或 ``'sharpe'``。
     target_col : str, optional
         目标收益列名，默认为 'future_ret'（未来收益率）。
     depth_penalty_coef : float, optional
@@ -552,7 +661,7 @@ def calc_fitness_and_sign(tree: FactorNode,
 
     See Also
     --------
-    _metric_score : 实际计算 IC/rank_ic/returns/sharpe 等指标的内部函数。
+    _metric_score : 实际计算多指标加权分数的内部函数。
     _calc_depth_penalty : 深度惩罚的具体计算逻辑。
     _calc_small_factor_penalty : 小因子惩罚的具体计算逻辑。
     """
@@ -578,10 +687,10 @@ def calc_fitness_and_sign(tree: FactorNode,
         if eval_df.empty:
             return 0.0, 0.0, 1
 
-        fit_pos = _metric_score(eval_df, fitness_metric)
+        fit_pos = _metric_score(eval_df, fitness_indicator_dict)
         eval_df_neg = eval_df.copy()
         eval_df_neg['factor'] = -eval_df_neg['factor']
-        fit_neg = _metric_score(eval_df_neg, fitness_metric)
+        fit_neg = _metric_score(eval_df_neg, fitness_indicator_dict)
 
         # Guard against NaN/inf from metric calculations.
         if not np.isfinite(fit_pos):
@@ -866,7 +975,7 @@ def _tournament_select(scored_pop: List[Tuple[FactorNode, float]],
 def run_gp_evolution(
     df: pd.DataFrame,
     data_fields: Sequence[str],
-    fitness_metric: str,
+    fitness_indicator_dict: Optional[Union[str, Dict[str, float]]],
     max_factor_count: int,
         generations: int,
     population_size: int,
@@ -898,50 +1007,51 @@ def run_gp_evolution(
     cancel_event: Optional[threading.Event] = None,
 ) -> List[GPCandidate]:
     """运行遗传规划（GP）进行因子挖掘。
-+
-+    参数说明（中文）：
-+    - df: 用于 GP 评估的原始数据（含 time/instrument_id/OHLCV 等列）。
-+    - data_fields: 叶子节点可用的字段名列表（如 open/high/low/close/volume/position）。
-+    - fitness_metric: 适应度指标（ic 或 sharpe）。
-+    - max_factor_count: 最终返回的因子数量上限。
-+    - generations: 演化代数。
-+    - population_size: 每代种群规模。
-+    - max_depth: 树的最大深度。
-+    - elite_size: 精英库最大容量（Elite Archive）。
-+    - tournament_size: 锦标赛选择规模，越大越偏强者。
-+    - crossover_prob: 交叉概率。
-+    - mutation_prob: 变异概率。
-+    - window_choices: 时序算子可用的窗口长度集合。
-+    - const_prob: 叶子节点选常数的概率。
-+    - leaf_prob: 生成叶子节点的概率（控制树的复杂度）。
-+    - random_seed: 随机种子。
-+    - early_stopping_generation_count: 连续多少代无提升则早停（<=0 表示关闭）。
-+    - log_interval: 多少代输出一次汇总日志。
-+    - depth_penalty_coef: 深度惩罚系数（线性部分）。
-+    - depth_penalty_start_depth: 深度惩罚的起始深度。
-+    - depth_penalty_linear_coef: 深度惩罚线性系数（超过起始深度后）。
-+    - depth_penalty_quadratic_coef: 深度惩罚二次系数（超过起始深度后）。
-+    - apply_rolling_norm: 是否对因子值做滚动归一化。
-+    - rolling_norm_window: 滚动归一化窗口。
-+    - rolling_norm_min_periods: 滚动归一化的最小样本数。
-+    - rolling_norm_eps: 滚动归一化的数值稳定项。
-+    - rolling_norm_clip: 滚动归一化后的截断范围。
-+    - small_factor_penalty_coef: 小因子惩罚系数（越大越惩罚不可交易因子）。
-+    - assumed_initial_capital: 小因子惩罚中的资金假设。
-+    - elite_relative_threshold: 精英库“同流派”判定阈值（相关性）。
-+    - elite_stagnation_generation_count: 连续多少代精英库无更新触发 Shock。
-+    - max_shock_generation: Shock 模式最多持续代数（无更新则退出）。
-+    """
+    参数说明（中文）：
+    - df: 用于 GP 评估的原始数据（含 time/instrument_id/OHLCV 等列）。
+    - data_fields: 叶子节点可用的字段名列表（如 open/high/low/close/volume/position）。
+    - fitness_indicator_dict: 适应度指标权重字典（或兼容字符串 ic/sharpe）。
+    - max_factor_count: 最终返回的因子数量上限。
+    - generations: 演化代数。
+    - population_size: 每代种群规模。
+    - max_depth: 树的最大深度。
+    - elite_size: 精英库最大容量（Elite Archive）。
+    - tournament_size: 锦标赛选择规模，越大越偏强者。
+    - crossover_prob: 交叉概率。
+    - mutation_prob: 变异概率。
+    - window_choices: 时序算子可用的窗口长度集合。
+    - const_prob: 叶子节点选常数的概率。
+    - leaf_prob: 生成叶子节点的概率（控制树的复杂度）。
+    - random_seed: 随机种子。
+    - early_stopping_generation_count: 连续多少代无提升则早停（<=0 表示关闭）。
+    - log_interval: 多少代输出一次汇总日志。
+    - depth_penalty_coef: 深度惩罚系数（线性部分）。
+    - depth_penalty_start_depth: 深度惩罚的起始深度。
+    - depth_penalty_linear_coef: 深度惩罚线性系数（超过起始深度后）。
+    - depth_penalty_quadratic_coef: 深度惩罚二次系数（超过起始深度后）。
+    - apply_rolling_norm: 是否对因子值做滚动归一化。
+    - rolling_norm_window: 滚动归一化窗口。
+    - rolling_norm_min_periods: 滚动归一化的最小样本数。
+    - rolling_norm_eps: 滚动归一化的数值稳定项。
+    - rolling_norm_clip: 滚动归一化后的截断范围。
+    - small_factor_penalty_coef: 小因子惩罚系数（越大越惩罚不可交易因子）。
+    - assumed_initial_capital: 小因子惩罚中的资金假设。
+    - elite_relative_threshold: 精英库“同流派”判定阈值（相关性）。
+    - elite_stagnation_generation_count: 连续多少代精英库无更新触发 Shock。
+    - max_shock_generation: Shock 模式最多持续代数（无更新则退出）。
+    """
     rng = random.Random(random_seed)
 
     if log_interval <= 0:
         log_interval = 1
 
     early_stopping_generation_count = int(early_stopping_generation_count)
+    normalized_fitness_indicator_dict = _normalize_fitness_indicator_dict(fitness_indicator_dict)
 
     log.info(
         'GP start: '
-        f'fitness_metric={fitness_metric}, generations={generations}, population_size={population_size}, '
+        f'fitness_indicator_dict={normalized_fitness_indicator_dict}, '
+        f'generations={generations}, population_size={population_size}, '
         f'max_depth={max_depth}, elite_size={elite_size}, elite_relative_threshold={elite_relative_threshold}, '
         f'max_factor_count={max_factor_count}, '
         f'elite_stagnation_generation_count={elite_stagnation_generation_count}, '
@@ -1010,7 +1120,7 @@ def run_gp_evolution(
             penalized_fitness, original_fitness, sign = calc_fitness_and_sign(
                 tree,
                 df,
-                fitness_metric=fitness_metric,
+                fitness_indicator_dict=normalized_fitness_indicator_dict,
                 depth_penalty_coef=depth_penalty_coef,
                 depth_penalty_start_depth=depth_penalty_start_depth,
                 depth_penalty_linear_coef=depth_penalty_linear_coef,
