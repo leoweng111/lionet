@@ -175,10 +175,21 @@ def mutate_tree(
     rng: random.Random,
     gen_idx: Optional[int] = None,
 ) -> FactorNode:
+    """Mutate one random position in a tree while keeping semantic validity.
+
+    Strategy:
+    1) Deep-copy input tree so callers never observe in-place side effects.
+    2) If root is selected, regrow an entire valid tree.
+    3) Otherwise regrow a local subtree, then validate type compatibility.
+    4) Revert on any type error so mutation is always safe.
+    """
+    # Always mutate on a cloned tree to keep caller-side state immutable.
     new_root = copy.deepcopy(root_node)
     nodes_info = get_all_nodes_with_parents(new_root)
+    # Uniformly sample one mutation point (node + its parent link).
     target_node, parent, direction = rng.choice(nodes_info)
 
+    # Root mutation replaces the whole expression to maximize exploration.
     if parent is None:
         return _generate_valid_random_tree(
             data_fields,
@@ -191,6 +202,7 @@ def mutate_tree(
             log_context=f'[GP][mutate_tree][gen={gen_idx}] root-mutation' if gen_idx is not None else '[GP][mutate_tree] root-mutation',
         )
 
+    # Subtree mutation limits perturbation amplitude for more stable evolution.
     new_branch = _generate_valid_random_tree(
         data_fields,
         min(max_depth, 3),
@@ -205,11 +217,13 @@ def mutate_tree(
     try:
         infer_node_type(new_branch)
         target_type = infer_node_type(target_node)
+        # Only swap when the new branch matches the expected semantic type.
         if new_branch.data_type != target_type:
             # If type mismatch, keep original subtree to avoid invalid mix.
             return new_root
         old_child = getattr(parent, direction)
         setattr(parent, direction, new_branch)
+        # Validate the full tree after local replacement.
         infer_node_type(new_root)
     except TypeError:
         # Restore old subtree when mutation breaks semantic constraints.
