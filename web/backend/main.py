@@ -233,6 +233,8 @@ class GPMiningParams(BaseModel):
     filter_net_sharpe_yearly: float = 0.3
     # indicator -> {mean_threshold, yearly_threshold, direction}
     filter_indicator_dict: Dict[str, Dict[str, Optional[float]]] = Field(default_factory=dict)
+    consistency_penalty_enabled: bool = False
+    consistency_penalty_coef: float = 1.0
 
 
 class BacktestParams(BaseModel):
@@ -799,6 +801,8 @@ def _execute_mining(params: GPMiningParams, task_id: str, cancel_event: threadin
             gp_small_factor_penalty_coef=params.gp_small_factor_penalty_coef,
             gp_elite_stagnation_generation_count=params.gp_elite_stagnation_generation_count,
             gp_max_shock_generation=params.gp_max_shock_generation,
+            consistency_penalty_enabled=params.consistency_penalty_enabled,
+            consistency_penalty_coef=params.consistency_penalty_coef,
         )
 
         # Attach cancel_event so GP evolution can be interrupted

@@ -1377,7 +1377,9 @@ class GeneticFactorGenerator(FactorGenerator):
                  gp_small_factor_penalty_coef: float = 0.0,
                  gp_assumed_initial_capital: float = 100_000.0,
                  gp_elite_stagnation_generation_count: int = 4,
-                 gp_max_shock_generation: int = 3):
+                 gp_max_shock_generation: int = 3,
+                 consistency_penalty_enabled: bool = False,
+                 consistency_penalty_coef: float = 1.0):
         """遗传规划因子生成器。
 
         参数说明（中文）：
@@ -1503,6 +1505,8 @@ class GeneticFactorGenerator(FactorGenerator):
         self.gp_assumed_initial_capital = float(gp_assumed_initial_capital)
         self.gp_elite_stagnation_generation_count = int(gp_elite_stagnation_generation_count)
         self.gp_max_shock_generation = int(gp_max_shock_generation)
+        self.consistency_penalty_enabled = bool(consistency_penalty_enabled)
+        self.consistency_penalty_coef = float(consistency_penalty_coef)
         # GP 阶段将滚动标准化固化到公式 OpRollNorm 中，避免后续流程重复标准化。
         self.apply_formula_rolling_norm = bool(apply_rolling_norm)
 
@@ -1622,6 +1626,8 @@ class GeneticFactorGenerator(FactorGenerator):
             elite_stagnation_generation_count=self.gp_elite_stagnation_generation_count,
             max_shock_generation=self.gp_max_shock_generation,
             cancel_event=self.cancel_event,
+            consistency_penalty_enabled=self.consistency_penalty_enabled,
+            consistency_penalty_coef=self.consistency_penalty_coef,
         )
 
         if not candidates:

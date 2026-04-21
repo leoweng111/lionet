@@ -550,7 +550,9 @@ def _calc_indicator_yearly_values_for_one_instrument(
 
 
 def _metric_score(eval_df: pd.DataFrame,
-                  fitness_indicator_dict: Optional[Union[str, Dict[str, float]]]) -> float:
+                  fitness_indicator_dict: Optional[Union[str, Dict[str, float]]],
+                  consistency_penalty_enabled: bool = False,
+                  consistency_penalty_coef: float = 1.0) -> float:
     indicator_weight = _normalize_fitness_indicator_dict(fitness_indicator_dict)
     indicator_values_map: Dict[str, List[float]] = {k: [] for k in indicator_weight.keys()}
 
@@ -562,6 +564,25 @@ def _metric_score(eval_df: pd.DataFrame,
         )
         for indicator in indicator_values_map:
             indicator_values_map[indicator].extend(one_map.get(indicator, []))
+
+    # Per-year weighted fitness values (for consistency penalty)
+    yearly_scores: List[float] = []
+    if consistency_penalty_enabled:
+        # Collect number of yearly samples per indicator to build per-year scores
+        # We use a simpler approach: compute the weighted score per yearly value index
+        max_len = max((len(v) for v in indicator_values_map.values()), default=0)
+        for i in range(max_len):
+            yr_score = 0.0
+            yr_valid = False
+            for indicator, weight in indicator_weight.items():
+                vals = indicator_values_map.get(indicator, [])
+                if i < len(vals):
+                    v = vals[i]
+                    if np.isfinite(v):
+                        yr_score += float(weight) * v
+                        yr_valid = True
+            if yr_valid:
+                yearly_scores.append(yr_score)
 
     score = 0.0
     has_valid_metric = False
@@ -577,6 +598,15 @@ def _metric_score(eval_df: pd.DataFrame,
 
     if not has_valid_metric:
         return 0.0
+
+    # Apply consistency penalty: fitness = mean * (1 - penalty * std / (|mean| + eps))
+    if consistency_penalty_enabled and len(yearly_scores) >= 2:
+        eps = 1e-8
+        mean_ys = float(np.mean(yearly_scores))
+        std_ys = float(np.std(yearly_scores, ddof=1))
+        penalty_factor = 1.0 - consistency_penalty_coef * std_ys / (abs(mean_ys) + eps)
+        score = score * max(penalty_factor, 0.0)
+
     return float(score)
 
 
@@ -634,7 +664,9 @@ def calc_fitness_and_sign(tree: FactorNode,
                           rolling_norm_eps: float = 1e-8,
                           rolling_norm_clip: float = 10.0,
                           small_factor_penalty_coef: float = 0.0,
-                          assumed_initial_capital: float = 1_000_000.0) -> Tuple[float, float, int]:
+                          assumed_initial_capital: float = 1_000_000.0,
+                          consistency_penalty_enabled: bool = False,
+                          consistency_penalty_coef: float = 1.0) -> Tuple[float, float, int]:
     """计算因子树的适应度分数，并自动选择最优符号方向。
 
     该函数对给定因子树进行评估：首先对其应用滚动归一化（可选），然后计算
@@ -718,10 +750,14 @@ def calc_fitness_and_sign(tree: FactorNode,
         if eval_df.empty:
             return 0.0, 0.0, 1
 
-        fit_pos = _metric_score(eval_df, fitness_indicator_dict)
+        fit_pos = _metric_score(eval_df, fitness_indicator_dict,
+                               consistency_penalty_enabled=consistency_penalty_enabled,
+                               consistency_penalty_coef=consistency_penalty_coef)
         eval_df_neg = eval_df.copy()
         eval_df_neg['factor'] = -eval_df_neg['factor']
-        fit_neg = _metric_score(eval_df_neg, fitness_indicator_dict)
+        fit_neg = _metric_score(eval_df_neg, fitness_indicator_dict,
+                               consistency_penalty_enabled=consistency_penalty_enabled,
+                               consistency_penalty_coef=consistency_penalty_coef)
 
         # Guard against NaN/inf from metric calculations.
         if not np.isfinite(fit_pos):
@@ -1036,6 +1072,8 @@ def run_gp_evolution(
     elite_stagnation_generation_count: int = 4,
     max_shock_generation: int = 3,
     cancel_event: Optional[threading.Event] = None,
+    consistency_penalty_enabled: bool = False,
+    consistency_penalty_coef: float = 1.0,
 ) -> List[GPCandidate]:
     """运行遗传规划（GP）进行因子挖掘。
     参数说明（中文）：
@@ -1163,6 +1201,8 @@ def run_gp_evolution(
                 rolling_norm_clip=rolling_norm_clip,
                 small_factor_penalty_coef=small_factor_penalty_coef,
                 assumed_initial_capital=assumed_initial_capital,
+                consistency_penalty_enabled=consistency_penalty_enabled,
+                consistency_penalty_coef=consistency_penalty_coef,
             )
             scored_pop.append((tree, penalized_fitness))
             penalized_fitness_values.append(float(penalized_fitness))

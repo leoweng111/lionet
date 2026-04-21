@@ -134,6 +134,10 @@
                 <el-col :span="12"><el-form-item label="停滞代数"><el-input-number v-model="params.gp_elite_stagnation_generation_count" :min="1" :max="50" style="width:100%" /></el-form-item></el-col>
                 <el-col :span="12"><el-form-item label="Shock代数"><el-input-number v-model="params.gp_max_shock_generation" :min="0" :max="20" style="width:100%" /></el-form-item></el-col>
               </el-row>
+              <el-row :gutter="12">
+                <el-col :span="12"><el-form-item label="一致性惩罚"><el-switch v-model="params.consistency_penalty_enabled" /></el-form-item></el-col>
+                <el-col :span="12"><el-form-item label="惩罚系数"><el-input-number v-model="params.consistency_penalty_coef" :min="0" :max="10" :step="0.1" :precision="2" :disabled="!params.consistency_penalty_enabled" style="width:100%" /></el-form-item></el-col>
+              </el-row>
             </div>
               </el-col>
 
@@ -265,6 +269,7 @@ const defaultParams = () => ({
   gp_depth_penalty_quadratic_coef: 0.0, gp_log_interval: 1,
   gp_small_factor_penalty_coef: 0.0, gp_assumed_initial_capital: 100000,
   gp_elite_stagnation_generation_count: 4, gp_max_shock_generation: 3,
+  consistency_penalty_enabled: false, consistency_penalty_coef: 1.0,
   filter_indicator_dict: _buildDefaultFilterIndicatorDict(supportedIndicators.value, indicatorDirection.value),
   // Legacy fields kept for backward compatibility with older backend contracts.
   filter_net_return_mean: 0.05, filter_net_return_yearly: 0.03,
