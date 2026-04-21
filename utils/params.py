@@ -70,7 +70,7 @@ GP_SUPPORTED_INDICATOR = [
     'Gross MaxDD', 'Net MaxDD',
     'Gross Calmar', 'Net Calmar',
     'Gross Win Rate', 'Net Win Rate',
-    'Turnover', 'TS IC', 'TS RankIC', 'T-corr',
+    'Turnover', 'TS IC', 'TS RankIC', 'TS ICIR', 'TS RankICIR', 'T-corr',
 ]
 
 # Direction for threshold comparison:
@@ -93,6 +93,8 @@ GP_INDICATOR_DIRECTION = {
     'Turnover': -1,
     'TS IC': 1,
     'TS RankIC': 1,
+    'TS ICIR': 1,
+    'TS RankICIR': 1,
     'T-corr': 1,
 }
 

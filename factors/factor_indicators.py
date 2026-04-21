@@ -69,6 +69,31 @@ def get_annualized_ts_ic_and_t_corr(Data: pd.DataFrame,
     rank_ic_ts = pd.concat([rank_ic_ts_year, rank_ic_ts_all]).to_frame('TS RankIC')
 
     ic_ts = pd.concat([ic_ts, rank_ic_ts], axis=1)
+
+    # ICIR: mean of yearly IC / std of yearly IC
+    # If only one year of data, std is undefined -> NaN
+    ic_yearly_only = ic_ts_year.dropna()
+    rank_ic_yearly_only = rank_ic_ts_year.dropna()
+
+    if len(ic_yearly_only) >= 2:
+        icir_val = float(ic_yearly_only.mean()) / (float(ic_yearly_only.std()) + 1e-6)
+    else:
+        icir_val = np.nan
+
+    if len(rank_ic_yearly_only) >= 2:
+        rank_icir_val = float(rank_ic_yearly_only.mean()) / (float(rank_ic_yearly_only.std()) + 1e-6)
+    else:
+        rank_icir_val = np.nan
+
+    # ICIR is a single value for the whole period, broadcast to the 'all' row only
+    icir_series = pd.Series(np.nan, index=ic_ts.index)
+    icir_series.loc['all'] = icir_val
+    ic_ts['TS ICIR'] = icir_series
+
+    rank_icir_series = pd.Series(np.nan, index=ic_ts.index)
+    rank_icir_series.loc['all'] = rank_icir_val
+    ic_ts['TS RankICIR'] = rank_icir_series
+
     ic_ts.index.name = 'year'
     if portfolio_adjust_method == '1D':
         ret_freq = 1

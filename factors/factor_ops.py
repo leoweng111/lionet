@@ -379,6 +379,39 @@ def infer_node_type(node: FactorNode) -> FactorDataType:
         node.data_type = FactorDataType.RATIO
         return node.data_type
 
+    if isinstance(node, OpIfElse):
+        # cond must be BOOLEAN, left and right must be same type
+        ct = infer_node_type(node.cond)
+        if ct != FactorDataType.BOOLEAN:
+            raise TypeError(f'OpIfElse cond must be boolean, got {ct}.')
+        lt = infer_node_type(node.left)
+        rt = infer_node_type(node.right)
+        if lt != rt:
+            raise TypeError(f'OpIfElse requires same type branches, got {lt} and {rt}.')
+        node.data_type = lt
+        return node.data_type
+
+    if isinstance(node, OpTsResidual):
+        # same type inputs, output same type (residual of Y regressed on X)
+        lt = infer_node_type(node.left)
+        rt = infer_node_type(node.right)
+        if lt != rt:
+            raise TypeError(f'OpTsResidual requires same type inputs, got {lt} and {rt}.')
+        node.data_type = lt
+        return node.data_type
+
+    if isinstance(node, OpTsEntropy):
+        # any input -> ratio (entropy is dimensionless)
+        _ = infer_node_type(node.child)
+        node.data_type = FactorDataType.RATIO
+        return node.data_type
+
+    if isinstance(node, (OpTsSkew, OpTsKurt)):
+        # any input -> ratio (dimensionless statistical moments)
+        _ = infer_node_type(node.child)
+        node.data_type = FactorDataType.RATIO
+        return node.data_type
+
     raise TypeError(f'Unsupported node type for semantic typing: {type(node).__name__}')
 
 
@@ -1324,6 +1357,112 @@ class OpMaRibbon(FactorNode):
         return f"MaRibbon({self.child}, {self.window1}, {self.window2}, {self.window3})"
 
 
+# ---------------------------------------------------------------------------
+# 条件算子
+# ---------------------------------------------------------------------------
+class OpIfElse(FactorNode):
+    """条件选择：cond > 0 时取 left，否则取 right。"""
+    def __init__(self, cond: FactorNode, left: FactorNode, right: FactorNode):
+        self.cond = cond
+        self.left = left
+        self.right = right
+
+    def calc(self, df):
+        c = _safe_series(self.cond.calc(df))
+        l = _safe_series(self.left.calc(df))
+        r = _safe_series(self.right.calc(df))
+        return pd.Series(np.where(c > 0, l, r), index=df.index)
+
+    def to_formula(self) -> str:
+        return f"IfElse({self.cond}, {self.left}, {self.right})"
+
+
+class OpTsResidual(FactorNode):
+    """滚动线性回归残差：Y - beta*X。"""
+    def __init__(self, left: FactorNode, right: FactorNode, window: int):
+        self.left = left
+        self.right = right
+        self.window = int(window)
+
+    def _calc_one(self, y, x):
+        beta = y.rolling(self.window).cov(x) / x.rolling(self.window).var().replace(0, np.nan)
+        alpha = y.rolling(self.window).mean() - beta * x.rolling(self.window).mean()
+        return y - (alpha + beta * x)
+
+    def calc(self, df):
+        y = _safe_series(self.left.calc(df))
+        x = _safe_series(self.right.calc(df))
+        if 'instrument_id' not in df.columns:
+            return self._calc_one(y, x)
+        out = pd.Series(np.nan, index=df.index)
+        for _, idx in df.groupby('instrument_id', sort=False).groups.items():
+            idx_list = list(idx)
+            out.loc[idx_list] = self._calc_one(y.loc[idx_list], x.loc[idx_list]).values
+        return out
+
+    def to_formula(self) -> str:
+        return f"TsResidual({self.left}, {self.right}, {self.window})"
+
+
+class OpTsEntropy(FactorNode):
+    """滚动信息熵：衡量价格分布的混乱程度。"""
+    def __init__(self, child: FactorNode, window: int, n_bins: int = 10):
+        self.child = child
+        self.window = int(window)
+        self.n_bins = n_bins
+
+    def _entropy(self, arr):
+        arr = arr[~np.isnan(arr)]
+        if len(arr) < 3:
+            return np.nan
+        hist, _ = np.histogram(arr, bins=self.n_bins, density=True)
+        hist = hist[hist > 0]
+        return -np.sum(hist * np.log(hist + 1e-10))
+
+    def calc(self, df):
+        s = _safe_series(self.child.calc(df))
+        return _group_apply_series(df, s,
+            lambda x: x.rolling(self.window).apply(
+                lambda a: self._entropy(np.asarray(a)), raw=True))
+
+    def to_formula(self) -> str:
+        return f"TsEntropy({self.child}, {self.window})"
+
+
+class OpTsSkew(FactorNode):
+    """滚动偏度。"""
+    def __init__(self, child: FactorNode, window: int):
+        self.child = child
+        self.window = int(window)
+
+    def calc(self, df):
+        s = _safe_series(self.child.calc(df))
+        if 'instrument_id' in df.columns:
+            return s.groupby(df['instrument_id']).transform(
+                lambda x: x.rolling(self.window).skew())
+        return s.rolling(self.window).skew()
+
+    def to_formula(self) -> str:
+        return f"TsSkew({self.child}, {self.window})"
+
+
+class OpTsKurt(FactorNode):
+    """滚动峰度。"""
+    def __init__(self, child: FactorNode, window: int):
+        self.child = child
+        self.window = int(window)
+
+    def calc(self, df):
+        s = _safe_series(self.child.calc(df))
+        if 'instrument_id' in df.columns:
+            return s.groupby(df['instrument_id']).transform(
+                lambda x: x.rolling(self.window).kurt())
+        return s.rolling(self.window).kurt()
+
+    def to_formula(self) -> str:
+        return f"TsKurt({self.child}, {self.window})"
+
+
 BINARY_OPS = [OpAdd, OpSub, OpMul, OpDiv, OpMax, OpMin, OpLt, OpGt, OpOiTrendConviction]
 UNARY_OPS = [
     OpSqrtAbs,
@@ -1363,16 +1502,20 @@ UNARY_TS_OPS = [
     OpTsArgmin,
     OpTsTimeWeightedMean,
     OpTsRank,
+    OpTsEntropy,
+    OpTsSkew,
+    OpTsKurt,
 ]
-BINARY_TS_OPS = [OpTsCorr, OpTsRankCorr, OpTsCov, OpTsBeta, OpVpDivergence, OpAmihud]
+BINARY_TS_OPS = [OpTsCorr, OpTsRankCorr, OpTsCov, OpTsBeta, OpVpDivergence, OpAmihud, OpTsResidual]
 TERNARY_WINDOW_TS_OPS = [OpMaRibbon]
+TERNARY_CHILD_OPS = [OpIfElse]
 
 UNARY_CHILD_OPS = tuple(UNARY_OPS + UNARY_TS_OPS + [OpNeg])
 BINARY_CHILD_OPS = tuple(BINARY_OPS + BINARY_TS_OPS)
 
 OP_CLASS_BY_NAME: Dict[str, Type[Any]] = {
     cls.__name__.replace('Op', ''): cls
-    for cls in (BINARY_OPS + UNARY_OPS + UNARY_TS_OPS + BINARY_TS_OPS + TERNARY_WINDOW_TS_OPS + [OpNeg])
+    for cls in (BINARY_OPS + UNARY_OPS + UNARY_TS_OPS + BINARY_TS_OPS + TERNARY_WINDOW_TS_OPS + TERNARY_CHILD_OPS + [OpNeg])
 }
 OP_CLASS_BY_NAME['OpRollNorm'] = OpRollNorm
 OP_CLASS_BY_NAME['RollNorm'] = OpRollNorm
@@ -1405,6 +1548,12 @@ OP_ALIAS_BY_NAME: Dict[str, Type[Any]] = {
     'amihud': OpAmihud,
     'oi_trend_conviction': OpOiTrendConviction,
     'ma_ribbon': OpMaRibbon,
+    'if_else': OpIfElse,
+    'ifelse': OpIfElse,
+    'ts_residual': OpTsResidual,
+    'ts_entropy': OpTsEntropy,
+    'ts_skew': OpTsSkew,
+    'ts_kurt': OpTsKurt,
 }
 
 
@@ -1414,13 +1563,15 @@ def available_operator_prompt_text() -> str:
     unary_ts = ', '.join(cls.__name__.replace('Op', '') for cls in UNARY_TS_OPS)
     binary_ts = ', '.join(cls.__name__.replace('Op', '') for cls in BINARY_TS_OPS)
     ternary_ts = ', '.join(cls.__name__.replace('Op', '') for cls in TERNARY_WINDOW_TS_OPS)
-    alias_text = 'ema, ts_decay_exp, ts_cov, ts_beta, vp_divergence, amihud, oi_trend_conviction, ma_ribbon'
+    ternary_child = ', '.join(cls.__name__.replace('Op', '') for cls in TERNARY_CHILD_OPS)
+    alias_text = 'ema, ts_decay_exp, ts_cov, ts_beta, vp_divergence, amihud, oi_trend_conviction, ma_ribbon, if_else, ts_residual, ts_entropy, ts_skew, ts_kurt'
     return (
         f"可用二元算子(2参数): {binary}\n"
         f"可用一元算子(1参数): {unary}\n"
         f"可用一元时序算子(2参数, 第二个为窗口整数N): {unary_ts}\n"
         f"可用二元时序算子(3参数, 第三个为窗口整数N): {binary_ts}\n"
         f"可用多窗口时序算子(4参数, 后三个为窗口整数N): {ternary_ts}\n"
+        f"可用三元条件算子(3个子节点): {ternary_child}\n"
         f"同义别名(大小写不敏感): {alias_text}"
     )
 
@@ -1514,6 +1665,10 @@ def parse_formula_to_node(formula: str,
                     _parse_window_arg(node.args[2]),
                     _parse_window_arg(node.args[3]),
                 )
+            if op_cls in TERNARY_CHILD_OPS:
+                if len(node.args) != 3:
+                    raise ValueError(f'{op_name} expects 3 args (cond, X, Y).')
+                return op_cls(_build(node.args[0]), _build(node.args[1]), _build(node.args[2]))
             if op_cls is OpRollNorm:
                 if len(node.args) != 5:
                     raise ValueError(f'{op_name} expects 5 args (X, window, min_periods, eps, clip).')

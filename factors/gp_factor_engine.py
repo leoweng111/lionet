@@ -32,6 +32,7 @@ from .factor_ops import (
     BINARY_CHILD_OPS,
     BINARY_OPS,
     BINARY_TS_OPS,
+    TERNARY_CHILD_OPS,
     UNARY_CHILD_OPS,
     UNARY_OPS,
     UNARY_TS_OPS,
@@ -75,7 +76,7 @@ def _generate_valid_random_tree(
             return DataNode(rng.choice(list(data_fields)))
 
         op_pick = rng.random()
-        if op_pick < 0.5:
+        if op_pick < 0.45:
             op_cls = rng.choice(BINARY_OPS)
             left = _generate_valid_random_tree(
                 data_fields, max_depth, current_depth + 1, window_choices, const_prob, leaf_prob, rng
@@ -85,28 +86,42 @@ def _generate_valid_random_tree(
             )
             return op_cls(left, right)
 
-        if op_pick < 0.75:
+        if op_pick < 0.70:
             op_cls = rng.choice(UNARY_OPS)
             child = _generate_valid_random_tree(
                 data_fields, max_depth, current_depth + 1, window_choices, const_prob, leaf_prob, rng
             )
             return op_cls(child)
 
-        if op_pick < 0.9:
+        if op_pick < 0.87:
             op_cls = rng.choice(UNARY_TS_OPS)
             child = _generate_valid_random_tree(
                 data_fields, max_depth, current_depth + 1, window_choices, const_prob, leaf_prob, rng
             )
             return op_cls(child, int(rng.choice(list(window_choices))))
 
-        op_cls = rng.choice(BINARY_TS_OPS)
+        if op_pick < 0.95:
+            op_cls = rng.choice(BINARY_TS_OPS)
+            left = _generate_valid_random_tree(
+                data_fields, max_depth, current_depth + 1, window_choices, const_prob, leaf_prob, rng
+            )
+            right = _generate_valid_random_tree(
+                data_fields, max_depth, current_depth + 1, window_choices, const_prob, leaf_prob, rng
+            )
+            return op_cls(left, right, int(rng.choice(list(window_choices))))
+
+        # Ternary child ops (e.g. IfElse)
+        op_cls = rng.choice(TERNARY_CHILD_OPS)
+        cond = _generate_valid_random_tree(
+            data_fields, max_depth, current_depth + 1, window_choices, const_prob, leaf_prob, rng
+        )
         left = _generate_valid_random_tree(
             data_fields, max_depth, current_depth + 1, window_choices, const_prob, leaf_prob, rng
         )
         right = _generate_valid_random_tree(
             data_fields, max_depth, current_depth + 1, window_choices, const_prob, leaf_prob, rng
         )
-        return op_cls(left, right, int(rng.choice(list(window_choices))))
+        return op_cls(cond, left, right)
 
     max_attempts = 25
     attempts = 0
@@ -130,7 +145,11 @@ def _generate_valid_random_tree(
 def get_all_nodes_with_parents(node: FactorNode, parent=None, direction: Optional[str] = None):
     nodes = [(node, parent, direction)]
     node_any = cast(Any, node)
-    if isinstance(node, BINARY_CHILD_OPS):
+    if isinstance(node, tuple(TERNARY_CHILD_OPS)):
+        nodes.extend(get_all_nodes_with_parents(node_any.cond, node, 'cond'))
+        nodes.extend(get_all_nodes_with_parents(node_any.left, node, 'left'))
+        nodes.extend(get_all_nodes_with_parents(node_any.right, node, 'right'))
+    elif isinstance(node, BINARY_CHILD_OPS):
         nodes.extend(get_all_nodes_with_parents(node_any.left, node, 'left'))
         nodes.extend(get_all_nodes_with_parents(node_any.right, node, 'right'))
     elif isinstance(node, UNARY_CHILD_OPS):
@@ -143,6 +162,8 @@ def get_tree_depth(node: FactorNode) -> int:
     node_any = cast(Any, node)
     if isinstance(node, (DataNode, ConstNode)):
         return 1
+    if isinstance(node, tuple(TERNARY_CHILD_OPS)):
+        return 1 + max(get_tree_depth(node_any.cond), get_tree_depth(node_any.left), get_tree_depth(node_any.right))
     if isinstance(node, BINARY_CHILD_OPS):
         return 1 + max(get_tree_depth(node_any.left), get_tree_depth(node_any.right))
     if isinstance(node, UNARY_CHILD_OPS):
@@ -430,8 +451,8 @@ def _calc_indicator_yearly_values_for_one_instrument(
     df_local['future_ret'] = pd.to_numeric(df_local['future_ret'], errors='coerce').replace([np.inf, -np.inf], np.nan).fillna(0.0)
     df_local['future_ret'] = df_local['future_ret'].clip(-1.0, 1.0)
 
-    # IC/T-corr family.
-    if requested_set & {'TS IC', 'TS RankIC', 'T-corr'}:
+    # IC/T-corr/ICIR family.
+    if requested_set & {'TS IC', 'TS RankIC', 'TS ICIR', 'TS RankICIR', 'T-corr'}:
         try:
             ic_df, tcorr_df = get_annualized_ts_ic_and_t_corr(
                 df_local[['time', 'instrument_id', 'future_ret', factor_col]].copy(),
@@ -443,6 +464,16 @@ def _calc_indicator_yearly_values_for_one_instrument(
                 values_map['TS IC'].extend(_collect_yearly_metric_values(ic_df, 'TS IC'))
             if 'TS RankIC' in requested_set:
                 values_map['TS RankIC'].extend(_collect_yearly_metric_values(ic_df, 'TS RankIC'))
+            if 'TS ICIR' in requested_set:
+                if 'TS ICIR' in ic_df.columns:
+                    val = ic_df.loc['all', 'TS ICIR'] if 'all' in ic_df.index else np.nan
+                    if np.isfinite(val):
+                        values_map['TS ICIR'].append(float(val))
+            if 'TS RankICIR' in requested_set:
+                if 'TS RankICIR' in ic_df.columns:
+                    val = ic_df.loc['all', 'TS RankICIR'] if 'all' in ic_df.index else np.nan
+                    if np.isfinite(val):
+                        values_map['TS RankICIR'].append(float(val))
             if 'T-corr' in requested_set:
                 values_map['T-corr'].extend(_collect_yearly_metric_values(tcorr_df, 'T-corr'))
         except Exception:
