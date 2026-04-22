@@ -55,6 +55,7 @@ def update_futures_continuous_contract_info(instrument_id: Union[str, List, None
                                             method: str = 'insert_many'):
     """
     Update futures continuous contract info in database.
+    If a record with the same instrument_id already exists, it will be skipped.
 
     :param instrument_id: the instrument ids need to be updated
     :param method: updating method
@@ -63,13 +64,31 @@ def update_futures_continuous_contract_info(instrument_id: Union[str, List, None
 
     df_futures_info = get_futures_continuous_contract_info(instrument_id=instrument_id,
                                                            from_database=False)
+
+    # Filter out records that already exist in DB (by instrument_id)
+    try:
+        df_existing = get_futures_continuous_contract_info(instrument_id=None, from_database=True)
+        if df_existing is not None and not df_existing.empty:
+            existing_ids = set(df_existing['instrument_id'].dropna().unique())
+            before_count = len(df_futures_info)
+            df_futures_info = df_futures_info[~df_futures_info['instrument_id'].isin(existing_ids)]
+            skipped = before_count - len(df_futures_info)
+            if skipped > 0:
+                log.info(f'Skipped {skipped} existing instrument(s), {len(df_futures_info)} new to insert.')
+    except Exception:
+        pass  # If DB query fails, proceed with full insert
+
+    if df_futures_info.empty:
+        log.info('No new continuous contract info to insert (all already exist).')
+        return
+
     update_data(database='futures',
                 collection='continuous_contract_info',
                 df=df_futures_info,
                 method=method,
                 filter_column=['instrument_id'])
 
-    log.info(f'Successfully update futures continuous contract info.')
+    log.info(f'Successfully update futures continuous contract info ({len(df_futures_info)} records).')
 
 
 def get_futures_continuous_contract_price(instrument_id: Union[str, List, None] = None,

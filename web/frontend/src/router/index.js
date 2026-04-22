@@ -36,6 +36,12 @@ const routes = [
     meta: { title: '策略分析', icon: 'Coin' },
   },
   {
+    path: '/market-data',
+    name: 'MarketData',
+    component: () => import('../views/MarketDataView.vue'),
+    meta: { title: '行情数据', icon: 'Histogram' },
+  },
+  {
     path: '/tasks',
     name: 'Tasks',
     component: () => import('../views/TasksView.vue'),

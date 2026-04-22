@@ -26,7 +26,13 @@ if PROJECT_ROOT not in sys.path:
 
 # Import lionet modules
 from data.factor_data import get_factor_formula_records
-from mongo.mongify import get_data, list_collection_names, update_one_data, update_many_data
+from mongo.mongify import get_data, delete_data, list_collection_names, update_one_data, update_many_data
+from data.futures import (
+    get_futures_continuous_contract_info,
+    get_futures_continuous_contract_price,
+    update_futures_continuous_contract_info,
+    update_futures_continuous_contract_price,
+)
 from factors.factor_auto_search import GeneticFactorGenerator, FactorFusioner
 from factors.backtest import BackTester
 from strategy.strategy import Strategy
@@ -1397,6 +1403,325 @@ async def get_task_detail(task_id: str):
         print(f"[WARNING] get_task_detail DB fallback failed for task {task_id}: {e}")
         traceback.print_exc()
     raise HTTPException(status_code=404, detail="Task not found")
+
+
+# ══════════════════════════════════════════════════════════════════════
+#  Market Data Management APIs
+# ══════════════════════════════════════════════════════════════════════
+
+# In-memory store for market-data tasks (update-info / update-price)
+market_data_tasks: Dict[str, Dict[str, Any]] = {}
+
+# ── Scheduled daily update ────────────────────────────────────────────
+_daily_update_enabled = True
+_daily_update_lock = threading.Lock()
+_daily_update_thread: Optional[threading.Thread] = None
+
+
+def _run_daily_price_update():
+    """Background: update all instrument prices with default params."""
+    task_id = f"scheduled_{uuid.uuid4().hex[:8]}"
+    market_data_tasks[task_id] = {
+        "type": "update-price", "status": "running",
+        "started_at": datetime.now().isoformat(), "logs": [],
+        "params": {"instrument_id": None, "scheduled": True},
+    }
+    from utils.logging import log as lionet_logger
+    handler = _MarketDataLogHandler(task_id)
+    lionet_logger.addHandler(handler)
+    try:
+        update_futures_continuous_contract_price(
+            instrument_id=None,
+            start_date=None,
+            end_date=None,
+            load_prev_weighted_factor=True,
+            wait_time=2.0,
+        )
+        market_data_tasks[task_id]["status"] = "completed"
+    except Exception as e:
+        market_data_tasks[task_id]["status"] = "failed"
+        market_data_tasks[task_id]["error"] = str(e)
+    finally:
+        market_data_tasks[task_id]["finished_at"] = datetime.now().isoformat()
+        lionet_logger.removeHandler(handler)
+
+
+def _daily_scheduler_loop():
+    """Simple scheduler: sleep until next day's target time then run update."""
+    import time as _time
+    target_hour, target_minute = 18, 0  # 18:00 daily
+    while _daily_update_enabled:
+        now = datetime.now()
+        target = now.replace(hour=target_hour, minute=target_minute, second=0, microsecond=0)
+        if now >= target:
+            from datetime import timedelta
+            target += timedelta(days=1)
+        wait_seconds = (target - now).total_seconds()
+        # Sleep in small increments so we can respond to shutdown
+        while wait_seconds > 0 and _daily_update_enabled:
+            _time.sleep(min(wait_seconds, 30))
+            wait_seconds -= 30
+        if _daily_update_enabled:
+            try:
+                _run_daily_price_update()
+            except Exception:
+                pass
+
+
+class _MarketDataLogHandler(logging.Handler):
+    def __init__(self, task_id: str):
+        super().__init__()
+        self.task_id = task_id
+
+    def emit(self, record):
+        if self.task_id not in market_data_tasks:
+            return
+        msg = record.getMessage()
+        log_line = f'{datetime.now().strftime("%Y-%m-%d %H:%M:%S")} - {record.levelname} - {msg}'
+        logs = market_data_tasks[self.task_id].setdefault("logs", [])
+        logs.append(log_line)
+        if len(logs) > 2000:
+            del logs[:-2000]
+
+
+@app.on_event("startup")
+async def _start_daily_scheduler():
+    global _daily_update_thread
+    _daily_update_thread = threading.Thread(target=_daily_scheduler_loop, daemon=True)
+    _daily_update_thread.start()
+
+
+class UpdatePriceParams(BaseModel):
+    instrument_id: Optional[List[str]] = None
+    start_date: Optional[str] = None
+    end_date: Optional[str] = None
+    load_prev_weighted_factor: bool = True
+    wait_time: float = 2.0
+
+
+class DeleteDataParams(BaseModel):
+    instrument_id_list: List[str]
+    start_date: Optional[str] = None
+    end_date: Optional[str] = None
+
+
+@app.get("/api/market-data/instrument-ids")
+async def get_instrument_ids():
+    """Get all available instrument_ids from DB."""
+    try:
+        df = get_futures_continuous_contract_info(instrument_id=None, from_database=True)
+        if df is None or df.empty:
+            return {"instrument_ids": []}
+        ids = sorted(df["instrument_id"].dropna().unique().tolist())
+        return {"instrument_ids": ids}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/market-data/update-info")
+async def api_update_info():
+    """Update continuous contract info."""
+    task_id = f"info_{uuid.uuid4().hex[:8]}"
+    market_data_tasks[task_id] = {
+        "type": "update-info", "status": "running",
+        "started_at": datetime.now().isoformat(), "logs": [],
+    }
+
+    def _run():
+        from utils.logging import log as lionet_logger
+        handler = _MarketDataLogHandler(task_id)
+        lionet_logger.addHandler(handler)
+        try:
+            update_futures_continuous_contract_info()
+            market_data_tasks[task_id]["status"] = "completed"
+        except Exception as e:
+            market_data_tasks[task_id]["status"] = "failed"
+            market_data_tasks[task_id]["error"] = str(e)
+        finally:
+            market_data_tasks[task_id]["finished_at"] = datetime.now().isoformat()
+            lionet_logger.removeHandler(handler)
+
+    threading.Thread(target=_run, daemon=True).start()
+    return {"task_id": task_id, "message": "合约信息更新任务已启动"}
+
+
+@app.post("/api/market-data/update-price")
+async def api_update_price(params: UpdatePriceParams):
+    """Update continuous contract price data (async task)."""
+    task_id = f"price_{uuid.uuid4().hex[:8]}"
+    market_data_tasks[task_id] = {
+        "type": "update-price", "status": "running",
+        "started_at": datetime.now().isoformat(), "logs": [],
+        "params": params.dict(),
+    }
+
+    def _run():
+        from utils.logging import log as lionet_logger
+        handler = _MarketDataLogHandler(task_id)
+        lionet_logger.addHandler(handler)
+        try:
+            update_futures_continuous_contract_price(
+                instrument_id=params.instrument_id,
+                start_date=params.start_date,
+                end_date=params.end_date,
+                load_prev_weighted_factor=params.load_prev_weighted_factor,
+                wait_time=params.wait_time,
+            )
+            market_data_tasks[task_id]["status"] = "completed"
+        except Exception as e:
+            market_data_tasks[task_id]["status"] = "failed"
+            market_data_tasks[task_id]["error"] = str(e)
+            traceback.print_exc()
+        finally:
+            market_data_tasks[task_id]["finished_at"] = datetime.now().isoformat()
+            lionet_logger.removeHandler(handler)
+
+    threading.Thread(target=_run, daemon=True).start()
+    return {"task_id": task_id, "message": "价格数据更新任务已启动"}
+
+
+@app.get("/api/market-data/task-status/{task_id}")
+async def api_market_data_task_status(task_id: str):
+    """Poll market-data task status and logs."""
+    if task_id not in market_data_tasks:
+        raise HTTPException(status_code=404, detail="Task not found")
+    t = market_data_tasks[task_id]
+    return {
+        "task_id": task_id,
+        "type": t.get("type"),
+        "status": t.get("status"),
+        "started_at": t.get("started_at"),
+        "finished_at": t.get("finished_at"),
+        "error": t.get("error"),
+        "logs": t.get("logs", [])[-500:],
+    }
+
+
+@app.get("/api/market-data/overview")
+async def api_market_data_overview():
+    """Return data overview: per instrument_id stats."""
+    try:
+        df = get_futures_continuous_contract_price(
+            instrument_id=None, start_date="20000101", end_date="20991231",
+            from_database=True,
+        )
+        if df is None or df.empty:
+            return {"overview": []}
+
+        df["time"] = pd.to_datetime(df["time"], errors="coerce")
+        result = []
+        for ins_id, grp in df.groupby("instrument_id"):
+            grp = grp.dropna(subset=["time"]).sort_values("time")
+            if grp.empty:
+                continue
+            min_date = grp["time"].min()
+            max_date = grp["time"].max()
+            total_rows = len(grp)
+            # Check date completeness: count business days vs actual rows
+            bdays = pd.bdate_range(min_date, max_date)
+            expected_count = len(bdays)
+            # Check missing fields
+            price_cols = ["open", "high", "low", "close", "volume", "position"]
+            missing_fields = {}
+            for c in price_cols:
+                if c in grp.columns:
+                    null_count = int(grp[c].isna().sum())
+                    if null_count > 0:
+                        missing_fields[c] = null_count
+            # Find missing dates (approximate: actual trading calendar may differ)
+            actual_dates = set(grp["time"].dt.date)
+            bday_dates = set(d.date() for d in bdays)
+            missing_dates_count = len(bday_dates - actual_dates)
+
+            result.append({
+                "instrument_id": str(ins_id),
+                "start_date": min_date.strftime("%Y-%m-%d"),
+                "end_date": max_date.strftime("%Y-%m-%d"),
+                "total_rows": total_rows,
+                "expected_bdays": expected_count,
+                "missing_dates_count": missing_dates_count,
+                "missing_fields": missing_fields,
+                "status": "完整" if missing_dates_count <= 5 and not missing_fields else "有缺失",
+            })
+        return {"overview": result}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/market-data/price")
+async def api_get_price(
+    instrument_id: str,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+):
+    """Get price data for one instrument, for table display and K-line chart."""
+    try:
+        df = get_futures_continuous_contract_price(
+            instrument_id=instrument_id,
+            start_date=start_date or "20000101",
+            end_date=end_date or "20991231",
+            from_database=True,
+        )
+        if df is None or df.empty:
+            return {"rows": [], "columns": []}
+        df["time"] = pd.to_datetime(df["time"], errors="coerce")
+        df = df.sort_values("time").reset_index(drop=True)
+        # Convert time to string for JSON
+        df["time"] = df["time"].dt.strftime("%Y-%m-%d")
+        # Drop mongo _id if present
+        if "_id" in df.columns:
+            df = df.drop(columns=["_id"])
+        # Convert numeric columns
+        for c in ["open", "high", "low", "close", "settle", "volume", "position",
+                   "weighted_factor", "cur_weighted_factor"]:
+            if c in df.columns:
+                df[c] = pd.to_numeric(df[c], errors="coerce")
+        columns = df.columns.tolist()
+        rows = df.where(df.notna(), None).to_dict(orient="records")
+        return {"rows": rows, "columns": columns}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/market-data/delete")
+async def api_delete_price(params: DeleteDataParams):
+    """Delete price data for given instrument_ids and optional date range."""
+    if not params.instrument_id_list:
+        raise HTTPException(status_code=400, detail="instrument_id_list is required")
+    try:
+        mongo_op: Dict[str, Any] = {"instrument_id": {"$in": params.instrument_id_list}}
+        date_conds = []
+        if params.start_date:
+            date_conds.append({"time": {"$gte": pd.Timestamp(params.start_date)}})
+        if params.end_date:
+            date_conds.append({"time": {"$lte": pd.Timestamp(params.end_date)}})
+        if date_conds:
+            mongo_op = {"$and": [mongo_op] + date_conds}
+        delete_data(
+            database="futures",
+            collection="continuous_contract_price_daily",
+            mongo_operator=mongo_op,
+        )
+        return {"message": f"已删除 {params.instrument_id_list} 的数据", "success": True}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/market-data/scheduled-status")
+async def api_scheduled_status():
+    """Return whether daily scheduled update is enabled."""
+    return {"enabled": _daily_update_enabled}
+
+
+@app.post("/api/market-data/toggle-schedule")
+async def api_toggle_schedule(enabled: bool = True):
+    """Toggle daily scheduled update."""
+    global _daily_update_enabled, _daily_update_thread
+    _daily_update_enabled = enabled
+    if enabled and (_daily_update_thread is None or not _daily_update_thread.is_alive()):
+        _daily_update_thread = threading.Thread(target=_daily_scheduler_loop, daemon=True)
+        _daily_update_thread.start()
+    return {"enabled": _daily_update_enabled, "message": "已开启定时更新" if enabled else "已关闭定时更新"}
 
 
 # ── Entry point ───────────────────────────────────────────────────────

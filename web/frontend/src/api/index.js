@@ -33,4 +33,15 @@ export const getTaskDetail = (taskId) => api.get(`/api/tasks/detail/${taskId}`)
 // ── Health ────────────────────────────────────────────
 export const getHealth = () => api.get('/api/health')
 
+// ── Market Data Management ────────────────────────────
+export const getInstrumentIds = () => api.get('/api/market-data/instrument-ids')
+export const updateContractInfo = () => api.post('/api/market-data/update-info')
+export const updateContractPrice = (data) => api.post('/api/market-data/update-price', data)
+export const getMarketDataTaskStatus = (taskId) => api.get(`/api/market-data/task-status/${taskId}`)
+export const getMarketDataOverview = () => api.get('/api/market-data/overview')
+export const getMarketDataPrice = (params) => api.get('/api/market-data/price', { params })
+export const deleteMarketData = (data) => api.post('/api/market-data/delete', data)
+export const getScheduledStatus = () => api.get('/api/market-data/scheduled-status')
+export const toggleSchedule = (enabled) => api.post(`/api/market-data/toggle-schedule?enabled=${enabled}`)
+
 export default api
