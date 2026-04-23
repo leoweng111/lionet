@@ -121,8 +121,9 @@ def get_futures_continuous_contract_price(instrument_id: Union[str, List, None] 
 
     if not from_database:
         df_list = []
-        for ins_id in instrument_id:
+        for idx, ins_id in enumerate(instrument_id, 1):
             root_instrument = _to_root_instrument(ins_id)
+            log.info(f'[{idx}/{len(instrument_id)}] 正在获取 {ins_id} (root={root_instrument}) 的连续合约数据...')
             df_futures = build_roll_adjusted_continuous_contract_price(
                 instrument_id=root_instrument,
                 start_date=start_date,
@@ -134,6 +135,7 @@ def get_futures_continuous_contract_price(instrument_id: Union[str, List, None] 
                 research_start_date=RESEARCH_START_DATE,
             )
             df_futures['instrument_id'] = ins_id
+            log.info(f'[{idx}/{len(instrument_id)}] {ins_id} 获取完成, {len(df_futures)} 行')
             df_list.append(df_futures)
         if not df_list:
             return pd.DataFrame(columns=[
@@ -181,6 +183,10 @@ def update_futures_continuous_contract_price(instrument_id: Union[str, List, Non
 
     if not instrument_id:
         instrument_id = get_futures_continuous_contract_info()['instrument_id'].tolist()
+    if isinstance(instrument_id, str):
+        instrument_id = [instrument_id]
+
+    log.info(f'开始更新 {len(instrument_id)} 个合约的价格数据: {instrument_id}')
 
     df_futures_price = get_futures_continuous_contract_price(instrument_id=instrument_id,
                                                              start_date=start_date,
@@ -188,12 +194,19 @@ def update_futures_continuous_contract_price(instrument_id: Union[str, List, Non
                                                              from_database=False,
                                                              load_prev_weighted_factor=load_prev_weighted_factor,
                                                              wait_time=wait_time)
+
+    if df_futures_price is None or df_futures_price.empty:
+        log.warning('所有合约均无数据，跳过写入。')
+        return
+
+    log.info(f'共获取 {len(df_futures_price)} 行数据，开始写入数据库...')
+
     update_data(database='futures',
                 collection='continuous_contract_price_daily',
                 df=df_futures_price,
                 method=method)
 
-    log.info(f'Successfully update futures continuous contract daily price.')
+    log.info(f'Successfully update futures continuous contract daily price ({len(df_futures_price)} rows).')
 
 
 def _to_root_instrument(instrument_id: str) -> str:
@@ -646,6 +659,7 @@ def build_roll_adjusted_continuous_contract_price(instrument_id: str,
     """
     root = _to_root_instrument(instrument_id)
     continuous_id = continuous_instrument_id or (instrument_id if str(instrument_id).endswith('0') else f'{root}0')
+    log.info(f'[continuous] {continuous_id}: 获取可用合约列表 ({start_date}~{end_date})...')
     symbols = get_futures_symbol_info(
         instrument_id=root,
         start_date=start_date,
@@ -656,6 +670,7 @@ def build_roll_adjusted_continuous_contract_price(instrument_id: str,
         log.warning(f'No available symbols found for instrument={root} in range [{start_date}, {end_date}].')
         return pd.DataFrame()
 
+    log.info(f'[continuous] {continuous_id}: 找到 {len(symbols)} 个合约, 开始获取价格数据...')
     panel_df = get_futures_symbol_price(
         instrument_id=root,
         symbol_list=symbols,

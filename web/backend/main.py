@@ -1532,11 +1532,14 @@ async def api_update_info():
         handler = _MarketDataLogHandler(task_id)
         lionet_logger.addHandler(handler)
         try:
+            lionet_logger.info('合约信息更新任务启动...')
             update_futures_continuous_contract_info()
+            lionet_logger.info('合约信息更新任务完成')
             market_data_tasks[task_id]["status"] = "completed"
         except Exception as e:
             market_data_tasks[task_id]["status"] = "failed"
             market_data_tasks[task_id]["error"] = str(e)
+            lionet_logger.error(f'合约信息更新失败: {e}')
         finally:
             market_data_tasks[task_id]["finished_at"] = datetime.now().isoformat()
             lionet_logger.removeHandler(handler)
@@ -1560,6 +1563,12 @@ async def api_update_price(params: UpdatePriceParams):
         handler = _MarketDataLogHandler(task_id)
         lionet_logger.addHandler(handler)
         try:
+            lionet_logger.info(
+                f'价格数据更新任务启动: instrument_id={params.instrument_id}, '
+                f'start_date={params.start_date}, end_date={params.end_date}, '
+                f'load_prev_weighted_factor={params.load_prev_weighted_factor}, '
+                f'wait_time={params.wait_time}'
+            )
             update_futures_continuous_contract_price(
                 instrument_id=params.instrument_id,
                 start_date=params.start_date,
@@ -1567,10 +1576,12 @@ async def api_update_price(params: UpdatePriceParams):
                 load_prev_weighted_factor=params.load_prev_weighted_factor,
                 wait_time=params.wait_time,
             )
+            lionet_logger.info('价格数据更新任务完成')
             market_data_tasks[task_id]["status"] = "completed"
         except Exception as e:
             market_data_tasks[task_id]["status"] = "failed"
             market_data_tasks[task_id]["error"] = str(e)
+            lionet_logger.error(f'价格数据更新任务失败: {e}')
             traceback.print_exc()
         finally:
             market_data_tasks[task_id]["finished_at"] = datetime.now().isoformat()
@@ -1599,53 +1610,87 @@ async def api_market_data_task_status(task_id: str):
 
 @app.get("/api/market-data/overview")
 async def api_market_data_overview():
-    """Return data overview: per instrument_id stats."""
-    try:
-        df = get_futures_continuous_contract_price(
-            instrument_id=None, start_date="20000101", end_date="20991231",
-            from_database=True,
-        )
-        if df is None or df.empty:
-            return {"overview": []}
+    """Return data overview: per instrument_id stats (queried per-instrument to avoid OOM)."""
+    import asyncio
 
-        df["time"] = pd.to_datetime(df["time"], errors="coerce")
-        result = []
-        for ins_id, grp in df.groupby("instrument_id"):
-            grp = grp.dropna(subset=["time"]).sort_values("time")
-            if grp.empty:
-                continue
-            min_date = grp["time"].min()
-            max_date = grp["time"].max()
-            total_rows = len(grp)
-            # Check date completeness: count business days vs actual rows
-            bdays = pd.bdate_range(min_date, max_date)
-            expected_count = len(bdays)
-            # Check missing fields
-            price_cols = ["open", "high", "low", "close", "volume", "position"]
-            missing_fields = {}
-            for c in price_cols:
-                if c in grp.columns:
-                    null_count = int(grp[c].isna().sum())
-                    if null_count > 0:
-                        missing_fields[c] = null_count
-            # Find missing dates (approximate: actual trading calendar may differ)
-            actual_dates = set(grp["time"].dt.date)
-            bday_dates = set(d.date() for d in bdays)
-            missing_dates_count = len(bday_dates - actual_dates)
+    def _compute_overview():
+        try:
+            # Get all known instrument_ids from contract info
+            from data.futures import get_futures_continuous_contract_info as _get_info
+            df_info = _get_info(instrument_id=None, from_database=True)
+            if df_info is None or df_info.empty:
+                return {"overview": []}
+            all_ids = sorted(df_info["instrument_id"].dropna().unique().tolist())
 
-            result.append({
-                "instrument_id": str(ins_id),
-                "start_date": min_date.strftime("%Y-%m-%d"),
-                "end_date": max_date.strftime("%Y-%m-%d"),
-                "total_rows": total_rows,
-                "expected_bdays": expected_count,
-                "missing_dates_count": missing_dates_count,
-                "missing_fields": missing_fields,
-                "status": "完整" if missing_dates_count <= 5 and not missing_fields else "有缺失",
-            })
-        return {"overview": result}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+            result = []
+            for ins_id in all_ids:
+                try:
+                    df = get_futures_continuous_contract_price(
+                        instrument_id=ins_id,
+                        start_date="20000101",
+                        end_date="20991231",
+                        from_database=True,
+                    )
+                    if df is None or df.empty:
+                        result.append({
+                            "instrument_id": str(ins_id),
+                            "start_date": "-", "end_date": "-",
+                            "total_rows": 0, "expected_bdays": 0,
+                            "missing_dates_count": 0, "missing_fields": {},
+                            "status": "无数据",
+                        })
+                        continue
+
+                    df["time"] = pd.to_datetime(df["time"], errors="coerce")
+                    df = df.dropna(subset=["time"]).sort_values("time")
+                    if df.empty:
+                        continue
+
+                    min_date = df["time"].min()
+                    max_date = df["time"].max()
+                    total_rows = len(df)
+                    bdays = pd.bdate_range(min_date, max_date)
+                    expected_count = len(bdays)
+
+                    price_cols = ["open", "high", "low", "close", "volume", "position"]
+                    missing_fields = {}
+                    for c in price_cols:
+                        if c in df.columns:
+                            null_count = int(df[c].isna().sum())
+                            if null_count > 0:
+                                missing_fields[c] = null_count
+
+                    actual_dates = set(df["time"].dt.date)
+                    bday_dates = set(d.date() for d in bdays)
+                    missing_dates_count = len(bday_dates - actual_dates)
+
+                    result.append({
+                        "instrument_id": str(ins_id),
+                        "start_date": min_date.strftime("%Y-%m-%d"),
+                        "end_date": max_date.strftime("%Y-%m-%d"),
+                        "total_rows": total_rows,
+                        "expected_bdays": expected_count,
+                        "missing_dates_count": missing_dates_count,
+                        "missing_fields": missing_fields,
+                        "status": "完整" if missing_dates_count <= 5 and not missing_fields else "有缺失",
+                    })
+                except Exception:
+                    result.append({
+                        "instrument_id": str(ins_id),
+                        "start_date": "-", "end_date": "-",
+                        "total_rows": 0, "expected_bdays": 0,
+                        "missing_dates_count": 0, "missing_fields": {},
+                        "status": "查询异常",
+                    })
+            return {"overview": result}
+        except Exception as e:
+            return {"error": str(e)}
+
+    loop = asyncio.get_event_loop()
+    resp = await loop.run_in_executor(None, _compute_overview)
+    if "error" in resp:
+        raise HTTPException(status_code=500, detail=resp["error"])
+    return resp
 
 
 @app.get("/api/market-data/price")
@@ -1655,30 +1700,34 @@ async def api_get_price(
     end_date: Optional[str] = None,
 ):
     """Get price data for one instrument, for table display and K-line chart."""
-    try:
+    import asyncio
+
+    def _query():
         df = get_futures_continuous_contract_price(
             instrument_id=instrument_id,
             start_date=start_date or "20000101",
-            end_date=end_date or "20991231",
+            end_date=end_date or None,
             from_database=True,
         )
         if df is None or df.empty:
             return {"rows": [], "columns": []}
         df["time"] = pd.to_datetime(df["time"], errors="coerce")
         df = df.sort_values("time").reset_index(drop=True)
-        # Convert time to string for JSON
         df["time"] = df["time"].dt.strftime("%Y-%m-%d")
-        # Drop mongo _id if present
         if "_id" in df.columns:
             df = df.drop(columns=["_id"])
-        # Convert numeric columns
         for c in ["open", "high", "low", "close", "settle", "volume", "position",
                    "weighted_factor", "cur_weighted_factor"]:
             if c in df.columns:
                 df[c] = pd.to_numeric(df[c], errors="coerce")
+        df = df.replace([np.inf, -np.inf], np.nan)
         columns = df.columns.tolist()
         rows = df.where(df.notna(), None).to_dict(orient="records")
         return {"rows": rows, "columns": columns}
+
+    try:
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(None, _query)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
