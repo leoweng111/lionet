@@ -30,6 +30,7 @@ from mongo.mongify import get_data, delete_data, list_collection_names, update_o
 from data.futures import (
     get_futures_continuous_contract_info,
     get_futures_continuous_contract_price,
+    get_trading_days,
     update_futures_continuous_contract_info,
     update_futures_continuous_contract_price,
 )
@@ -1649,8 +1650,10 @@ async def api_market_data_overview():
                     min_date = df["time"].min()
                     max_date = df["time"].max()
                     total_rows = len(df)
-                    bdays = pd.bdate_range(min_date, max_date)
-                    expected_count = len(bdays)
+                    trading_days = get_trading_days(
+                        min_date.strftime("%Y%m%d"), max_date.strftime("%Y%m%d")
+                    )
+                    expected_count = len(trading_days)
 
                     price_cols = ["open", "high", "low", "close", "volume", "position"]
                     missing_fields = {}
@@ -1661,8 +1664,8 @@ async def api_market_data_overview():
                                 missing_fields[c] = null_count
 
                     actual_dates = set(df["time"].dt.date)
-                    bday_dates = set(d.date() for d in bdays)
-                    missing_dates = sorted(bday_dates - actual_dates)
+                    trading_day_dates = set(d.date() for d in trading_days)
+                    missing_dates = sorted(trading_day_dates - actual_dates)
                     missing_dates_count = len(missing_dates)
                     missing_dates_list = [d.strftime("%Y-%m-%d") for d in missing_dates]
 

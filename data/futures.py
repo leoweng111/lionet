@@ -19,6 +19,34 @@ from utils.params import (
 from utils.logging import log
 
 
+def get_trading_days(start_date: str, end_date: str) -> List[pd.Timestamp]:
+    """Return a list of Chinese futures trading days between start_date and end_date (inclusive).
+
+    Uses the ``chinese_calendar`` package which covers Chinese public holidays
+    and weekend make-up workdays. Futures exchanges (SHFE/DCE/CZCE/CFFEX)
+    follow the same holiday schedule as the national statutory holidays.
+
+    Parameters
+    ----------
+    start_date : str
+        Start date in 'YYYYMMDD' or 'YYYY-MM-DD' format.
+    end_date : str
+        End date in 'YYYYMMDD' or 'YYYY-MM-DD' format.
+
+    Returns
+    -------
+    List[pd.Timestamp]
+        Sorted list of trading day timestamps.
+    """
+    import chinese_calendar as cc
+
+    start = pd.Timestamp(start_date)
+    end = pd.Timestamp(end_date)
+    all_days = pd.date_range(start, end, freq='D')
+    trading_days = [d for d in all_days if cc.is_workday(d.date())]
+    return trading_days
+
+
 def get_futures_continuous_contract_info(instrument_id: Union[str, List, None] = None,
                                          from_database: bool = True):
     """
