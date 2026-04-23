@@ -1720,9 +1720,24 @@ async def api_get_price(
                    "weighted_factor", "cur_weighted_factor"]:
             if c in df.columns:
                 df[c] = pd.to_numeric(df[c], errors="coerce")
-        df = df.replace([np.inf, -np.inf], np.nan)
         columns = df.columns.tolist()
-        rows = df.where(df.notna(), None).to_dict(orient="records")
+        # Convert to records and sanitize non-JSON-safe values (NaN, inf, numpy types)
+        rows = []
+        for rec in df.to_dict(orient="records"):
+            clean = {}
+            for k, v in rec.items():
+                if isinstance(v, float) and (np.isnan(v) or np.isinf(v)):
+                    clean[k] = None
+                elif isinstance(v, (np.integer,)):
+                    clean[k] = int(v)
+                elif isinstance(v, (np.floating,)):
+                    f = float(v)
+                    clean[k] = None if (np.isnan(f) or np.isinf(f)) else f
+                elif isinstance(v, (np.bool_,)):
+                    clean[k] = bool(v)
+                else:
+                    clean[k] = v
+            rows.append(clean)
         return {"rows": rows, "columns": columns}
 
     try:
