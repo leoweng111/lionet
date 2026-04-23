@@ -171,6 +171,8 @@ import {
   toggleSchedule,
 } from '../api'
 
+defineOptions({ name: 'MarketDataView' })
+
 // ── Shared ──
 const activeTab = ref('info')
 const instrumentIds = ref([])
