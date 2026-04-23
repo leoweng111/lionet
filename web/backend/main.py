@@ -1662,7 +1662,9 @@ async def api_market_data_overview():
 
                     actual_dates = set(df["time"].dt.date)
                     bday_dates = set(d.date() for d in bdays)
-                    missing_dates_count = len(bday_dates - actual_dates)
+                    missing_dates = sorted(bday_dates - actual_dates)
+                    missing_dates_count = len(missing_dates)
+                    missing_dates_list = [d.strftime("%Y-%m-%d") for d in missing_dates]
 
                     result.append({
                         "instrument_id": str(ins_id),
@@ -1671,6 +1673,7 @@ async def api_market_data_overview():
                         "total_rows": total_rows,
                         "expected_bdays": expected_count,
                         "missing_dates_count": missing_dates_count,
+                        "missing_dates": missing_dates_list,
                         "missing_fields": missing_fields,
                         "status": "完整" if missing_dates_count <= 5 and not missing_fields else "有缺失",
                     })

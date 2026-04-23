@@ -74,7 +74,21 @@
             <el-table-column prop="end_date" label="结束日期" width="120" />
             <el-table-column prop="total_rows" label="总行数" width="90" />
             <el-table-column prop="expected_bdays" label="预期交易日" width="110" />
-            <el-table-column prop="missing_dates_count" label="缺失日期数" width="110" />
+            <el-table-column label="缺失日期数" width="120">
+              <template #default="{ row }">
+                <span v-if="!row.missing_dates_count" style="color:#67c23a;">0</span>
+                <el-popover v-else placement="right" :width="260" trigger="click">
+                  <template #reference>
+                    <el-link type="warning" :underline="true" style="font-weight:600;">{{ row.missing_dates_count }}</el-link>
+                  </template>
+                  <div style="font-size:12px;font-weight:600;margin-bottom:6px;">{{ row.instrument_id }} 缺失日期明细</div>
+                  <div style="max-height:300px;overflow-y:auto;">
+                    <div v-for="d in (row.missing_dates || [])" :key="d" style="font-size:12px;line-height:1.8;font-family:monospace;">{{ d }}</div>
+                  </div>
+                  <div v-if="!row.missing_dates?.length" style="color:#909399;font-size:12px;">无明细数据</div>
+                </el-popover>
+              </template>
+            </el-table-column>
             <el-table-column label="缺失字段" min-width="150">
               <template #default="{ row }">
                 <span v-if="!row.missing_fields || Object.keys(row.missing_fields).length === 0" style="color:#67c23a;">无</span>
