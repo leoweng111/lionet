@@ -410,7 +410,7 @@ const loadOverview = async () => {
     overviewLoading.value = false
   }
 }
-watch(activeTab, (val) => { if (val === 'overview') loadOverview() })
+// 已改为仅手动点击“刷新”按钮触发，不再在切换页签时自动请求
 
 // ── Tab 4: Detail + K-line ──
 const detailLoading = ref(false)
