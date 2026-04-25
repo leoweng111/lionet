@@ -11,9 +11,18 @@
         <el-card shadow="never">
           <template #header><span style="font-weight:600;">更新连续合约详情</span></template>
           <p style="color:#606266;margin-bottom:16px;">从 AkShare 拉取最新的期货连续合约列表信息，写入 MongoDB。</p>
-          <el-button type="primary" :loading="infoLoading" @click="handleUpdateInfo">
-            <el-icon v-if="!infoLoading"><Refresh /></el-icon> {{ infoLoading ? '更新中...' : '更新合约信息' }}
-          </el-button>
+          <el-form :model="infoParams" label-width="120px" size="small" style="max-width:420px;">
+            <el-form-item label="更新方式(method)">
+              <el-select v-model="infoParams.method" style="width:100%;">
+                <el-option v-for="m in updateMethods" :key="m" :label="m" :value="m" />
+              </el-select>
+            </el-form-item>
+            <el-form-item>
+              <el-button type="primary" :loading="infoLoading" @click="handleUpdateInfo">
+                <el-icon v-if="!infoLoading"><Refresh /></el-icon> {{ infoLoading ? '更新中...' : '更新合约信息' }}
+              </el-button>
+            </el-form-item>
+          </el-form>
           <LogPanel :logs="infoLogs" style="margin-top:16px;" />
         </el-card>
       </el-tab-pane>
@@ -38,7 +47,7 @@
               </el-select>
             </el-form-item>
             <el-form-item label="开始日期">
-              <el-input v-model="priceParams.start_date" placeholder="留空=使用默认值" clearable @change="onStartDateChange" />
+              <el-input v-model="priceParams.start_date" placeholder="留空=20200101" clearable @change="onStartDateChange" />
             </el-form-item>
             <el-form-item label="结束日期">
               <el-input v-model="priceParams.end_date" :placeholder="todayStr" clearable />
@@ -48,6 +57,11 @@
             </el-form-item>
             <el-form-item label="请求间隔(秒)">
               <el-input-number v-model="priceParams.wait_time" :min="0" :max="30" :step="0.5" :precision="1" style="width:100%;" />
+            </el-form-item>
+            <el-form-item label="更新方式(method)">
+              <el-select v-model="priceParams.method" style="width:100%;">
+                <el-option v-for="m in updateMethods" :key="m" :label="m" :value="m" />
+              </el-select>
             </el-form-item>
             <el-form-item>
               <el-button type="primary" :loading="priceLoading" @click="handleUpdatePrice">
@@ -187,6 +201,8 @@ import {
 
 defineOptions({ name: 'MarketDataView' })
 
+const updateMethods = ['bulk_write_update', 'update_one', 'insert_many']
+
 // ── Shared ──
 const activeTab = ref('info')
 const instrumentIds = ref([])
@@ -210,11 +226,14 @@ onMounted(() => {
 // ── Tab 1: Update Info ──
 const infoLoading = ref(false)
 const infoLogs = ref([])
+const infoParams = reactive({
+  method: 'bulk_write_update',
+})
 const handleUpdateInfo = async () => {
   infoLoading.value = true
   infoLogs.value = []
   try {
-    const { data } = await updateContractInfo()
+    const { data } = await updateContractInfo({ method: infoParams.method })
     const taskId = data.task_id
     ElMessage.success(data.message)
     pollMarketTask(taskId, infoLogs, () => {
@@ -237,6 +256,7 @@ const priceParams = reactive({
   end_date: '',
   load_prev_weighted_factor: true,
   wait_time: 2.0,
+  method: 'bulk_write_update',
 })
 
 const loadScheduleStatus = async () => {
@@ -269,6 +289,7 @@ const handleUpdatePrice = async () => {
       end_date: priceParams.end_date || null,
       load_prev_weighted_factor: priceParams.load_prev_weighted_factor,
       wait_time: priceParams.wait_time,
+      method: priceParams.method,
     }
     const { data } = await updateContractPrice(payload)
     ElMessage.success(data.message)

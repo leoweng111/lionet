@@ -1420,28 +1420,40 @@ _daily_update_thread: Optional[threading.Thread] = None
 
 
 def _run_daily_price_update():
-    """Background: update all instrument prices with default params."""
+    """Background: daily update for today's data only."""
+    today_str = datetime.now().strftime("%Y%m%d")
     task_id = f"scheduled_{uuid.uuid4().hex[:8]}"
     market_data_tasks[task_id] = {
         "type": "update-price", "status": "running",
         "started_at": datetime.now().isoformat(), "logs": [],
-        "params": {"instrument_id": None, "scheduled": True},
+        "params": {
+            "instrument_id": None,
+            "start_date": today_str,
+            "end_date": today_str,
+            "load_prev_weighted_factor": True,
+            "method": "bulk_write_update",
+            "scheduled": True,
+        },
     }
     from utils.logging import log as lionet_logger
     handler = _MarketDataLogHandler(task_id)
     lionet_logger.addHandler(handler)
     try:
+        lionet_logger.info(f'定时更新启动: 仅更新当日数据 {today_str}')
         update_futures_continuous_contract_price(
             instrument_id=None,
-            start_date=None,
-            end_date=None,
+            start_date=today_str,
+            end_date=today_str,
             load_prev_weighted_factor=True,
             wait_time=2.0,
+            method="bulk_write_update",
         )
+        lionet_logger.info('定时更新完成')
         market_data_tasks[task_id]["status"] = "completed"
     except Exception as e:
         market_data_tasks[task_id]["status"] = "failed"
         market_data_tasks[task_id]["error"] = str(e)
+        lionet_logger.error(f'定时更新失败: {e}')
     finally:
         market_data_tasks[task_id]["finished_at"] = datetime.now().isoformat()
         lionet_logger.removeHandler(handler)
@@ -1492,12 +1504,17 @@ async def _start_daily_scheduler():
     _daily_update_thread.start()
 
 
+class UpdateInfoParams(BaseModel):
+    method: str = "bulk_write_update"
+
+
 class UpdatePriceParams(BaseModel):
     instrument_id: Optional[List[str]] = None
     start_date: Optional[str] = None
     end_date: Optional[str] = None
     load_prev_weighted_factor: bool = True
     wait_time: float = 2.0
+    method: str = "bulk_write_update"
 
 
 class DeleteDataParams(BaseModel):
@@ -1520,12 +1537,13 @@ async def get_instrument_ids():
 
 
 @app.post("/api/market-data/update-info")
-async def api_update_info():
+async def api_update_info(params: UpdateInfoParams):
     """Update continuous contract info."""
     task_id = f"info_{uuid.uuid4().hex[:8]}"
     market_data_tasks[task_id] = {
         "type": "update-info", "status": "running",
         "started_at": datetime.now().isoformat(), "logs": [],
+        "params": params.dict(),
     }
 
     def _run():
@@ -1533,8 +1551,8 @@ async def api_update_info():
         handler = _MarketDataLogHandler(task_id)
         lionet_logger.addHandler(handler)
         try:
-            lionet_logger.info('合约信息更新任务启动...')
-            update_futures_continuous_contract_info()
+            lionet_logger.info(f'合约信息更新任务启动: method={params.method}')
+            update_futures_continuous_contract_info(method=params.method)
             lionet_logger.info('合约信息更新任务完成')
             market_data_tasks[task_id]["status"] = "completed"
         except Exception as e:
@@ -1568,7 +1586,7 @@ async def api_update_price(params: UpdatePriceParams):
                 f'价格数据更新任务启动: instrument_id={params.instrument_id}, '
                 f'start_date={params.start_date}, end_date={params.end_date}, '
                 f'load_prev_weighted_factor={params.load_prev_weighted_factor}, '
-                f'wait_time={params.wait_time}'
+                f'wait_time={params.wait_time}, method={params.method}'
             )
             update_futures_continuous_contract_price(
                 instrument_id=params.instrument_id,
@@ -1576,6 +1594,7 @@ async def api_update_price(params: UpdatePriceParams):
                 end_date=params.end_date,
                 load_prev_weighted_factor=params.load_prev_weighted_factor,
                 wait_time=params.wait_time,
+                method=params.method,
             )
             lionet_logger.info('价格数据更新任务完成')
             market_data_tasks[task_id]["status"] = "completed"
