@@ -2,6 +2,7 @@
 This script is to get and deal with futures data based on akshare.
 """
 import time
+from datetime import date
 from typing import Dict, List, Optional, Sequence, Union
 import pandas as pd
 import numpy as np
@@ -9,14 +10,23 @@ import numpy as np
 import akshare as ak
 from mongo.mongify import get_data, update_data
 from utils.params import (
-    START_DATE_STR,
-    END_DATE_STR,
-    START_DATE,
-    END_DATE,
     RESEARCH_START_DATE,
     FUTURES_FIXED_LISTING_MONTHS,
 )
 from utils.logging import log
+
+
+class UpdateCancelledError(RuntimeError):
+    """Raised when an update task is cancelled by user."""
+
+
+def _raise_if_cancelled(cancel_event) -> None:
+    if cancel_event is not None and getattr(cancel_event, "is_set", lambda: False)():
+        raise UpdateCancelledError('Update cancelled by user.')
+
+
+def _today_date_str() -> str:
+    return date.today().strftime('%Y%m%d')
 
 
 def get_trading_days(start_date: str, end_date: str) -> List[pd.Timestamp]:
@@ -124,7 +134,8 @@ def get_futures_continuous_contract_price(instrument_id: Union[str, List, None] 
                                           end_date: str = None,
                                           from_database: bool = True,
                                           load_prev_weighted_factor: bool = True,
-                                          wait_time: float = 2.0):
+                                          wait_time: float = 2.0,
+                                          cancel_event=None):
     """
     Get futures continuous contract daily price with optional filters.
 
@@ -143,13 +154,15 @@ def get_futures_continuous_contract_price(instrument_id: Union[str, List, None] 
         instrument_id = [instrument_id]
 
     if not start_date:
-        start_date = START_DATE_STR
+        # For continuous-contract research/update, default anchor starts from RESEARCH_START_DATE.
+        start_date = RESEARCH_START_DATE
     if not end_date:
-        end_date = END_DATE_STR
+        end_date = _today_date_str()
 
     if not from_database:
         df_list = []
         for idx, ins_id in enumerate(instrument_id, 1):
+            _raise_if_cancelled(cancel_event)
             root_instrument = _to_root_instrument(ins_id)
             log.info(f'[{idx}/{len(instrument_id)}] 正在获取 {ins_id} (root={root_instrument}) 的连续合约数据...')
             df_futures = build_roll_adjusted_continuous_contract_price(
@@ -161,10 +174,14 @@ def get_futures_continuous_contract_price(instrument_id: Union[str, List, None] 
                 load_prev_weighted_factor=load_prev_weighted_factor,
                 wait_time=wait_time,
                 research_start_date=RESEARCH_START_DATE,
+                cancel_event=cancel_event,
             )
+            if not isinstance(df_futures, pd.DataFrame):
+                continue
             df_futures['instrument_id'] = ins_id
             log.info(f'[{idx}/{len(instrument_id)}] {ins_id} 获取完成, {len(df_futures)} 行')
-            df_list.append(df_futures)
+            if not df_futures.empty:
+                df_list.append(df_futures)
         if not df_list:
             return pd.DataFrame(columns=[
                 'time', 'instrument_id', 'symbol',
@@ -195,7 +212,9 @@ def update_futures_continuous_contract_price(instrument_id: Union[str, List, Non
                                              end_date: str = None,
                                              load_prev_weighted_factor: bool = True,
                                              wait_time: float = 2.0,
-                                             method: str = 'insert_many'):
+                                             method: str = 'bulk_write_update',
+                                             only_update_new: bool = False,
+                                             cancel_event=None):
     """
     Update futures continuous contract daily price in database.
 
@@ -206,6 +225,10 @@ def update_futures_continuous_contract_price(instrument_id: Union[str, List, Non
         before start_date; otherwise start from 1.0 behavior.
     :param wait_time: wait time between query from akshare
     :param method: updating method
+    :param only_update_new:
+        - False: 按传入区间直接拉取并写入（原行为）。
+        - True: 仅拉取数据库中不存在的【日期, 合约】组合。
+          实现方式：先读取 DB 已有记录，按交易日历计算缺失日期段，再仅对缺失段调用行情接口。
     :return: None
     """
 
@@ -216,12 +239,160 @@ def update_futures_continuous_contract_price(instrument_id: Union[str, List, Non
 
     log.info(f'开始更新 {len(instrument_id)} 个合约的价格数据: {instrument_id}')
 
-    df_futures_price = get_futures_continuous_contract_price(instrument_id=instrument_id,
-                                                             start_date=start_date,
-                                                             end_date=end_date,
-                                                             from_database=False,
-                                                             load_prev_weighted_factor=load_prev_weighted_factor,
-                                                             wait_time=wait_time)
+    # Keep default aligned with the research back-adjustment anchor date.
+    start_date = start_date or RESEARCH_START_DATE
+    end_date = end_date or _today_date_str()
+
+    if not only_update_new:
+        _raise_if_cancelled(cancel_event)
+        df_futures_price = get_futures_continuous_contract_price(
+            instrument_id=instrument_id,
+            start_date=start_date,
+            end_date=end_date,
+            from_database=False,
+            load_prev_weighted_factor=load_prev_weighted_factor,
+            wait_time=wait_time,
+            cancel_event=cancel_event,
+        )
+    else:
+        # only_update_new=True: 简化策略
+        # 仅基于“数据库已有最早/最晚日期”与输入区间做前补/后补，
+        # 不再对区间内部缺口做细粒度分段补齐。
+        _raise_if_cancelled(cancel_event)
+        req_start_ts = pd.Timestamp(start_date)
+        req_end_ts = pd.Timestamp(end_date)
+        if req_start_ts > req_end_ts:
+            raise ValueError(f'start_date > end_date: {start_date} > {end_date}')
+
+        update_ranges: Dict[str, List[tuple[str, str]]] = {}
+
+        def _to_trading_range(seg_start_ts: pd.Timestamp,
+                              seg_end_ts: pd.Timestamp) -> Optional[tuple[str, str]]:
+            """Convert a calendar segment to [first_trading_day, last_trading_day]."""
+            if seg_start_ts > seg_end_ts:
+                return None
+            tds = get_trading_days(
+                start_date=seg_start_ts.strftime('%Y%m%d'),
+                end_date=seg_end_ts.strftime('%Y%m%d'),
+            )
+            if not tds:
+                return None
+            return tds[0].strftime('%Y%m%d'), tds[-1].strftime('%Y%m%d')
+        for ins in instrument_id:
+            ins_key = str(ins)
+            mongo_operator = {
+                '$and': [
+                    {'instrument_id': ins_key},
+                    {'time': {'$gte': req_start_ts}},
+                    {'time': {'$lte': req_end_ts}},
+                ]
+            }
+            df_existing = get_data(
+                database='futures',
+                collection='continuous_contract_price_daily',
+                mongo_operator=mongo_operator,
+            )
+
+            # DB 在请求区间内无数据 => 整段都需要更新。
+            if not isinstance(df_existing, pd.DataFrame) or df_existing.empty:
+                whole_seg = _to_trading_range(req_start_ts, req_end_ts)
+                if whole_seg is not None:
+                    update_ranges[ins_key] = [whole_seg]
+                    days_all = get_trading_days(start_date=whole_seg[0], end_date=whole_seg[1])
+                else:
+                    days_all = []
+                log.info(
+                    f'only_update_new=True instrument={ins_key}, '
+                    f'existing_range=none, update_ranges={update_ranges.get(ins_key, [])}, '
+                    f'update_trading_dates_count={len(days_all)}'
+                )
+                continue
+
+            df_existing = df_existing.copy()
+            df_existing['time'] = pd.to_datetime(df_existing['time'], errors='coerce')
+            df_existing = df_existing.dropna(subset=['time'])
+            if df_existing.empty:
+                whole_seg = _to_trading_range(req_start_ts, req_end_ts)
+                if whole_seg is not None:
+                    update_ranges[ins_key] = [whole_seg]
+                    days_all = get_trading_days(start_date=whole_seg[0], end_date=whole_seg[1])
+                else:
+                    days_all = []
+                log.info(
+                    f'only_update_new=True instrument={ins_key}, '
+                    f'existing_range=invalid, update_ranges={update_ranges.get(ins_key, [])}, '
+                    f'update_trading_dates_count={len(days_all)}'
+                )
+                continue
+
+            db_min = pd.Timestamp(df_existing['time'].min())
+            db_max = pd.Timestamp(df_existing['time'].max())
+
+            ranges: List[tuple[str, str]] = []
+            # 前补区间: [req_start, db_min-1]
+            if req_start_ts < db_min:
+                front_end = min(req_end_ts, db_min - pd.Timedelta(days=1))
+                if req_start_ts <= front_end:
+                    front_seg = _to_trading_range(req_start_ts, front_end)
+                    if front_seg is not None:
+                        ranges.append(front_seg)
+
+            # 后补区间: [db_max+1, req_end]
+            if req_end_ts > db_max:
+                back_start = max(req_start_ts, db_max + pd.Timedelta(days=1))
+                if back_start <= req_end_ts:
+                    back_seg = _to_trading_range(back_start, req_end_ts)
+                    if back_seg is not None:
+                        ranges.append(back_seg)
+
+            if ranges:
+                update_ranges[ins_key] = ranges
+
+            update_days_count = 0
+            for r_start, r_end in ranges:
+                update_days_count += len(get_trading_days(start_date=r_start, end_date=r_end))
+            log.info(
+                f'only_update_new=True instrument={ins_key}, '
+                f'existing_range=[{db_min.strftime("%Y%m%d")}, {db_max.strftime("%Y%m%d")}], '
+                f'update_ranges={ranges if ranges else "[]"}, '
+                f'update_trading_dates_count={update_days_count}'
+            )
+
+        if not update_ranges:
+            log.info(
+                f'only_update_new=True: 数据库中已包含全部目标【日期, 合约】, 无需更新。'
+                f'range=[{start_date}, {end_date}], instruments={instrument_id}'
+            )
+            return
+
+        # 针对每个合约仅拉取缺失日期段，减少不必要的 AkShare 请求和写入。
+        df_list: List[pd.DataFrame] = []
+        total_segments = sum(len(v) for v in update_ranges.values())
+        seg_idx = 0
+        for ins_key, ranges in update_ranges.items():
+            for seg_start, seg_end in ranges:
+                _raise_if_cancelled(cancel_event)
+                seg_idx += 1
+                log.info(
+                    f'only_update_new=True [{seg_idx}/{total_segments}] '
+                    f'更新缺失段 instrument={ins_key}, range=[{seg_start}, {seg_end}]'
+                )
+                df_seg = get_futures_continuous_contract_price(
+                    instrument_id=[ins_key],
+                    start_date=seg_start,
+                    end_date=seg_end,
+                    from_database=False,
+                    load_prev_weighted_factor=load_prev_weighted_factor,
+                    wait_time=wait_time,
+                    cancel_event=cancel_event,
+                )
+                if isinstance(df_seg, pd.DataFrame) and not df_seg.empty:
+                    df_list.append(df_seg)
+
+        if not df_list:
+            log.warning('only_update_new=True: 目标缺失段均未拉取到可写入数据，跳过写入。')
+            return
+        df_futures_price = pd.concat(df_list, ignore_index=True)
 
     if df_futures_price is None or df_futures_price.empty:
         log.warning('所有合约均无数据，跳过写入。')
@@ -247,7 +418,8 @@ def _to_root_instrument(instrument_id: str) -> str:
 def get_available_symbol(instrument_id: str,
                          year: Union[str, int],
                          month_list: Optional[Sequence[int]] = None,
-                         wait_time: float = 0.5) -> List[str]:
+                         wait_time: float = 0.5,
+                         cancel_event=None) -> List[str]:
     """Return available listed contract symbols for one product and year.
 
     Example: instrument_id='C', year='2025' -> ['C2501', 'C2505', ...]
@@ -268,6 +440,7 @@ def get_available_symbol(instrument_id: str,
 
     available: List[str] = []
     for m in months:
+        _raise_if_cancelled(cancel_event)
         symbol = f'{root}{yy}{int(m):02d}'
         try:
             df = ak.futures_zh_daily_sina(symbol=symbol)
@@ -311,7 +484,8 @@ def _normalize_zh_daily_symbol_df(df_raw: pd.DataFrame,
 def get_futures_symbol_info(instrument_id: Union[str, List, None] = None,
                             start_date: str = None,
                             end_date: str = None,
-                            wait_time: float = 0.5) -> List[str]:
+                            wait_time: float = 0.5,
+                            cancel_event=None) -> List[str]:
     """Get available listed symbols for one/many products in a date range."""
     if not instrument_id:
         instrument_id = get_futures_continuous_contract_info(from_database=True)['instrument_id'].tolist()
@@ -319,18 +493,24 @@ def get_futures_symbol_info(instrument_id: Union[str, List, None] = None,
         instrument_id = [instrument_id]
 
     if not start_date:
-        start_date = START_DATE_STR
+        start_date = RESEARCH_START_DATE
     if not end_date:
-        end_date = END_DATE_STR
+        end_date = _today_date_str()
 
     start_year = pd.to_datetime(start_date).year
     end_year = pd.to_datetime(end_date).year
     years = list(range(start_year - 1, end_year + 2))
     symbols: List[str] = []
     for ins_id in instrument_id:
+        _raise_if_cancelled(cancel_event)
         root = _to_root_instrument(ins_id)
         for y in years:
-            symbols.extend(get_available_symbol(instrument_id=root, year=y, wait_time=wait_time))
+            symbols.extend(get_available_symbol(
+                instrument_id=root,
+                year=y,
+                wait_time=wait_time,
+                cancel_event=cancel_event,
+            ))
     return sorted(list(dict.fromkeys(symbols)))
 
 
@@ -346,19 +526,19 @@ def _infer_root_from_symbol(symbol: str) -> str:
 
 def get_futures_symbol_price(instrument_id: Union[str, List, None] = None,
                              symbol_list: Union[str, List, None] = None,
-                             start_date: str = None,
-                             end_date: str = None,
+                             *,
+                             start_date: str,
+                             end_date: str,
                              from_database: bool = True,
-                             wait_time: float = 2.0) -> pd.DataFrame:
+                             wait_time: float = 2.0,
+                             cancel_event=None) -> pd.DataFrame:
     """Get symbol-level futures daily price either from DB cache or AkShare API.
 
     Output columns include:
     ['time', 'instrument_id', 'symbol', 'open', 'high', 'low', 'close', 'settle', 'volume', 'position']
     """
-    if not start_date:
-        start_date = START_DATE_STR
-    if not end_date:
-        end_date = END_DATE_STR
+    if not str(start_date or '').strip() or not str(end_date or '').strip():
+        raise ValueError('get_futures_symbol_price requires non-empty start_date and end_date.')
 
     if isinstance(symbol_list, str):
         symbol_list = [symbol_list]
@@ -369,6 +549,7 @@ def get_futures_symbol_price(instrument_id: Union[str, List, None] = None,
             start_date=start_date,
             end_date=end_date,
             wait_time=min(wait_time, 0.5),
+            cancel_event=cancel_event,
         )
 
     if not symbol_list:
@@ -400,6 +581,7 @@ def get_futures_symbol_price(instrument_id: Union[str, List, None] = None,
 
     df_list: List[pd.DataFrame] = []
     for symbol in symbol_list:
+        _raise_if_cancelled(cancel_event)
         try:
             df_raw = ak.futures_zh_daily_sina(symbol=symbol)
             df_symbol = _normalize_zh_daily_symbol_df(df_raw, symbol=symbol)
@@ -429,18 +611,17 @@ def get_futures_symbol_price(instrument_id: Union[str, List, None] = None,
 
 def update_futures_symbol_price(instrument_id: Union[str, List, None] = None,
                                 symbol_list: Union[str, List, None] = None,
-                                start_date: str = None,
-                                end_date: str = None,
+                                *,
+                                start_date: str,
+                                end_date: str,
                                 wait_time: float = 2.0,
                                 method: str = 'insert_many') -> None:
     """Update symbol-level futures daily price into futures.symbol_price_daily.
 
     For each symbol, write to DB immediately and log success/failure explicitly.
     """
-    if not start_date:
-        start_date = START_DATE_STR
-    if not end_date:
-        end_date = END_DATE_STR
+    if not str(start_date or '').strip() or not str(end_date or '').strip():
+        raise ValueError('update_futures_symbol_price requires non-empty start_date and end_date.')
 
     if isinstance(symbol_list, str):
         symbol_list = [symbol_list]
@@ -701,7 +882,8 @@ def build_roll_adjusted_continuous_contract_price(instrument_id: str,
                                                   continuous_instrument_id: Optional[str] = None,
                                                   load_prev_weighted_factor: bool = True,
                                                   wait_time: float = 2.0,
-                                                  research_start_date: str = RESEARCH_START_DATE) -> pd.DataFrame:
+                                                  research_start_date: str = RESEARCH_START_DATE,
+                                                  cancel_event=None) -> pd.DataFrame:
     """Build continuous daily price from symbol-level data with anti-leakage rollover rule.
 
     Output prices are RAW (non-adjusted). Use `price * weighted_factor` when adjusted
@@ -715,10 +897,11 @@ def build_roll_adjusted_continuous_contract_price(instrument_id: str,
         start_date=start_date,
         end_date=end_date,
         wait_time=min(wait_time, 0.5),
+        cancel_event=cancel_event,
     )
     if not symbols:
         log.warning(f'No available symbols found for instrument={root} in range [{start_date}, {end_date}].')
-        return pd.DataFrame()
+        return _empty_continuous_price_df()
 
     log.info(f'[continuous] {continuous_id}: 找到 {len(symbols)} 个合约, 开始获取价格数据...')
     panel_df = get_futures_symbol_price(
@@ -728,6 +911,7 @@ def build_roll_adjusted_continuous_contract_price(instrument_id: str,
         end_date=end_date,
         from_database=from_database,
         wait_time=wait_time,
+        cancel_event=cancel_event,
     )
     if panel_df.empty:
         if from_database:
@@ -818,8 +1002,8 @@ def compare_with_ak_main_continuous(instrument_id: str,
     return merged.loc[mismatch_mask].copy().reset_index(drop=True)
 
 
-def get_risk_free_rate(start_year: int = START_DATE.year,
-                       end_year: int = END_DATE.year,
+def get_risk_free_rate(start_year: int = int(RESEARCH_START_DATE[:4]),
+                       end_year: int = date.today().year,
                        from_database: bool = True):
     """
     Use 10-year China National Bond yield as risk-free rate.

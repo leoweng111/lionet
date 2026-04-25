@@ -33,6 +33,7 @@ from data.futures import (
     get_trading_days,
     update_futures_continuous_contract_info,
     update_futures_continuous_contract_price,
+    UpdateCancelledError,
 )
 from factors.factor_auto_search import GeneticFactorGenerator, FactorFusioner
 from factors.backtest import BackTester
@@ -42,6 +43,7 @@ from utils.params import (
     GP_DEFAULT_FITNESS_INDICATOR_WEIGHT,
     GP_INDICATOR_DIRECTION,
     GP_SUPPORTED_INDICATOR,
+    RESEARCH_START_DATE,
 )
 
 # ── App Init ───────────────────────────────────────────────────────────
@@ -94,6 +96,20 @@ async def _cleanup_stale_tasks():
                 },
             )
             total_modified += int(result.get("modified_count", 0) or 0)
+
+        # Market-data tasks use a dedicated collection.
+        md_result = update_many_data(
+            database="task",
+            collection=MARKET_DATA_TASK_COLLECTION,
+            mongo_operator={"status": "running"},
+            update_data={
+                "status": "interrupted",
+                "error": "服务重启，任务已中断",
+                "finished_at": datetime.now().isoformat(),
+                "updated_at": datetime.now().isoformat(),
+            },
+        )
+        total_modified += int(md_result.get("modified_count", 0) or 0)
         if total_modified > 0:
             print(f"[STARTUP] Marked {total_modified} stale running task(s) as interrupted.")
     except Exception as e:
@@ -653,10 +669,29 @@ def _load_market_data_task_from_db(task_id: str) -> Optional[Dict[str, Any]]:
     row = df.iloc[0].to_dict()
     logs_val = _sanitize_nan(row.get("logs"), [])
     params_val = _sanitize_nan(row.get("params"), {})
+    status_val = str(_sanitize_nan(row.get("status"), "unknown") or "unknown")
+    if status_val == 'running':
+        status_val = 'interrupted'
+        try:
+            update_one_data(
+                database="task",
+                collection=MARKET_DATA_TASK_COLLECTION,
+                mongo_operator={"task_id": task_id},
+                data={
+                    "status": "interrupted",
+                    "error": "服务重启，任务已中断",
+                    "finished_at": datetime.now().isoformat(),
+                    "updated_at": datetime.now().isoformat(),
+                },
+                upsert=False,
+            )
+        except Exception:
+            pass
+
     return {
         "task_id": task_id,
         "type": str(_sanitize_nan(row.get("task_type"), "") or ""),
-        "status": str(_sanitize_nan(row.get("status"), "unknown") or "unknown"),
+        "status": status_val,
         "started_at": _sanitize_nan(row.get("started_at"), ""),
         "finished_at": _sanitize_nan(row.get("finished_at"), ""),
         "error": _sanitize_nan(row.get("error")),
@@ -1474,11 +1509,12 @@ class UpdateInfoParams(BaseModel):
 
 class UpdatePriceParams(BaseModel):
     instrument_id: Optional[List[str]] = None
-    start_date: Optional[str] = None
+    start_date: Optional[str] = RESEARCH_START_DATE
     end_date: Optional[str] = None
     load_prev_weighted_factor: bool = True
     wait_time: float = 2.0
     method: str = "bulk_write_update"
+    only_update_new: bool = False
 
 
 class DeleteDataParams(BaseModel):
@@ -1593,6 +1629,14 @@ async def get_instrument_ids():
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.get("/api/market-data/config")
+async def get_market_data_config():
+    """Expose market-data page default config to avoid frontend hard-coded drift."""
+    return {
+        "research_start_date": RESEARCH_START_DATE,
+    }
+
+
 @app.post("/api/market-data/update-info")
 async def api_update_info(params: UpdateInfoParams):
     """Update continuous contract info."""
@@ -1634,6 +1678,7 @@ async def api_update_price(params: UpdatePriceParams):
         "type": "update-price", "status": "running",
         "started_at": datetime.now().isoformat(), "logs": [],
         "params": params.dict(),
+        "cancel_event": threading.Event(),
     }
     _save_market_data_task_to_db(task_id)
 
@@ -1642,22 +1687,34 @@ async def api_update_price(params: UpdatePriceParams):
         handler = _MarketDataLogHandler(task_id)
         lionet_logger.addHandler(handler)
         try:
+            effective_start_date = params.start_date or RESEARCH_START_DATE
+            cancel_event = market_data_tasks[task_id].get("cancel_event")
             lionet_logger.info(
                 f'价格数据更新任务启动: instrument_id={params.instrument_id}, '
-                f'start_date={params.start_date}, end_date={params.end_date}, '
+                f'start_date={effective_start_date}, end_date={params.end_date}, '
                 f'load_prev_weighted_factor={params.load_prev_weighted_factor}, '
-                f'wait_time={params.wait_time}, method={params.method}'
+                f'wait_time={params.wait_time}, method={params.method}, '
+                f'only_update_new={params.only_update_new}'
             )
             update_futures_continuous_contract_price(
                 instrument_id=params.instrument_id,
-                start_date=params.start_date,
+                start_date=effective_start_date,
                 end_date=params.end_date,
                 load_prev_weighted_factor=params.load_prev_weighted_factor,
                 wait_time=params.wait_time,
                 method=params.method,
+                only_update_new=params.only_update_new,
+                cancel_event=cancel_event,
             )
+            if market_data_tasks[task_id].get("status") == "terminated":
+                lionet_logger.warning('价格数据更新任务已被终止')
+                return
             lionet_logger.info('价格数据更新任务完成')
             market_data_tasks[task_id]["status"] = "completed"
+        except UpdateCancelledError as e:
+            market_data_tasks[task_id]["status"] = "terminated"
+            market_data_tasks[task_id]["error"] = str(e)
+            lionet_logger.warning(f'价格数据更新任务已终止: {e}')
         except Exception as e:
             market_data_tasks[task_id]["status"] = "failed"
             market_data_tasks[task_id]["error"] = str(e)
@@ -1670,6 +1727,52 @@ async def api_update_price(params: UpdatePriceParams):
 
     threading.Thread(target=_run, daemon=True).start()
     return {"task_id": task_id, "message": "价格数据更新任务已启动"}
+
+
+@app.post("/api/market-data/terminate/{task_id}")
+async def api_terminate_market_data_task(task_id: str):
+    """Terminate one running market-data task (currently used by update-price)."""
+    if task_id in market_data_tasks:
+        task = market_data_tasks[task_id]
+        if task.get("status") != "running":
+            raise HTTPException(status_code=400, detail=f"Task is not running (status={task.get('status')})")
+        cancel_event = task.get("cancel_event")
+        if cancel_event is not None:
+            cancel_event.set()
+        task["status"] = "terminated"
+        task["error"] = "用户手动终止"
+        logs = task.setdefault("logs", [])
+        logs.append(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} - WARNING - 用户手动终止任务")
+        task["finished_at"] = datetime.now().isoformat()
+        _save_market_data_task_to_db(task_id)
+        return {"task_id": task_id, "status": "terminated", "message": "任务已终止"}
+
+    # DB fallback: stale running task after restart -> interrupted
+    try:
+        df = get_data(database="task", collection=MARKET_DATA_TASK_COLLECTION, mongo_operator={"task_id": task_id})
+        if isinstance(df, pd.DataFrame) and not df.empty:
+            status_val = str(df.iloc[0].get("status", "") or "")
+            if status_val == "running":
+                update_one_data(
+                    database="task",
+                    collection=MARKET_DATA_TASK_COLLECTION,
+                    mongo_operator={"task_id": task_id},
+                    data={
+                        "status": "interrupted",
+                        "error": "服务重启，任务已中断",
+                        "finished_at": datetime.now().isoformat(),
+                        "updated_at": datetime.now().isoformat(),
+                    },
+                    upsert=False,
+                )
+                return {"task_id": task_id, "status": "interrupted", "message": "服务重启，任务已中断"}
+            raise HTTPException(status_code=400, detail=f"Task is not running (status={status_val})")
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+    raise HTTPException(status_code=404, detail="Task not found")
 
 
 @app.get("/api/market-data/task-status/{task_id}")
@@ -1732,10 +1835,28 @@ async def api_market_data_logs(
                 if not task_id_val:
                     continue
                 logs_val = _sanitize_nan(row.get("logs"), [])
+                status_val = str(_sanitize_nan(row.get("status"), "unknown") or "unknown")
+                if status_val == 'running':
+                    status_val = 'interrupted'
+                    try:
+                        update_one_data(
+                            database="task",
+                            collection=MARKET_DATA_TASK_COLLECTION,
+                            mongo_operator={"task_id": task_id_val},
+                            data={
+                                "status": "interrupted",
+                                "error": "服务重启，任务已中断",
+                                "finished_at": datetime.now().isoformat(),
+                                "updated_at": datetime.now().isoformat(),
+                            },
+                            upsert=False,
+                        )
+                    except Exception:
+                        pass
                 merged[task_id_val] = {
                     "task_id": task_id_val,
                     "task_type": str(_sanitize_nan(row.get("task_type"), "") or ""),
-                    "status": str(_sanitize_nan(row.get("status"), "unknown") or "unknown"),
+                    "status": status_val,
                     "started_at": _sanitize_nan(row.get("started_at"), ""),
                     "finished_at": _sanitize_nan(row.get("finished_at"), ""),
                     "error": _sanitize_nan(row.get("error")),

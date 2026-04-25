@@ -35,9 +35,11 @@ export const getHealth = () => api.get('/api/health')
 
 // ── Market Data Management ────────────────────────────
 export const getInstrumentIds = () => api.get('/api/market-data/instrument-ids')
+export const getMarketDataConfig = () => api.get('/api/market-data/config')
 export const updateContractInfo = (data) => api.post('/api/market-data/update-info', data)
 export const updateContractPrice = (data) => api.post('/api/market-data/update-price', data)
 export const getMarketDataTaskStatus = (taskId) => api.get(`/api/market-data/task-status/${taskId}`)
+export const terminateMarketDataTask = (taskId) => api.post(`/api/market-data/terminate/${taskId}`)
 export const getMarketDataLogs = (params) => api.get('/api/market-data/logs', { params })
 export const getMarketDataOverview = () => api.get('/api/market-data/overview')
 export const getMarketDataPrice = (params) => api.get('/api/market-data/price', { params })

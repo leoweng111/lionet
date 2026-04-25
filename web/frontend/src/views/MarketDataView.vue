@@ -57,7 +57,7 @@
               </el-select>
             </el-form-item>
             <el-form-item label="开始日期">
-              <el-input v-model="priceParams.start_date" placeholder="留空=20200101" clearable @change="onStartDateChange" />
+              <el-input v-model="priceParams.start_date" :placeholder="startDatePlaceholder" clearable @change="onStartDateChange" />
             </el-form-item>
             <el-form-item label="结束日期">
               <el-input v-model="priceParams.end_date" :placeholder="todayStr" clearable />
@@ -73,10 +73,24 @@
                 <el-option v-for="m in updateMethods" :key="m" :label="m" :value="m" />
               </el-select>
             </el-form-item>
+            <el-form-item label="仅更新缺失【日期,合约】">
+              <el-switch v-model="priceParams.only_update_new" />
+              <span style="margin-left:8px;color:#909399;font-size:12px;">
+                只获取并更新数据库中不存在的【日期，合约】
+              </span>
+            </el-form-item>
             <el-form-item>
               <el-button type="primary" :loading="priceLoading" @click="handleUpdatePrice">
                 <el-icon v-if="!priceLoading"><Upload /></el-icon> {{ priceLoading ? '更新中...' : '启动价格更新' }}
               </el-button>
+              <el-button
+                type="danger"
+                plain
+                :loading="priceStopping"
+                :disabled="!priceLoading || !currentPriceTaskId"
+                @click="handleStopPriceUpdate"
+                style="margin-left:8px;"
+              >停止</el-button>
             </el-form-item>
           </el-form>
           <div v-if="priceLogs.length" class="log-panel" style="margin-top:8px;">
@@ -260,14 +274,16 @@
 </template>
 
 <script setup>
-import { ref, reactive, onMounted, watch, nextTick } from 'vue'
+import { ref, reactive, computed, onMounted, watch, nextTick } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import * as echarts from 'echarts'
 import {
   getInstrumentIds,
+  getMarketDataConfig,
   updateContractInfo,
   updateContractPrice,
   getMarketDataTaskStatus,
+  terminateMarketDataTask,
   getMarketDataLogs,
   getMarketDataOverview,
   getMarketDataPrice,
@@ -286,6 +302,8 @@ const activeTab = ref('info')
 const instrumentIds = ref([])
 const todayStr = new Date().toISOString().slice(0, 10).replace(/-/g, '')
 const todayDashStr = new Date().toISOString().slice(0, 10)
+const researchStartDate = ref('20200101')
+const startDatePlaceholder = computed(() => `留空=${researchStartDate.value}`)
 
 const loadInstrumentIds = async () => {
   try {
@@ -294,8 +312,22 @@ const loadInstrumentIds = async () => {
   } catch { /* ignore */ }
 }
 
+const loadMarketDataConfig = async () => {
+  try {
+    const { data } = await getMarketDataConfig()
+    const rsd = String(data?.research_start_date || '').trim()
+    if (rsd) {
+      researchStartDate.value = rsd
+      if (!priceParams.start_date) priceParams.start_date = rsd
+    }
+  } catch {
+    // Keep local default when backend config request fails.
+  }
+}
+
 onMounted(() => {
   loadInstrumentIds()
+  loadMarketDataConfig()
   loadScheduleStatus()
   loadOperationLogs()
 })
@@ -329,6 +361,8 @@ const handleUpdateInfo = async () => {
 // ── Tab 2: Update Price ──
 const priceLoading = ref(false)
 const priceLogs = ref([])
+const priceStopping = ref(false)
+const currentPriceTaskId = ref('')
 const scheduleEnabled = ref(true)
 const priceParams = reactive({
   instrument_id: [],
@@ -337,6 +371,7 @@ const priceParams = reactive({
   load_prev_weighted_factor: true,
   wait_time: 2.0,
   method: 'bulk_write_update',
+  only_update_new: true,
 })
 
 const loadScheduleStatus = async () => {
@@ -352,43 +387,66 @@ const handleToggleSchedule = async (val) => {
   } catch { ElMessage.error('操作失败') }
 }
 const onStartDateChange = (val) => {
-  if (val && val !== '20200101' && val.trim()) {
+  if (val && val !== researchStartDate.value && val.trim()) {
     ElMessageBox.confirm(
-      '修改 start_date 可能导致后复权因子不统一。目前后复权的起始日期默认为 20200101，确认继续吗？',
+      `修改 start_date 可能导致后复权因子不统一。目前后复权的起始日期默认为 ${researchStartDate.value}，确认继续吗？`,
       '警告', { type: 'warning', confirmButtonText: '确认', cancelButtonText: '恢复默认' }
     ).catch(() => { priceParams.start_date = '' })
   }
 }
 const handleUpdatePrice = async () => {
   priceLoading.value = true
+  priceStopping.value = false
+  currentPriceTaskId.value = ''
   priceLogs.value = []
   try {
     const payload = {
       instrument_id: priceParams.instrument_id.length ? priceParams.instrument_id : null,
-      start_date: priceParams.start_date || null,
+      start_date: priceParams.start_date || researchStartDate.value,
       end_date: priceParams.end_date || null,
       load_prev_weighted_factor: priceParams.load_prev_weighted_factor,
       wait_time: priceParams.wait_time,
       method: priceParams.method,
+      only_update_new: priceParams.only_update_new,
     }
     const { data } = await updateContractPrice(payload)
+    currentPriceTaskId.value = data.task_id || ''
     ElMessage.success(data.message)
-    pollMarketTask(data.task_id, priceLogs, () => { priceLoading.value = false })
+    pollMarketTask(data.task_id, priceLogs, () => {
+      priceLoading.value = false
+      priceStopping.value = false
+      currentPriceTaskId.value = ''
+    })
   } catch (err) {
     ElMessage.error('启动失败: ' + (err.response?.data?.detail || err.message))
     priceLoading.value = false
+    priceStopping.value = false
+    currentPriceTaskId.value = ''
+  }
+}
+const handleStopPriceUpdate = async () => {
+  if (!currentPriceTaskId.value) return
+  try {
+    priceStopping.value = true
+    await terminateMarketDataTask(currentPriceTaskId.value)
+    ElMessage.success('已发送停止请求')
+  } catch (err) {
+    ElMessage.error('停止失败: ' + (err.response?.data?.detail || err.message))
+  } finally {
+    priceStopping.value = false
   }
 }
 
-// ── Polling helper ──
 const pollMarketTask = (taskId, logsRef, onDone) => {
   const timer = setInterval(async () => {
     try {
       const { data } = await getMarketDataTaskStatus(taskId)
       logsRef.value = data.logs || []
-      if (data.status === 'completed' || data.status === 'failed') {
+      if (['completed', 'failed', 'terminated', 'interrupted'].includes(data.status)) {
         clearInterval(timer)
         if (data.status === 'completed') ElMessage.success('任务完成')
+        else if (data.status === 'terminated') ElMessage.warning('任务已终止')
+        else if (data.status === 'interrupted') ElMessage.warning('任务中断（服务重启）')
         else ElMessage.error('任务失败: ' + (data.error || ''))
         if (onDone) onDone()
       }

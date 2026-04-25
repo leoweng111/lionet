@@ -1,6 +1,5 @@
 # This script contains some important universal paths.
 from pathlib import Path
-import datetime
 import os
 
 from .configuration import get_config
@@ -27,14 +26,6 @@ PREP_PATH = Path('/Users/wenglongao/prep')
 USER_NAME = 'leo'
 MONGODB_PASSWORD = get_config('password', 'mongodb_password')
 
-# time
-START_TIME = datetime.datetime(2001, 1, 1, 9, 30)
-START_DATE = datetime.date(2001, 1, 1)
-START_DATE_STR = '20010101'
-
-END_DATE = datetime.date.today()
-END_TIME = datetime.datetime.now()
-END_DATE_STR = datetime.date.today().strftime('%Y%m%d')
 
 # Futures back-adjustment anchor date:
 # adjusted price equals raw price on this date, then rolls apply cumulatively afterwards.
