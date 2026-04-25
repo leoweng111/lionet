@@ -80,7 +80,7 @@ def get_futures_continuous_contract_info(instrument_id: Union[str, List, None] =
 
 
 def update_futures_continuous_contract_info(instrument_id: Union[str, List, None] = None,
-                                            method: str = 'insert_many'):
+                                            method: str = 'bulk_write_update'):
     """
     Update futures continuous contract info in database.
     If a record with the same instrument_id already exists, it will be skipped.
@@ -508,7 +508,13 @@ def _empty_continuous_price_df() -> pd.DataFrame:
 
 def _load_prev_weighted_factor(continuous_instrument_id: str,
                                start_date: str) -> float:
-    """Load weighted_factor from the latest DB row before start_date."""
+    """Load weighted_factor from the latest DB row before start_date.
+
+    Raises
+    ------
+    ValueError
+        If no previous row exists, required columns are missing, or weighted_factor is invalid.
+    """
     mongo_operator = {
         '$and': [
             {'instrument_id': continuous_instrument_id},
@@ -521,21 +527,37 @@ def _load_prev_weighted_factor(continuous_instrument_id: str,
         mongo_operator=mongo_operator,
     )
     if not isinstance(df_prev, pd.DataFrame) or df_prev.empty:
-        return 1.0
+        raise ValueError(
+            f'No previous continuous price data found before start_date. '
+            f'instrument_id={continuous_instrument_id}, start_date={start_date}'
+        )
 
     df_prev = df_prev.copy()
     if 'time' not in df_prev.columns or 'weighted_factor' not in df_prev.columns:
-        return 1.0
+        raise ValueError(
+            f'Previous continuous data missing required columns. '
+            f'instrument_id={continuous_instrument_id}, start_date={start_date}, '
+            f'columns={list(df_prev.columns)}'
+        )
     df_prev['time'] = pd.to_datetime(df_prev['time'], errors='coerce')
     df_prev['weighted_factor'] = pd.to_numeric(df_prev['weighted_factor'], errors='coerce')
     df_prev = df_prev.dropna(subset=['time', 'weighted_factor'])
     if df_prev.empty:
-        return 1.0
+        raise ValueError(
+            f'Previous continuous data has no valid (time, weighted_factor). '
+            f'instrument_id={continuous_instrument_id}, start_date={start_date}'
+        )
 
     df_prev = df_prev.sort_values('time', ascending=False)
-    last_wf = float(df_prev.iloc[0]['weighted_factor'])
+    last_row = df_prev.iloc[0]
+    last_time = pd.Timestamp(last_row['time']).strftime('%Y-%m-%d')
+    last_wf = float(last_row['weighted_factor'])
     if not np.isfinite(last_wf) or last_wf <= 0:
-        return 1.0
+        raise ValueError(
+            f'Invalid previous weighted_factor. '
+            f'instrument_id={continuous_instrument_id}, start_date={start_date}, '
+            f'last_time={last_time}, weighted_factor={last_wf}'
+        )
     return last_wf
 
 
@@ -729,11 +751,12 @@ def build_roll_adjusted_continuous_contract_price(instrument_id: str,
                 f'start_date={start_date}, initial_weighted_factor={initial_weighted_factor}'
             )
         except Exception as e:
-            log.warning(
-                f'[continuous][weighted_factor] failed to load previous weighted_factor for '
-                f'instrument={continuous_id}, start_date={start_date}. fallback=1.0, error={e}'
+            # Strict mode by requirement: stop immediately instead of fallback=1.0
+            log.error(
+                f'[continuous][weighted_factor] strict load failed, terminate update. '
+                f'instrument_id={continuous_id}, start_date={start_date}, error={e}'
             )
-            initial_weighted_factor = 1.0
+            raise
 
     return _build_roll_adjusted_continuous_from_panel(
         df_panel=panel_df,

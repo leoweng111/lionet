@@ -23,7 +23,17 @@
               </el-button>
             </el-form-item>
           </el-form>
-          <LogPanel :logs="infoLogs" style="margin-top:16px;" />
+          <div v-if="infoLogs.length" class="log-panel" style="margin-top:16px;">
+            <div class="log-panel-header">操作日志 ({{ infoLogs.length }} 条)</div>
+            <div class="log-panel-body">
+              <div
+                v-for="(line, i) in infoLogs"
+                :key="`info_${i}`"
+                class="log-line"
+                :class="{ 'log-warn': line.includes('WARNING'), 'log-err': line.includes('ERROR') }"
+              >{{ line }}</div>
+            </div>
+          </div>
         </el-card>
       </el-tab-pane>
 
@@ -69,7 +79,17 @@
               </el-button>
             </el-form-item>
           </el-form>
-          <LogPanel :logs="priceLogs" style="margin-top:8px;" />
+          <div v-if="priceLogs.length" class="log-panel" style="margin-top:8px;">
+            <div class="log-panel-header">操作日志 ({{ priceLogs.length }} 条)</div>
+            <div class="log-panel-body">
+              <div
+                v-for="(line, i) in priceLogs"
+                :key="`price_${i}`"
+                class="log-line"
+                :class="{ 'log-warn': line.includes('WARNING'), 'log-err': line.includes('ERROR') }"
+              >{{ line }}</div>
+            </div>
+          </div>
         </el-card>
       </el-tab-pane>
 
@@ -151,7 +171,55 @@
         </el-card>
       </el-tab-pane>
 
-      <!-- ═══ Tab 5: 删除数据 ═══ -->
+      <!-- ═══ Tab 5: 操作日志 ═══ -->
+      <el-tab-pane label="操作日志" name="op-logs">
+        <el-card shadow="never">
+          <template #header>
+            <div style="display:flex;align-items:center;justify-content:space-between;">
+              <span style="font-weight:600;">数据库更新操作日志</span>
+              <div style="display:flex;align-items:center;gap:8px;">
+                <el-select v-model="opLogTaskType" placeholder="任务类型" clearable size="small" style="width:140px;">
+                  <el-option label="update-info" value="update-info" />
+                  <el-option label="update-price" value="update-price" />
+                </el-select>
+                <el-date-picker
+                  v-model="opLogDateRange"
+                  type="daterange"
+                  range-separator="至"
+                  start-placeholder="开始日期"
+                  end-placeholder="结束日期"
+                  value-format="YYYY-MM-DD"
+                  size="small"
+                />
+                <el-button size="small" :loading="opLogLoading" @click="loadOperationLogs">
+                  <el-icon><Refresh /></el-icon> 刷新日志
+                </el-button>
+              </div>
+            </div>
+          </template>
+
+          <el-table :data="operationLogs" stripe size="small" max-height="520" style="width:100%;" v-loading="opLogLoading">
+            <el-table-column prop="started_at" label="开始时间" width="180" show-overflow-tooltip />
+            <el-table-column prop="task_type" label="任务类型" width="110" />
+            <el-table-column prop="task_id" label="任务ID" width="130" show-overflow-tooltip />
+            <el-table-column label="状态" width="90">
+              <template #default="{ row }">
+                <el-tag :type="stType(row.status)" size="small">{{ row.status }}</el-tag>
+              </template>
+            </el-table-column>
+            <el-table-column prop="log_count" label="日志行数" width="90" />
+            <el-table-column prop="last_log" label="最后一条日志" min-width="420" show-overflow-tooltip />
+            <el-table-column label="操作" width="90">
+              <template #default="{ row }">
+                <el-button type="info" size="small" link @click="viewOperationTaskLogs(row)">日志</el-button>
+              </template>
+            </el-table-column>
+          </el-table>
+          <div style="margin-top:8px;color:#909399;font-size:12px;">共 {{ operationLogs.length }} 个任务</div>
+        </el-card>
+      </el-tab-pane>
+
+      <!-- ═══ Tab 6: 删除数据 ═══ -->
       <el-tab-pane label="数据删除" name="delete">
         <el-card shadow="never">
           <template #header><span style="font-weight:600;color:#f56c6c;">删除行情数据</span></template>
@@ -180,6 +248,14 @@
         </el-card>
       </el-tab-pane>
     </el-tabs>
+
+    <el-dialog v-model="opLogDialogVisible" title="任务日志" width="75%" top="8vh" destroy-on-close>
+      <div style="margin-bottom:8px; color:#909399; font-size:12px;">任务ID: {{ opLogDialogTaskId || '-' }}</div>
+      <div v-if="opLogDialogLines.length" class="op-log-detail-box">
+        <div v-for="(line, idx) in opLogDialogLines" :key="`op_log_${idx}`">{{ line }}</div>
+      </div>
+      <el-empty v-else description="当前任务暂无日志" :image-size="60" />
+    </el-dialog>
   </div>
 </template>
 
@@ -192,6 +268,7 @@ import {
   updateContractInfo,
   updateContractPrice,
   getMarketDataTaskStatus,
+  getMarketDataLogs,
   getMarketDataOverview,
   getMarketDataPrice,
   deleteMarketData,
@@ -202,11 +279,13 @@ import {
 defineOptions({ name: 'MarketDataView' })
 
 const updateMethods = ['bulk_write_update', 'update_one', 'insert_many']
+const stType = (s) => s === 'completed' ? 'success' : s === 'failed' ? 'danger' : 'warning'
 
 // ── Shared ──
 const activeTab = ref('info')
 const instrumentIds = ref([])
 const todayStr = new Date().toISOString().slice(0, 10).replace(/-/g, '')
+const todayDashStr = new Date().toISOString().slice(0, 10)
 
 const loadInstrumentIds = async () => {
   try {
@@ -218,6 +297,7 @@ const loadInstrumentIds = async () => {
 onMounted(() => {
   loadInstrumentIds()
   loadScheduleStatus()
+  loadOperationLogs()
 })
 
 // ── Log Panel (sub-component inline) ──
@@ -416,7 +496,49 @@ const renderKline = () => {
   })
 }
 
-// ── Tab 5: Delete ──
+// ── Tab 5: Operation Logs ──
+const opLogLoading = ref(false)
+const operationLogs = ref([])
+const opLogTaskType = ref('')
+const opLogDateRange = ref([todayDashStr, todayDashStr])
+const opLogDialogVisible = ref(false)
+const opLogDialogTaskId = ref('')
+const opLogDialogLines = ref([])
+
+const loadOperationLogs = async () => {
+  opLogLoading.value = true
+  try {
+    const params = {
+      start_date: opLogDateRange.value?.[0] || todayDashStr,
+      end_date: opLogDateRange.value?.[1] || todayDashStr,
+    }
+    if (opLogTaskType.value) params.task_type = opLogTaskType.value
+    const { data } = await getMarketDataLogs(params)
+    operationLogs.value = data.logs || []
+  } catch (err) {
+    ElMessage.error('日志加载失败: ' + (err.response?.data?.detail || err.message))
+  } finally {
+    opLogLoading.value = false
+  }
+}
+
+const viewOperationTaskLogs = async (row) => {
+  if (!row?.task_id) return
+  try {
+    const { data } = await getMarketDataTaskStatus(row.task_id)
+    opLogDialogTaskId.value = row.task_id
+    opLogDialogLines.value = data.logs || []
+    opLogDialogVisible.value = true
+  } catch (err) {
+    ElMessage.error('日志加载失败: ' + (err.response?.data?.detail || err.message))
+  }
+}
+
+watch(activeTab, (val) => {
+  if (val === 'op-logs') loadOperationLogs()
+})
+
+// ── Tab 6: Delete ──
 const deleteLoading = ref(false)
 const deleteResult = ref('')
 const deleteParams = reactive({ instrument_id_list: [], start_date: '', end_date: '' })
@@ -448,36 +570,6 @@ const handleDelete = async () => {
 }
 </script>
 
-<!-- LogPanel inline component -->
-<script>
-export default {
-  components: {
-    LogPanel: {
-      props: { logs: { type: Array, default: () => [] } },
-      template: `
-        <div v-if="logs.length" class="log-panel">
-          <div class="log-panel-header">操作日志 ({{ logs.length }} 条)</div>
-          <div class="log-panel-body" ref="logBody">
-            <div v-for="(line, i) in logs" :key="i" class="log-line"
-              :class="{ 'log-warn': line.includes('WARNING'), 'log-err': line.includes('ERROR') }">{{ line }}</div>
-          </div>
-        </div>
-      `,
-      watch: {
-        logs: {
-          handler() {
-            this.$nextTick(() => {
-              if (this.$refs.logBody) this.$refs.logBody.scrollTop = this.$refs.logBody.scrollHeight
-            })
-          },
-          deep: true,
-        },
-      },
-    },
-  },
-}
-</script>
-
 <style scoped>
 .page-header { margin-bottom: 16px; }
 .page-header h2 { display: flex; align-items: center; gap: 8px; margin: 0 0 4px; }
@@ -489,5 +581,18 @@ export default {
 .log-line { font-family: 'Menlo', 'Monaco', 'Courier New', monospace; font-size: 11px; line-height: 1.6; color: #d4d4d4; white-space: pre-wrap; word-break: break-all; }
 .log-warn { color: #e6a23c; }
 .log-err { color: #f56c6c; }
+
+.op-log-detail-box {
+  max-height: 65vh;
+  overflow: auto;
+  font-family: monospace;
+  font-size: 12px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  background: #0f111a;
+  color: #d6deeb;
+  border-radius: 6px;
+  padding: 10px;
+}
 </style>
 

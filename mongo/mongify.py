@@ -74,7 +74,8 @@ def bulk_write_update_data(database: str,
     :param database: database
     :param collection: collection
     :param df: data
-    :param filter_column:
+    :param filter_column: 如果数据库存在匹配 filter_dc 的文档 → 更新原数据（$set）
+                          如果不存在匹配文档 → 插入新数据（upsert=True）
     :return:
     BulkWriteResult 对象包含了执行批量写入操作后的结果。您可以查看以下属性来获取有关更新的信息：
     acknowledged：一个布尔值，指示批量写入是否已被确认。如果为 True，则表示写入操作已被确认；如果为 False，则表示写入操作未被确认。

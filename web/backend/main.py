@@ -60,6 +60,7 @@ tasks: Dict[str, Dict[str, Any]] = {}
 
 GP_TASK_COLLECTION = "gp_task"
 FUSION_TASK_COLLECTION = "fusion_task"
+MARKET_DATA_TASK_COLLECTION = "market_data_task"
 TASK_TYPE_GP = "gp_mining"
 TASK_TYPE_FUSION = "factor_fusion"
 
@@ -605,6 +606,63 @@ def _load_task_from_db(task_id: str) -> Optional[Dict[str, Any]]:
         except Exception:
             continue
     return None
+
+
+# In-memory store for market-data tasks (update-info / update-price)
+market_data_tasks: Dict[str, Dict[str, Any]] = {}
+
+
+def _save_market_data_task_to_db(task_id: str):
+    """Persist one market-data task snapshot into MongoDB."""
+    task = market_data_tasks.get(task_id)
+    if not task:
+        return
+    try:
+        update_one_data(
+            database="task",
+            collection=MARKET_DATA_TASK_COLLECTION,
+            mongo_operator={"task_id": task_id},
+            data={
+                "task_id": task_id,
+                "task_type": str(task.get("type") or ""),
+                "status": str(task.get("status") or "unknown"),
+                "started_at": task.get("started_at"),
+                "finished_at": task.get("finished_at"),
+                "params": task.get("params") or {},
+                "logs": list(task.get("logs") or [])[-5000:],
+                "error": task.get("error"),
+                "updated_at": datetime.now().isoformat(),
+            },
+            upsert=True,
+        )
+    except Exception as e:
+        print(f"[WARNING] Failed to persist market-data task {task_id}: {e}")
+
+
+def _load_market_data_task_from_db(task_id: str) -> Optional[Dict[str, Any]]:
+    try:
+        df = get_data(
+            database="task",
+            collection=MARKET_DATA_TASK_COLLECTION,
+            mongo_operator={"task_id": task_id},
+        )
+    except Exception:
+        return None
+    if not isinstance(df, pd.DataFrame) or df.empty:
+        return None
+    row = df.iloc[0].to_dict()
+    logs_val = _sanitize_nan(row.get("logs"), [])
+    params_val = _sanitize_nan(row.get("params"), {})
+    return {
+        "task_id": task_id,
+        "type": str(_sanitize_nan(row.get("task_type"), "") or ""),
+        "status": str(_sanitize_nan(row.get("status"), "unknown") or "unknown"),
+        "started_at": _sanitize_nan(row.get("started_at"), ""),
+        "finished_at": _sanitize_nan(row.get("finished_at"), ""),
+        "error": _sanitize_nan(row.get("error")),
+        "logs": logs_val if isinstance(logs_val, list) else [],
+        "params": params_val if isinstance(params_val, dict) else {},
+    }
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -1410,13 +1468,45 @@ async def get_task_detail(task_id: str):
 #  Market Data Management APIs
 # ══════════════════════════════════════════════════════════════════════
 
-# In-memory store for market-data tasks (update-info / update-price)
-market_data_tasks: Dict[str, Dict[str, Any]] = {}
+class UpdateInfoParams(BaseModel):
+    method: str = "bulk_write_update"
+
+
+class UpdatePriceParams(BaseModel):
+    instrument_id: Optional[List[str]] = None
+    start_date: Optional[str] = None
+    end_date: Optional[str] = None
+    load_prev_weighted_factor: bool = True
+    wait_time: float = 2.0
+    method: str = "bulk_write_update"
+
+
+class DeleteDataParams(BaseModel):
+    instrument_id_list: List[str]
+    start_date: Optional[str] = None
+    end_date: Optional[str] = None
+
 
 # ── Scheduled daily update ────────────────────────────────────────────
 _daily_update_enabled = True
-_daily_update_lock = threading.Lock()
 _daily_update_thread: Optional[threading.Thread] = None
+
+
+class _MarketDataLogHandler(logging.Handler):
+    def __init__(self, task_id: str):
+        super().__init__()
+        self.task_id = task_id
+
+    def emit(self, record):
+        if self.task_id not in market_data_tasks:
+            return
+        msg = record.getMessage()
+        log_line = f'{datetime.now().strftime("%Y-%m-%d %H:%M:%S")} - {record.levelname} - {msg}'
+        logs = market_data_tasks[self.task_id].setdefault("logs", [])
+        logs.append(log_line)
+        if len(logs) > 2000:
+            del logs[:-2000]
+        _save_market_data_task_to_db(self.task_id)
 
 
 def _run_daily_price_update():
@@ -1435,6 +1525,7 @@ def _run_daily_price_update():
             "scheduled": True,
         },
     }
+    _save_market_data_task_to_db(task_id)
     from utils.logging import log as lionet_logger
     handler = _MarketDataLogHandler(task_id)
     lionet_logger.addHandler(handler)
@@ -1456,24 +1547,25 @@ def _run_daily_price_update():
         lionet_logger.error(f'定时更新失败: {e}')
     finally:
         market_data_tasks[task_id]["finished_at"] = datetime.now().isoformat()
+        _save_market_data_task_to_db(task_id)
         lionet_logger.removeHandler(handler)
 
 
 def _daily_scheduler_loop():
-    """Simple scheduler: sleep until next day's target time then run update."""
     import time as _time
-    target_hour, target_minute = 18, 0  # 18:00 daily
+    from datetime import timedelta
+
+    target_hour, target_minute = 18, 0
     while _daily_update_enabled:
         now = datetime.now()
         target = now.replace(hour=target_hour, minute=target_minute, second=0, microsecond=0)
         if now >= target:
-            from datetime import timedelta
             target += timedelta(days=1)
         wait_seconds = (target - now).total_seconds()
-        # Sleep in small increments so we can respond to shutdown
         while wait_seconds > 0 and _daily_update_enabled:
-            _time.sleep(min(wait_seconds, 30))
-            wait_seconds -= 30
+            sleep_s = min(wait_seconds, 30)
+            _time.sleep(sleep_s)
+            wait_seconds -= sleep_s
         if _daily_update_enabled:
             try:
                 _run_daily_price_update()
@@ -1481,46 +1573,11 @@ def _daily_scheduler_loop():
                 pass
 
 
-class _MarketDataLogHandler(logging.Handler):
-    def __init__(self, task_id: str):
-        super().__init__()
-        self.task_id = task_id
-
-    def emit(self, record):
-        if self.task_id not in market_data_tasks:
-            return
-        msg = record.getMessage()
-        log_line = f'{datetime.now().strftime("%Y-%m-%d %H:%M:%S")} - {record.levelname} - {msg}'
-        logs = market_data_tasks[self.task_id].setdefault("logs", [])
-        logs.append(log_line)
-        if len(logs) > 2000:
-            del logs[:-2000]
-
-
 @app.on_event("startup")
 async def _start_daily_scheduler():
     global _daily_update_thread
     _daily_update_thread = threading.Thread(target=_daily_scheduler_loop, daemon=True)
     _daily_update_thread.start()
-
-
-class UpdateInfoParams(BaseModel):
-    method: str = "bulk_write_update"
-
-
-class UpdatePriceParams(BaseModel):
-    instrument_id: Optional[List[str]] = None
-    start_date: Optional[str] = None
-    end_date: Optional[str] = None
-    load_prev_weighted_factor: bool = True
-    wait_time: float = 2.0
-    method: str = "bulk_write_update"
-
-
-class DeleteDataParams(BaseModel):
-    instrument_id_list: List[str]
-    start_date: Optional[str] = None
-    end_date: Optional[str] = None
 
 
 @app.get("/api/market-data/instrument-ids")
@@ -1545,6 +1602,7 @@ async def api_update_info(params: UpdateInfoParams):
         "started_at": datetime.now().isoformat(), "logs": [],
         "params": params.dict(),
     }
+    _save_market_data_task_to_db(task_id)
 
     def _run():
         from utils.logging import log as lionet_logger
@@ -1561,6 +1619,7 @@ async def api_update_info(params: UpdateInfoParams):
             lionet_logger.error(f'合约信息更新失败: {e}')
         finally:
             market_data_tasks[task_id]["finished_at"] = datetime.now().isoformat()
+            _save_market_data_task_to_db(task_id)
             lionet_logger.removeHandler(handler)
 
     threading.Thread(target=_run, daemon=True).start()
@@ -1576,6 +1635,7 @@ async def api_update_price(params: UpdatePriceParams):
         "started_at": datetime.now().isoformat(), "logs": [],
         "params": params.dict(),
     }
+    _save_market_data_task_to_db(task_id)
 
     def _run():
         from utils.logging import log as lionet_logger
@@ -1605,6 +1665,7 @@ async def api_update_price(params: UpdatePriceParams):
             traceback.print_exc()
         finally:
             market_data_tasks[task_id]["finished_at"] = datetime.now().isoformat()
+            _save_market_data_task_to_db(task_id)
             lionet_logger.removeHandler(handler)
 
     threading.Thread(target=_run, daemon=True).start()
@@ -1614,9 +1675,11 @@ async def api_update_price(params: UpdatePriceParams):
 @app.get("/api/market-data/task-status/{task_id}")
 async def api_market_data_task_status(task_id: str):
     """Poll market-data task status and logs."""
-    if task_id not in market_data_tasks:
+    t = market_data_tasks.get(task_id)
+    if t is None:
+        t = _load_market_data_task_from_db(task_id)
+    if t is None:
         raise HTTPException(status_code=404, detail="Task not found")
-    t = market_data_tasks[task_id]
     return {
         "task_id": task_id,
         "type": t.get("type"),
@@ -1628,16 +1691,108 @@ async def api_market_data_task_status(task_id: str):
     }
 
 
+@app.get("/api/market-data/logs")
+async def api_market_data_logs(
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    task_type: Optional[str] = None,
+):
+    """Aggregate market-data operation logs with date filtering.
+
+    - 默认仅返回当天日志。
+    - 可通过 start_date / end_date 指定区间（YYYY-MM-DD 或 YYYYMMDD）。
+    - 返回维度为“每个 task_id 一条摘要记录”。
+    """
+
+    def _to_day_text(raw: Optional[str], default_day: str) -> str:
+        if not raw:
+            return default_day
+        text = str(raw).strip()
+        if len(text) == 8 and text.isdigit():
+            return f"{text[:4]}-{text[4:6]}-{text[6:8]}"
+        return text[:10]
+
+    def _in_range(ts: Optional[str], s_day: str, e_day: str) -> bool:
+        if not ts:
+            return False
+        day_text = str(ts)[:10]
+        return s_day <= day_text <= e_day
+
+    today_day = datetime.now().strftime("%Y-%m-%d")
+    start_day = _to_day_text(start_date, today_day)
+    end_day = _to_day_text(end_date, today_day)
+
+    merged: Dict[str, Dict[str, Any]] = {}
+
+    try:
+        db_df = get_data(database="task", collection=MARKET_DATA_TASK_COLLECTION, mongo_operator={})
+        if isinstance(db_df, pd.DataFrame) and not db_df.empty:
+            for _, row in db_df.iterrows():
+                task_id_val = str(_sanitize_nan(row.get("task_id"), "") or "")
+                if not task_id_val:
+                    continue
+                logs_val = _sanitize_nan(row.get("logs"), [])
+                merged[task_id_val] = {
+                    "task_id": task_id_val,
+                    "task_type": str(_sanitize_nan(row.get("task_type"), "") or ""),
+                    "status": str(_sanitize_nan(row.get("status"), "unknown") or "unknown"),
+                    "started_at": _sanitize_nan(row.get("started_at"), ""),
+                    "finished_at": _sanitize_nan(row.get("finished_at"), ""),
+                    "error": _sanitize_nan(row.get("error")),
+                    "logs": logs_val if isinstance(logs_val, list) else [],
+                }
+    except Exception:
+        pass
+
+    for task_id_val, task in market_data_tasks.items():
+        merged[task_id_val] = {
+            "task_id": task_id_val,
+            "task_type": str(task.get("type") or ""),
+            "status": str(task.get("status") or "unknown"),
+            "started_at": task.get("started_at"),
+            "finished_at": task.get("finished_at"),
+            "error": task.get("error"),
+            "logs": list(task.get("logs") or []),
+        }
+
+    rows: List[Dict[str, Any]] = []
+    for item in merged.values():
+        ttype = str(item.get("task_type") or "")
+        if task_type and task_type != ttype:
+            continue
+        started_at = str(item.get("started_at") or "")
+        finished_at = str(item.get("finished_at") or "")
+        if not (_in_range(started_at, start_day, end_day) or _in_range(finished_at, start_day, end_day)):
+            continue
+        logs = item.get("logs") or []
+        rows.append({
+            "task_id": item.get("task_id"),
+            "task_type": ttype,
+            "status": item.get("status"),
+            "started_at": started_at,
+            "finished_at": finished_at,
+            "day": started_at[:10] if started_at else (finished_at[:10] if finished_at else ""),
+            "log_count": len(logs),
+            "last_log": str(logs[-1]) if logs else "",
+            "error": item.get("error"),
+        })
+
+    rows = sorted(rows, key=lambda x: (x.get("started_at") or x.get("finished_at") or ""), reverse=True)
+    return {
+        "start_date": start_day,
+        "end_date": end_day,
+        "count": len(rows),
+        "logs": rows[:2000],
+    }
+
+
 @app.get("/api/market-data/overview")
 async def api_market_data_overview():
     """Return data overview: per instrument_id stats (queried per-instrument to avoid OOM)."""
-    import asyncio
 
     def _compute_overview():
         try:
-            # Get all known instrument_ids from contract info
-            from data.futures import get_futures_continuous_contract_info as _get_info
-            df_info = _get_info(instrument_id=None, from_database=True)
+            df_info = get_futures_continuous_contract_info(instrument_id=None, from_database=True)
             if df_info is None or df_info.empty:
                 return {"overview": []}
             all_ids = sorted(df_info["instrument_id"].dropna().unique().tolist())
@@ -1685,7 +1840,6 @@ async def api_market_data_overview():
                     actual_dates = set(df["time"].dt.date)
                     trading_day_dates = set(d.date() for d in trading_days)
                     missing_dates = sorted(trading_day_dates - actual_dates)
-                    missing_dates_count = len(missing_dates)
                     missing_dates_list = [d.strftime("%Y-%m-%d") for d in missing_dates]
 
                     result.append({
@@ -1694,10 +1848,10 @@ async def api_market_data_overview():
                         "end_date": max_date.strftime("%Y-%m-%d"),
                         "total_rows": total_rows,
                         "expected_bdays": expected_count,
-                        "missing_dates_count": missing_dates_count,
+                        "missing_dates_count": len(missing_dates),
                         "missing_dates": missing_dates_list,
                         "missing_fields": missing_fields,
-                        "status": "完整" if missing_dates_count <= 5 and not missing_fields else "有缺失",
+                        "status": "完整" if len(missing_dates) <= 5 and not missing_fields else "有缺失",
                     })
                 except Exception:
                     result.append({
@@ -1725,7 +1879,6 @@ async def api_get_price(
     end_date: Optional[str] = None,
 ):
     """Get price data for one instrument, for table display and K-line chart."""
-    import asyncio
 
     def _query():
         df = get_futures_continuous_contract_price(
@@ -1741,12 +1894,14 @@ async def api_get_price(
         df["time"] = df["time"].dt.strftime("%Y-%m-%d")
         if "_id" in df.columns:
             df = df.drop(columns=["_id"])
-        for c in ["open", "high", "low", "close", "settle", "volume", "position",
-                   "weighted_factor", "cur_weighted_factor"]:
+        for c in [
+            "open", "high", "low", "close", "settle", "volume", "position",
+            "weighted_factor", "cur_weighted_factor",
+        ]:
             if c in df.columns:
                 df[c] = pd.to_numeric(df[c], errors="coerce")
+
         columns = df.columns.tolist()
-        # Convert to records and sanitize non-JSON-safe values (NaN, inf, numpy types)
         rows = []
         for rec in df.to_dict(orient="records"):
             clean = {}
@@ -1756,8 +1911,8 @@ async def api_get_price(
                 elif isinstance(v, (np.integer,)):
                     clean[k] = int(v)
                 elif isinstance(v, (np.floating,)):
-                    f = float(v)
-                    clean[k] = None if (np.isnan(f) or np.isinf(f)) else f
+                    fv = float(v)
+                    clean[k] = None if (np.isnan(fv) or np.isinf(fv)) else fv
                 elif isinstance(v, (np.bool_,)):
                     clean[k] = bool(v)
                 else:
