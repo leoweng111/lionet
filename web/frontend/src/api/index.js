@@ -1,7 +1,11 @@
 import axios from 'axios'
 
+const apiBaseURL = (import.meta.env.VITE_API_BASE_URL || '').trim().replace(/\/$/, '')
+
 const api = axios.create({
-  baseURL: '',  // use Vite proxy in dev, same origin in prod
+  // Local dev can keep empty baseURL and rely on Vite proxy.
+  // GitHub Pages should set VITE_API_BASE_URL to backend public URL.
+  baseURL: apiBaseURL,
   timeout: 600000, // 10 min for long-running tasks
 })
 
