@@ -21,6 +21,14 @@
               <el-button type="primary" :loading="infoLoading" @click="handleUpdateInfo">
                 <el-icon v-if="!infoLoading"><Refresh /></el-icon> {{ infoLoading ? '更新中...' : '更新合约信息' }}
               </el-button>
+              <el-button
+                type="danger"
+                plain
+                :loading="infoStopping"
+                :disabled="!infoLoading || !currentInfoTaskId"
+                @click="handleStopInfoUpdate"
+                style="margin-left:8px;"
+              >停止</el-button>
             </el-form-item>
           </el-form>
           <div v-if="infoLogs.length" class="log-panel" style="margin-top:16px;">
@@ -337,24 +345,45 @@ onMounted(() => {
 
 // ── Tab 1: Update Info ──
 const infoLoading = ref(false)
+const infoStopping = ref(false)
+const currentInfoTaskId = ref('')
 const infoLogs = ref([])
 const infoParams = reactive({
   method: 'bulk_write_update',
 })
 const handleUpdateInfo = async () => {
   infoLoading.value = true
+  infoStopping.value = false
+  currentInfoTaskId.value = ''
   infoLogs.value = []
   try {
     const { data } = await updateContractInfo({ method: infoParams.method })
     const taskId = data.task_id
+    currentInfoTaskId.value = taskId || ''
     ElMessage.success(data.message)
     pollMarketTask(taskId, infoLogs, () => {
       infoLoading.value = false
+      infoStopping.value = false
+      currentInfoTaskId.value = ''
       loadInstrumentIds()
     })
   } catch (err) {
     ElMessage.error('更新失败: ' + (err.response?.data?.detail || err.message))
     infoLoading.value = false
+    infoStopping.value = false
+    currentInfoTaskId.value = ''
+  }
+}
+const handleStopInfoUpdate = async () => {
+  if (!currentInfoTaskId.value) return
+  try {
+    infoStopping.value = true
+    await terminateMarketDataTask(currentInfoTaskId.value)
+    ElMessage.success('已发送停止请求')
+  } catch (err) {
+    ElMessage.error('停止失败: ' + (err.response?.data?.detail || err.message))
+  } finally {
+    infoStopping.value = false
   }
 }
 

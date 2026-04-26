@@ -1,6 +1,7 @@
 import axios from 'axios'
 
 const apiBaseURL = (import.meta.env.VITE_API_BASE_URL || '').trim().replace(/\/$/, '')
+const isNgrokPublicDomain = /ngrok-free\.(app|dev)$/i.test(new URL(apiBaseURL || 'http://localhost').host)
 
 const api = axios.create({
   // Local dev can keep empty baseURL and rely on Vite proxy.
@@ -8,6 +9,12 @@ const api = axios.create({
   baseURL: apiBaseURL,
   timeout: 600000, // 10 min for long-running tasks
 })
+
+// ngrok free public endpoint may return browser warning page (ERR_NGROK_6024)
+// for browser-like requests. This header bypasses that page for API calls.
+if (isNgrokPublicDomain) {
+  api.defaults.headers.common['ngrok-skip-browser-warning'] = 'true'
+}
 
 // ── Versions & Factors ────────────────────────────────
 export const getVersions = () => api.get('/api/versions')
