@@ -50,7 +50,8 @@ const routes = [
 ]
 
 const router = createRouter({
-  history: createWebHistory(),
+  // Use Vite base so project-site routes become /lionet/* on GitHub Pages.
+  history: createWebHistory(import.meta.env.BASE_URL),
   routes,
 })
 
