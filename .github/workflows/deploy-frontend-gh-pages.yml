@@ -41,6 +41,16 @@ jobs:
           ls -la web/frontend
           test -f web/frontend/package-lock.json && echo "lockfile found" || echo "lockfile missing"
 
+      - name: Validate backend URL variable
+        run: |
+          if [ -z "${VITE_API_BASE_URL}" ]; then
+            echo "ERROR: VITE_API_BASE_URL is empty."
+            echo "Set it at: Settings -> Secrets and variables -> Actions -> Variables"
+            exit 1
+          fi
+          echo "VITE_API_BASE_URL detected"
+          echo "host=$(echo "${VITE_API_BASE_URL}" | sed -E 's#(https?://[^/]+).*#\1#')"
+
       - name: Install dependencies
         working-directory: web/frontend
         run: |
@@ -49,6 +59,13 @@ jobs:
           else
             npm install
           fi
+
+      - name: Write production env
+        working-directory: web/frontend
+        run: |
+          cat > .env.production << 'EOF'
+          VITE_API_BASE_URL=${{ vars.VITE_API_BASE_URL }}
+          EOF
 
       - name: Build
         working-directory: web/frontend
