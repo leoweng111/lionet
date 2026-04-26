@@ -54,8 +54,14 @@ jobs:
       - name: Install dependencies
         working-directory: web/frontend
         run: |
+          pwd
+          ls -la
+          test -f package.json && echo "package.json found" || echo "package.json missing"
+          node -v
+          npm -v
           if [ -f package-lock.json ]; then
-            npm ci
+            echo "Try npm ci first"
+            npm ci || (echo "npm ci failed, fallback to npm install" && npm install)
           else
             npm install
           fi
