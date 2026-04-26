@@ -20,9 +20,6 @@ concurrency:
 jobs:
   build:
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: web/frontend
     env:
       # Set this in GitHub Repository Settings -> Secrets and variables -> Actions -> Variables.
       # Example: https://your-backend.example.com
@@ -37,13 +34,28 @@ jobs:
         with:
           node-version: 20
 
+      - name: Debug workspace
+        run: |
+          pwd
+          ls -la
+          ls -la web/frontend
+          test -f web/frontend/package-lock.json && echo "lockfile found" || echo "lockfile missing"
+
       - name: Install dependencies
-        run: npm ci
+        working-directory: web/frontend
+        run: |
+          if [ -f package-lock.json ]; then
+            npm ci
+          else
+            npm install
+          fi
 
       - name: Build
+        working-directory: web/frontend
         run: npm run build
 
       - name: SPA fallback + disable Jekyll
+        working-directory: web/frontend
         run: |
           cp dist/index.html dist/404.html
           touch dist/.nojekyll
