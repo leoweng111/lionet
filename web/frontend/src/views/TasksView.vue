@@ -2,7 +2,7 @@
   <div>
     <div class="page-header">
       <h2><el-icon><List /></el-icon> 任务管理</h2>
-      <p>查看因子挖掘与因子融合任务的运行状态、进度和历史记录</p>
+      <p>查看因子挖掘、因子融合、行情数据任务的运行状态、进度和历史记录</p>
     </div>
     <el-card shadow="hover">
       <template #header>
@@ -27,10 +27,11 @@
       <el-table :data="taskList" stripe border size="small" style="width:100%" @row-click="viewDetail">
         <el-table-column prop="task_id" label="任务ID" width="100" />
         <el-table-column prop="task_type" label="任务类型" width="100" />
+        <el-table-column prop="task_sub_type" label="子类型" width="120" show-overflow-tooltip />
         <el-table-column prop="version" label="版本" width="220" show-overflow-tooltip />
         <el-table-column prop="status" label="状态" width="100"><template #default="{row}"><el-tag :type="stType(row.status)" size="small" effect="dark">{{ row.status }}</el-tag></template></el-table-column>
         <el-table-column prop="progress" label="进度" min-width="300" show-overflow-tooltip />
-        <el-table-column label="GP演化" width="200"><template #default="{row}"><template v-if="row.gp_progress"><el-progress :percentage="Math.round(row.gp_progress.generation/row.gp_progress.total_generations*100)" :stroke-width="14" :text-inside="true" style="width:100%" /><div style="font-size:11px;color:#606266;margin-top:2px;">{{ row.gp_progress.generation }}/{{ row.gp_progress.total_generations }}代 best={{ row.gp_progress.global_best_penalized?.toFixed(4) }}</div></template><span v-else style="color:#c0c4cc;">-</span></template></el-table-column>
+        <el-table-column label="GP演化" width="200"><template #default="{row}"><template v-if="row.task_type_code === 'gp_mining' && row.gp_progress"><el-progress :percentage="Math.round(row.gp_progress.generation/row.gp_progress.total_generations*100)" :stroke-width="14" :text-inside="true" style="width:100%" /><div style="font-size:11px;color:#606266;margin-top:2px;">{{ row.gp_progress.generation }}/{{ row.gp_progress.total_generations }}代 best={{ row.gp_progress.global_best_penalized?.toFixed(4) }}</div></template><span v-else style="color:#c0c4cc;">-</span></template></el-table-column>
         <el-table-column prop="started_at" label="开始时间" width="180" show-overflow-tooltip />
         <el-table-column label="操作" width="220"><template #default="{row}"><el-button size="small" type="primary" link @click.stop="viewDetail(row)">详情</el-button><el-button size="small" type="info" link @click.stop="viewLogs(row)">日志</el-button><el-button size="small" type="danger" link @click.stop="handleTerminate(row)" :disabled="!canTerminate(row)">终止</el-button></template></el-table-column>
       </el-table>
@@ -71,7 +72,7 @@
           <div style="white-space:pre-wrap; line-height:1.6; font-size:13px;">{{ buildResultOverview(dd) }}</div>
         </el-card>
 
-        <template v-if="dd.result_summary && !isFusionTask(dd)">
+        <template v-if="dd.result_summary && isMiningTask(dd)">
           <el-descriptions :column="1" size="small" border style="margin-bottom:16px;">
             <el-descriptions-item label="入选因子"><el-tag v-for="f in (dd.result_summary.selected_fc_name_list||[])" :key="f" size="small" style="margin:2px;">{{ f }}</el-tag><span v-if="!(dd.result_summary.selected_fc_name_list||[]).length" style="color:#909399;">无</span></el-descriptions-item>
             <el-descriptions-item label="版本">{{ dd.result_summary.version }}</el-descriptions-item>
@@ -79,7 +80,7 @@
             <el-descriptions-item label="消息" v-if="dd.result_summary.message">{{ dd.result_summary.message }}</el-descriptions-item>
           </el-descriptions>
         </template>
-        <template v-if="dd.result && !isFusionTask(dd)">
+        <template v-if="dd.result && isMiningTask(dd)">
           <el-descriptions :column="1" size="small" border style="margin-bottom:16px;">
             <el-descriptions-item label="入选因子"><el-tag v-for="f in (dd.result.selected_fc_name_list||[])" :key="f" size="small" style="margin:2px;">{{ f }}</el-tag><span v-if="!(dd.result.selected_fc_name_list||[]).length" style="color:#909399;">无</span></el-descriptions-item>
             <el-descriptions-item label="版本">{{ dd.result.version }}</el-descriptions-item>
@@ -123,15 +124,17 @@
 <script setup>
 import { ref, onMounted, onUnmounted } from 'vue'
 import { ElMessageBox, ElMessage } from 'element-plus'
-import { getTasks, getTaskDetail, terminateMining } from '../api'
+import { getTasks, getTaskDetail, terminateMining, terminateMarketDataTask } from '../api'
 import NavChart from '../components/NavChart.vue'
 
 const loading = ref(false), taskList = ref([]), dlgVisible = ref(false), dd = ref(null)
 const logDlgVisible = ref(false), taskLogs = ref([]), logTaskId = ref('')
 const dateRange = ref([])
 const stType = (s) => s === 'completed' ? 'success' : s === 'failed' ? 'danger' : s === 'terminated' ? 'info' : s === 'interrupted' ? 'warning' : 'warning'
-const isFusionTask = (task) => task?.task_type === '因子融合'
-const canTerminate = (row) => row?.status === 'running' && !isFusionTask(row)
+const isFusionTask = (task) => task?.task_type_code === 'factor_fusion' || task?.task_type === '因子融合'
+const isMarketTask = (task) => task?.task_type_code === 'market_data' || task?.task_type === '行情数据'
+const isMiningTask = (task) => task?.task_type_code === 'gp_mining' || task?.task_type === '因子挖掘'
+const canTerminate = (row) => row?.status === 'running' && (isMiningTask(row) || isMarketTask(row))
 const fusionResult = (detail) => detail?.result || detail?.result_summary || null
 const fusionChartTooltip = (detail, curveName) => {
   const fr = fusionResult(detail)
@@ -172,6 +175,15 @@ const prettyMessage = (msg) => {
 const buildResultOverview = (detail) => {
   if (!detail) return ''
   if (detail.result_overview) return detail.result_overview
+  if (isMarketTask(detail)) {
+    const subtype = detail.task_sub_type || '-'
+    return [
+      '行情数据任务结果',
+      `子类型: ${subtype}`,
+      detail.progress ? `进度: ${detail.progress}` : '',
+      detail.error ? `错误: ${detail.error}` : '',
+    ].filter(Boolean).join('\n')
+  }
   if (isFusionTask(detail)) {
     const source = fusionResult(detail) || {}
     const metrics = source.final_metrics ? Object.entries(source.final_metrics).map(([k, v]) => `${k}=${Number(v).toFixed(6)}`).join(', ') : ''
@@ -230,7 +242,8 @@ const viewLogs = async (row) => {
 const handleTerminate = async (row) => {
   try {
     await ElMessageBox.confirm(`确定要终止任务 ${row.task_id} 吗？`, '确认终止', { confirmButtonText: '终止', cancelButtonText: '取消', type: 'warning' })
-    await terminateMining(row.task_id)
+    if (isMarketTask(row)) await terminateMarketDataTask(row.task_id)
+    else await terminateMining(row.task_id)
     ElMessage.success('任务已终止')
     fetchTasks()
   } catch (e) {

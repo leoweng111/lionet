@@ -56,6 +56,7 @@ export const getMarketDataOverview = () => api.get('/api/market-data/overview')
 export const getMarketDataPrice = (params) => api.get('/api/market-data/price', { params })
 export const deleteMarketData = (data) => api.post('/api/market-data/delete', data)
 export const getScheduledStatus = () => api.get('/api/market-data/scheduled-status')
+export const updateScheduledConfig = (data) => api.post('/api/market-data/schedule-config', data)
 export const toggleSchedule = (enabled) => api.post(`/api/market-data/toggle-schedule?enabled=${enabled}`)
 
 export default api

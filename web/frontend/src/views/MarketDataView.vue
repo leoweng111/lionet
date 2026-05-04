@@ -52,8 +52,8 @@
             <div style="display:flex;align-items:center;justify-content:space-between;">
               <span style="font-weight:600;">更新连续合约价格</span>
               <div style="display:flex;align-items:center;gap:12px;">
-                <span style="font-size:12px;color:#909399;">每日定时更新(18:00)</span>
-                <el-switch v-model="scheduleEnabled" @change="handleToggleSchedule" />
+                <span style="font-size:12px;color:#909399;">每日自动更新</span>
+                <el-switch v-model="scheduleParams.enabled" @change="handleScheduleEnabledChange" />
               </div>
             </div>
           </template>
@@ -101,6 +101,60 @@
               >停止</el-button>
             </el-form-item>
           </el-form>
+
+          <el-divider content-position="left">自动价格更新配置（T日更新T-1日）</el-divider>
+          <el-form :model="scheduleParams" label-width="160px" size="small" style="max-width:600px;">
+            <el-form-item label="自动更新时间">
+              <el-time-picker
+                v-model="scheduleTimeValue"
+                format="HH:mm"
+                value-format="HH:mm"
+                :clearable="false"
+                :disabled="!scheduleParams.enabled"
+                style="width:100%;"
+              />
+            </el-form-item>
+            <el-form-item label="自动更新合约（可多选）">
+              <el-select
+                v-model="scheduleParams.instrument_id"
+                multiple
+                filterable
+                allow-create
+                clearable
+                placeholder="默认C0"
+                :disabled="!scheduleParams.enabled"
+                style="width:100%;"
+              >
+                <el-option v-for="id in instrumentIds" :key="`auto_${id}`" :label="id" :value="id" />
+              </el-select>
+            </el-form-item>
+            <el-form-item label="继续后复权因子">
+              <el-switch v-model="scheduleParams.load_prev_weighted_factor" :disabled="!scheduleParams.enabled" />
+            </el-form-item>
+            <el-form-item label="请求间隔(秒)">
+              <el-input-number
+                v-model="scheduleParams.wait_time"
+                :min="0"
+                :max="30"
+                :step="0.5"
+                :precision="1"
+                :disabled="!scheduleParams.enabled"
+                style="width:100%;"
+              />
+            </el-form-item>
+            <el-form-item label="更新方式(method)">
+              <el-select v-model="scheduleParams.method" :disabled="!scheduleParams.enabled" style="width:100%;">
+                <el-option v-for="m in updateMethods" :key="`auto_method_${m}`" :label="m" :value="m" />
+              </el-select>
+            </el-form-item>
+            <el-form-item label="仅更新缺失【日期,合约】">
+              <el-switch v-model="scheduleParams.only_update_new" :disabled="!scheduleParams.enabled" />
+            </el-form-item>
+            <el-form-item>
+              <el-button type="success" plain @click="saveScheduleConfig" :loading="scheduleSaving">保存自动更新配置</el-button>
+            </el-form-item>
+          </el-form>
+
           <div v-if="priceLogs.length" class="log-panel" style="margin-top:8px;">
             <div class="log-panel-header">操作日志 ({{ priceLogs.length }} 条)</div>
             <div class="log-panel-body">
@@ -297,6 +351,7 @@ import {
   getMarketDataPrice,
   deleteMarketData,
   getScheduledStatus,
+  updateScheduledConfig,
   toggleSchedule,
 } from '../api'
 
@@ -392,7 +447,22 @@ const priceLoading = ref(false)
 const priceLogs = ref([])
 const priceStopping = ref(false)
 const currentPriceTaskId = ref('')
-const scheduleEnabled = ref(true)
+const scheduleSaving = ref(false)
+const scheduleParams = reactive({
+  enabled: true,
+  schedule_time: '18:00',
+  instrument_id: ['C0'],
+  load_prev_weighted_factor: true,
+  wait_time: 2.0,
+  method: 'bulk_write_update',
+  only_update_new: true,
+})
+const scheduleTimeValue = computed({
+  get: () => scheduleParams.schedule_time || '18:00',
+  set: (val) => {
+    scheduleParams.schedule_time = val || '18:00'
+  },
+})
 const priceParams = reactive({
   instrument_id: [],
   start_date: '',
@@ -406,14 +476,47 @@ const priceParams = reactive({
 const loadScheduleStatus = async () => {
   try {
     const { data } = await getScheduledStatus()
-    scheduleEnabled.value = data.enabled
+    scheduleParams.enabled = !!data.enabled
+    scheduleParams.schedule_time = data.schedule_time || '18:00'
+    scheduleParams.instrument_id = Array.isArray(data.instrument_id) && data.instrument_id.length
+      ? data.instrument_id
+      : ['C0']
+    scheduleParams.load_prev_weighted_factor = data.load_prev_weighted_factor !== false
+    scheduleParams.wait_time = Number.isFinite(Number(data.wait_time)) ? Number(data.wait_time) : 2.0
+    scheduleParams.method = data.method || 'bulk_write_update'
+    scheduleParams.only_update_new = data.only_update_new !== false
   } catch { /* ignore */ }
 }
-const handleToggleSchedule = async (val) => {
+
+const saveScheduleConfig = async () => {
+  try {
+    scheduleSaving.value = true
+    await updateScheduledConfig({
+      enabled: scheduleParams.enabled,
+      schedule_time: scheduleParams.schedule_time,
+      instrument_id: scheduleParams.instrument_id,
+      load_prev_weighted_factor: scheduleParams.load_prev_weighted_factor,
+      wait_time: scheduleParams.wait_time,
+      method: scheduleParams.method,
+      only_update_new: scheduleParams.only_update_new,
+    })
+    ElMessage.success('自动更新配置已保存')
+  } catch (err) {
+    ElMessage.error('保存失败: ' + (err.response?.data?.detail || err.message))
+  } finally {
+    scheduleSaving.value = false
+  }
+}
+
+const handleScheduleEnabledChange = async (val) => {
   try {
     await toggleSchedule(val)
+    scheduleParams.enabled = !!val
+    await saveScheduleConfig()
     ElMessage.success(val ? '已开启定时更新' : '已关闭定时更新')
-  } catch { ElMessage.error('操作失败') }
+  } catch {
+    ElMessage.error('操作失败')
+  }
 }
 const onStartDateChange = (val) => {
   if (val && val !== researchStartDate.value && val.trim()) {

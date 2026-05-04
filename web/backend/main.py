@@ -65,14 +65,36 @@ FUSION_TASK_COLLECTION = "fusion_task"
 MARKET_DATA_TASK_COLLECTION = "market_data_task"
 TASK_TYPE_GP = "gp_mining"
 TASK_TYPE_FUSION = "factor_fusion"
+TASK_TYPE_MARKET_DATA = "market_data"
+MARKET_DATA_SCHEDULE_CONFIG_TASK_ID = "market_data_schedule_config"
+MARKET_DATA_SCHEDULE_CONFIG_TYPE = "schedule-config"
 
 
 def _task_type_label(task_type: Optional[str]) -> str:
-    return "因子融合" if task_type == TASK_TYPE_FUSION else "因子挖掘"
+    if task_type == TASK_TYPE_FUSION:
+        return "因子融合"
+    if task_type == TASK_TYPE_MARKET_DATA:
+        return "行情数据"
+    return "因子挖掘"
 
 
 def _task_collection(task_type: Optional[str]) -> str:
     return FUSION_TASK_COLLECTION if task_type == TASK_TYPE_FUSION else GP_TASK_COLLECTION
+
+
+def _default_market_schedule_config() -> Dict[str, Any]:
+    return {
+        "enabled": True,
+        "schedule_time": "18:00",
+        "instrument_id": ["C0"],
+        "load_prev_weighted_factor": True,
+        "wait_time": 2.0,
+        "method": "bulk_write_update",
+        "only_update_new": True,
+    }
+
+
+_daily_schedule_config: Dict[str, Any] = _default_market_schedule_config()
 
 
 # ── Startup: clean up stale "running" tasks in DB ─────────────────────
@@ -114,6 +136,12 @@ async def _cleanup_stale_tasks():
             print(f"[STARTUP] Marked {total_modified} stale running task(s) as interrupted.")
     except Exception as e:
         print(f"[STARTUP] Failed to clean up stale tasks: {e}")
+
+    try:
+        _daily_schedule_config.update(_load_market_schedule_config_from_db())
+        _save_market_schedule_config_to_db()
+    except Exception as e:
+        print(f"[STARTUP] Failed to load market schedule config: {e}")
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -634,13 +662,16 @@ def _save_market_data_task_to_db(task_id: str):
     if not task:
         return
     try:
+        task_type_val = str(task.get("type") or "")
+        record_type = "config" if task_type_val == MARKET_DATA_SCHEDULE_CONFIG_TYPE else "task"
         update_one_data(
             database="task",
             collection=MARKET_DATA_TASK_COLLECTION,
             mongo_operator={"task_id": task_id},
             data={
                 "task_id": task_id,
-                "task_type": str(task.get("type") or ""),
+                "task_type": task_type_val,
+                "record_type": record_type,
                 "status": str(task.get("status") or "unknown"),
                 "started_at": task.get("started_at"),
                 "finished_at": task.get("finished_at"),
@@ -667,6 +698,8 @@ def _load_market_data_task_from_db(task_id: str) -> Optional[Dict[str, Any]]:
     if not isinstance(df, pd.DataFrame) or df.empty:
         return None
     row = df.iloc[0].to_dict()
+    if str(_sanitize_nan(row.get("record_type"), "task") or "task") == "config":
+        return None
     logs_val = _sanitize_nan(row.get("logs"), [])
     params_val = _sanitize_nan(row.get("params"), {})
     status_val = str(_sanitize_nan(row.get("status"), "unknown") or "unknown")
@@ -698,6 +731,36 @@ def _load_market_data_task_from_db(task_id: str) -> Optional[Dict[str, Any]]:
         "logs": logs_val if isinstance(logs_val, list) else [],
         "params": params_val if isinstance(params_val, dict) else {},
     }
+
+
+def _load_market_schedule_config_from_db() -> Dict[str, Any]:
+    cfg = _default_market_schedule_config()
+    try:
+        df = get_data(
+            database="task",
+            collection=MARKET_DATA_TASK_COLLECTION,
+            mongo_operator={"task_id": MARKET_DATA_SCHEDULE_CONFIG_TASK_ID},
+        )
+        if not isinstance(df, pd.DataFrame) or df.empty:
+            return cfg
+        params_val = _sanitize_nan(df.iloc[0].get("params"), {})
+        if isinstance(params_val, dict):
+            cfg.update(params_val)
+    except Exception:
+        return cfg
+    return cfg
+
+
+def _save_market_schedule_config_to_db() -> None:
+    market_data_tasks[MARKET_DATA_SCHEDULE_CONFIG_TASK_ID] = {
+        "type": MARKET_DATA_SCHEDULE_CONFIG_TYPE,
+        "status": "config",
+        "started_at": datetime.now().isoformat(),
+        "finished_at": datetime.now().isoformat(),
+        "params": dict(_daily_schedule_config),
+        "logs": [],
+    }
+    _save_market_data_task_to_db(MARKET_DATA_SCHEDULE_CONFIG_TASK_ID)
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -1368,68 +1431,150 @@ async def list_tasks(start_date: Optional[str] = None, end_date: Optional[str] =
             return False
         return True
 
-    task_list = []
-    for tid, info in tasks.items():
-        finished_at = info.get("finished_at", "")
-        candidate_time = finished_at or info.get("started_at", "")
+    task_map: Dict[str, Dict[str, Any]] = {}
+
+    def _market_progress(item: Dict[str, Any]) -> str:
+        logs = list(item.get("logs") or [])
+        if logs:
+            return str(logs[-1])
+        if item.get("error"):
+            return str(item.get("error"))
+        status = str(item.get("status") or "")
+        return "运行中" if status == "running" else status
+
+    def _upsert_task_row(row: Dict[str, Any]):
+        tid = str(row.get("task_id") or "")
+        if not tid:
+            return
+        finished_at = str(row.get("finished_at") or "")
+        candidate_time = finished_at or str(row.get("started_at") or "")
         if (start_date or end_date) and not _in_date_range(candidate_time):
-            continue
-        task_list.append({
+            return
+        task_map[tid] = row
+
+    for tid, info in tasks.items():
+        _upsert_task_row({
             "task_id": tid,
             "task_type": _task_type_label(info.get("task_type")),
-            "status": info["status"],
-            "progress": info["progress"],
-            "started_at": info["started_at"],
-            "finished_at": finished_at,
+            "task_type_code": str(info.get("task_type") or TASK_TYPE_GP),
+            "task_sub_type": None,
+            "status": info.get("status"),
+            "progress": info.get("progress", ""),
+            "started_at": info.get("started_at", ""),
+            "finished_at": info.get("finished_at", ""),
             "version": info.get("params", {}).get("version", ""),
             "gp_progress": info.get("gp_progress"),
         })
-    # Also fetch from DB for historical tasks
-    for task_type, collection in ((TASK_TYPE_GP, GP_TASK_COLLECTION), (TASK_TYPE_FUSION, FUSION_TASK_COLLECTION)):
+
+    for tid, info in market_data_tasks.items():
+        if tid == MARKET_DATA_SCHEDULE_CONFIG_TASK_ID:
+            continue
+        _upsert_task_row({
+            "task_id": tid,
+            "task_type": _task_type_label(TASK_TYPE_MARKET_DATA),
+            "task_type_code": TASK_TYPE_MARKET_DATA,
+            "task_sub_type": str(info.get("type") or ""),
+            "status": str(info.get("status") or "unknown"),
+            "progress": _market_progress(info),
+            "started_at": info.get("started_at", ""),
+            "finished_at": info.get("finished_at", ""),
+            "version": "",
+            "gp_progress": None,
+        })
+
+    for task_type, collection in (
+        (TASK_TYPE_GP, GP_TASK_COLLECTION),
+        (TASK_TYPE_FUSION, FUSION_TASK_COLLECTION),
+    ):
         try:
             db_tasks = get_data(database="task", collection=collection, mongo_operator={})
             if isinstance(db_tasks, pd.DataFrame) and not db_tasks.empty:
                 for _, row in db_tasks.iterrows():
-                    tid = _sanitize_nan(row.get("task_id"), "")
-                    if tid and tid not in tasks:
-                        db_status = _sanitize_nan(row.get("status"), "unknown")
-                        db_progress = _sanitize_nan(row.get("progress"), "")
-                        if db_status == "running":
-                            db_status = "interrupted"
-                            db_progress = "服务重启，任务已中断"
-                            try:
-                                update_one_data(
-                                    database="task",
-                                    collection=collection,
-                                    mongo_operator={"task_id": tid},
-                                    data={
-                                        "status": "interrupted",
-                                        "progress": db_progress,
-                                        "finished_at": datetime.now().isoformat(),
-                                    },
-                                    upsert=False,
-                                )
-                            except Exception:
-                                pass
-                        params_val = _sanitize_nan(row.get("params"))
-                        started_at = _sanitize_nan(row.get("started_at"), "")
-                        finished_at = _sanitize_nan(row.get("finished_at"), "")
-                        candidate_time = finished_at or started_at
-                        if (start_date or end_date) and not _in_date_range(candidate_time):
-                            continue
-                        task_list.append({
-                            "task_id": tid,
-                            "task_type": _task_type_label(_sanitize_nan(row.get("task_type"), task_type)),
-                            "status": db_status,
-                            "progress": db_progress,
-                            "started_at": started_at,
-                            "finished_at": finished_at,
-                            "version": params_val.get("version", "") if isinstance(params_val, dict) else "",
-                            "gp_progress": _sanitize_nan(row.get("gp_progress")),
-                        })
+                    tid = str(_sanitize_nan(row.get("task_id"), "") or "")
+                    if not tid or tid in task_map:
+                        continue
+                    db_status = _sanitize_nan(row.get("status"), "unknown")
+                    db_progress = _sanitize_nan(row.get("progress"), "")
+                    if db_status == "running":
+                        db_status = "interrupted"
+                        db_progress = "服务重启，任务已中断"
+                        try:
+                            update_one_data(
+                                database="task",
+                                collection=collection,
+                                mongo_operator={"task_id": tid},
+                                data={
+                                    "status": "interrupted",
+                                    "progress": db_progress,
+                                    "finished_at": datetime.now().isoformat(),
+                                },
+                                upsert=False,
+                            )
+                        except Exception:
+                            pass
+                    params_val = _sanitize_nan(row.get("params"))
+                    _upsert_task_row({
+                        "task_id": tid,
+                        "task_type": _task_type_label(_sanitize_nan(row.get("task_type"), task_type)),
+                        "task_type_code": str(_sanitize_nan(row.get("task_type"), task_type) or task_type),
+                        "task_sub_type": None,
+                        "status": db_status,
+                        "progress": db_progress,
+                        "started_at": _sanitize_nan(row.get("started_at"), ""),
+                        "finished_at": _sanitize_nan(row.get("finished_at"), ""),
+                        "version": params_val.get("version", "") if isinstance(params_val, dict) else "",
+                        "gp_progress": _sanitize_nan(row.get("gp_progress")),
+                    })
         except Exception:
             pass
-    return {"tasks": sorted(task_list, key=lambda x: x.get("started_at", ""), reverse=True)}
+
+    try:
+        db_market = get_data(database="task", collection=MARKET_DATA_TASK_COLLECTION, mongo_operator={})
+        if isinstance(db_market, pd.DataFrame) and not db_market.empty:
+            for _, row in db_market.iterrows():
+                if str(_sanitize_nan(row.get("record_type"), "task") or "task") == "config":
+                    continue
+                tid = str(_sanitize_nan(row.get("task_id"), "") or "")
+                if not tid or tid in task_map:
+                    continue
+                status_val = str(_sanitize_nan(row.get("status"), "unknown") or "unknown")
+                if status_val == "running":
+                    status_val = "interrupted"
+                    try:
+                        update_one_data(
+                            database="task",
+                            collection=MARKET_DATA_TASK_COLLECTION,
+                            mongo_operator={"task_id": tid},
+                            data={
+                                "status": "interrupted",
+                                "error": "服务重启，任务已中断",
+                                "finished_at": datetime.now().isoformat(),
+                                "updated_at": datetime.now().isoformat(),
+                            },
+                            upsert=False,
+                        )
+                    except Exception:
+                        pass
+                logs_val = _sanitize_nan(row.get("logs"), [])
+                error_val = _sanitize_nan(row.get("error"))
+                progress_val = str(logs_val[-1]) if isinstance(logs_val, list) and logs_val else str(error_val or status_val)
+                _upsert_task_row({
+                    "task_id": tid,
+                    "task_type": _task_type_label(TASK_TYPE_MARKET_DATA),
+                    "task_type_code": TASK_TYPE_MARKET_DATA,
+                    "task_sub_type": str(_sanitize_nan(row.get("task_type"), "") or ""),
+                    "status": status_val,
+                    "progress": progress_val,
+                    "started_at": _sanitize_nan(row.get("started_at"), ""),
+                    "finished_at": _sanitize_nan(row.get("finished_at"), ""),
+                    "version": "",
+                    "gp_progress": None,
+                })
+    except Exception:
+        pass
+
+    task_list = sorted(task_map.values(), key=lambda x: x.get("started_at", ""), reverse=True)
+    return {"tasks": task_list}
 
 
 @app.get("/api/tasks/detail/{task_id}")
@@ -1440,6 +1585,7 @@ async def get_task_detail(task_id: str):
         return {
             "task_id": task_id,
             "task_type": _task_type_label(task.get("task_type", TASK_TYPE_GP)),
+            "task_type_code": str(task.get("task_type") or TASK_TYPE_GP),
             "status": task["status"],
             "progress": task["progress"],
             "started_at": task["started_at"],
@@ -1449,6 +1595,27 @@ async def get_task_detail(task_id: str):
             "result": task.get("result") if task["status"] in ("completed", "terminated") else None,
             "result_overview": task.get("result_overview"),
             "logs": task.get("logs", [])[-200:],
+        }
+
+    if task_id in market_data_tasks and task_id != MARKET_DATA_SCHEDULE_CONFIG_TASK_ID:
+        task = market_data_tasks[task_id]
+        logs = list(task.get("logs") or [])
+        progress = logs[-1] if logs else (task.get("error") or task.get("status") or "")
+        return {
+            "task_id": task_id,
+            "task_type": _task_type_label(TASK_TYPE_MARKET_DATA),
+            "task_type_code": TASK_TYPE_MARKET_DATA,
+            "task_sub_type": str(task.get("type") or ""),
+            "status": task.get("status", "unknown"),
+            "progress": progress,
+            "started_at": task.get("started_at", ""),
+            "finished_at": task.get("finished_at", ""),
+            "error": task.get("error"),
+            "gp_progress": None,
+            "params": task.get("params"),
+            "result": None,
+            "result_overview": None,
+            "logs": logs[-500:],
         }
     # Fallback to DB
     try:
@@ -1481,6 +1648,7 @@ async def get_task_detail(task_id: str):
             return {
                 "task_id": task_id,
                 "task_type": _task_type_label(db_task_type),
+                "task_type_code": db_task_type,
                 "status": db_status,
                 "progress": row.get("progress") or "",
                 "started_at": row.get("started_at") or "",
@@ -1492,6 +1660,28 @@ async def get_task_detail(task_id: str):
                 "logs": logs_val if isinstance(logs_val, list) else [],
                 "error": None,
                 "gp_progress": row.get("gp_progress"),
+            }
+
+        md_row = _load_market_data_task_from_db(task_id)
+        if md_row:
+            logs = list(md_row.get("logs") or [])
+            progress = logs[-1] if logs else (md_row.get("error") or md_row.get("status") or "")
+            return {
+                "task_id": task_id,
+                "task_type": _task_type_label(TASK_TYPE_MARKET_DATA),
+                "task_type_code": TASK_TYPE_MARKET_DATA,
+                "task_sub_type": str(md_row.get("type") or ""),
+                "status": md_row.get("status"),
+                "progress": progress,
+                "started_at": md_row.get("started_at") or "",
+                "finished_at": md_row.get("finished_at") or "",
+                "params": md_row.get("params"),
+                "result": None,
+                "result_summary": None,
+                "result_overview": None,
+                "logs": logs[-500:],
+                "error": md_row.get("error"),
+                "gp_progress": None,
             }
     except Exception as e:
         print(f"[WARNING] get_task_detail DB fallback failed for task {task_id}: {e}")
@@ -1517,6 +1707,16 @@ class UpdatePriceParams(BaseModel):
     only_update_new: bool = False
 
 
+class ScheduleConfigParams(BaseModel):
+    enabled: bool = True
+    schedule_time: str = "18:00"
+    instrument_id: Optional[List[str]] = Field(default_factory=lambda: ["C0"])
+    load_prev_weighted_factor: bool = True
+    wait_time: float = 2.0
+    method: str = "bulk_write_update"
+    only_update_new: bool = True
+
+
 class DeleteDataParams(BaseModel):
     instrument_id_list: List[str]
     start_date: Optional[str] = None
@@ -1524,7 +1724,6 @@ class DeleteDataParams(BaseModel):
 
 
 # ── Scheduled daily update ────────────────────────────────────────────
-_daily_update_enabled = True
 _daily_update_thread: Optional[threading.Thread] = None
 
 
@@ -1546,18 +1745,26 @@ class _MarketDataLogHandler(logging.Handler):
 
 
 def _run_daily_price_update():
-    """Background: daily update for today's data only."""
-    today_str = datetime.now().strftime("%Y%m%d")
+    """Background: daily update for T-1 day data with persisted schedule params."""
+    from datetime import timedelta
+
+    cfg = dict(_daily_schedule_config)
+    target_day = (datetime.now() - timedelta(days=1)).strftime("%Y%m%d")
+    instrument_id = cfg.get("instrument_id")
+    if not instrument_id:
+        instrument_id = None
     task_id = f"scheduled_{uuid.uuid4().hex[:8]}"
     market_data_tasks[task_id] = {
         "type": "update-price", "status": "running",
         "started_at": datetime.now().isoformat(), "logs": [],
         "params": {
-            "instrument_id": None,
-            "start_date": today_str,
-            "end_date": today_str,
-            "load_prev_weighted_factor": True,
-            "method": "bulk_write_update",
+            "instrument_id": instrument_id,
+            "start_date": target_day,
+            "end_date": target_day,
+            "load_prev_weighted_factor": bool(cfg.get("load_prev_weighted_factor", True)),
+            "wait_time": float(cfg.get("wait_time", 2.0)),
+            "method": str(cfg.get("method") or "bulk_write_update"),
+            "only_update_new": bool(cfg.get("only_update_new", True)),
             "scheduled": True,
         },
     }
@@ -1566,14 +1773,20 @@ def _run_daily_price_update():
     handler = _MarketDataLogHandler(task_id)
     lionet_logger.addHandler(handler)
     try:
-        lionet_logger.info(f'定时更新启动: 仅更新当日数据 {today_str}')
+        lionet_logger.info(
+            f"定时更新启动: date={target_day}, instrument_id={instrument_id}, "
+            f"load_prev_weighted_factor={cfg.get('load_prev_weighted_factor', True)}, "
+            f"wait_time={cfg.get('wait_time', 2.0)}, method={cfg.get('method', 'bulk_write_update')}, "
+            f"only_update_new={cfg.get('only_update_new', True)}"
+        )
         update_futures_continuous_contract_price(
-            instrument_id=None,
-            start_date=today_str,
-            end_date=today_str,
-            load_prev_weighted_factor=True,
-            wait_time=2.0,
-            method="bulk_write_update",
+            instrument_id=instrument_id,
+            start_date=target_day,
+            end_date=target_day,
+            load_prev_weighted_factor=bool(cfg.get("load_prev_weighted_factor", True)),
+            wait_time=float(cfg.get("wait_time", 2.0)),
+            method=str(cfg.get("method") or "bulk_write_update"),
+            only_update_new=bool(cfg.get("only_update_new", True)),
         )
         lionet_logger.info('定时更新完成')
         market_data_tasks[task_id]["status"] = "completed"
@@ -1591,18 +1804,25 @@ def _daily_scheduler_loop():
     import time as _time
     from datetime import timedelta
 
-    target_hour, target_minute = 18, 0
-    while _daily_update_enabled:
+    while True:
+        if not bool(_daily_schedule_config.get("enabled", True)):
+            _time.sleep(5)
+            continue
         now = datetime.now()
+        schedule_time = str(_daily_schedule_config.get("schedule_time") or "18:00")
+        try:
+            target_hour, target_minute = [int(x) for x in schedule_time.split(":", 1)]
+        except Exception:
+            target_hour, target_minute = 18, 0
         target = now.replace(hour=target_hour, minute=target_minute, second=0, microsecond=0)
         if now >= target:
             target += timedelta(days=1)
         wait_seconds = (target - now).total_seconds()
-        while wait_seconds > 0 and _daily_update_enabled:
+        while wait_seconds > 0 and bool(_daily_schedule_config.get("enabled", True)):
             sleep_s = min(wait_seconds, 30)
             _time.sleep(sleep_s)
             wait_seconds -= sleep_s
-        if _daily_update_enabled:
+        if bool(_daily_schedule_config.get("enabled", True)):
             try:
                 _run_daily_price_update()
             except Exception:
@@ -1831,6 +2051,8 @@ async def api_market_data_logs(
         db_df = get_data(database="task", collection=MARKET_DATA_TASK_COLLECTION, mongo_operator={})
         if isinstance(db_df, pd.DataFrame) and not db_df.empty:
             for _, row in db_df.iterrows():
+                if str(_sanitize_nan(row.get("record_type"), "task") or "task") == "config":
+                    continue
                 task_id_val = str(_sanitize_nan(row.get("task_id"), "") or "")
                 if not task_id_val:
                     continue
@@ -1866,6 +2088,8 @@ async def api_market_data_logs(
         pass
 
     for task_id_val, task in market_data_tasks.items():
+        if task_id_val == MARKET_DATA_SCHEDULE_CONFIG_TASK_ID:
+            continue
         merged[task_id_val] = {
             "task_id": task_id_val,
             "task_type": str(task.get("type") or ""),
@@ -2074,19 +2298,47 @@ async def api_delete_price(params: DeleteDataParams):
 
 @app.get("/api/market-data/scheduled-status")
 async def api_scheduled_status():
-    """Return whether daily scheduled update is enabled."""
-    return {"enabled": _daily_update_enabled}
+    """Return full daily scheduled update config."""
+    return {
+        "enabled": bool(_daily_schedule_config.get("enabled", True)),
+        "schedule_time": str(_daily_schedule_config.get("schedule_time") or "18:00"),
+        "instrument_id": list(_daily_schedule_config.get("instrument_id") or []),
+        "load_prev_weighted_factor": bool(_daily_schedule_config.get("load_prev_weighted_factor", True)),
+        "wait_time": float(_daily_schedule_config.get("wait_time", 2.0)),
+        "method": str(_daily_schedule_config.get("method") or "bulk_write_update"),
+        "only_update_new": bool(_daily_schedule_config.get("only_update_new", True)),
+    }
+
+
+@app.post("/api/market-data/schedule-config")
+async def api_update_schedule_config(params: ScheduleConfigParams):
+    """Update daily scheduled market-data config and persist it in market_data_task."""
+    _daily_schedule_config.update({
+        "enabled": bool(params.enabled),
+        "schedule_time": str(params.schedule_time or "18:00"),
+        "instrument_id": params.instrument_id or [],
+        "load_prev_weighted_factor": bool(params.load_prev_weighted_factor),
+        "wait_time": float(params.wait_time),
+        "method": str(params.method),
+        "only_update_new": bool(params.only_update_new),
+    })
+    _save_market_schedule_config_to_db()
+    return {
+        "message": "定时更新配置已保存",
+        "config": dict(_daily_schedule_config),
+    }
 
 
 @app.post("/api/market-data/toggle-schedule")
 async def api_toggle_schedule(enabled: bool = True):
     """Toggle daily scheduled update."""
-    global _daily_update_enabled, _daily_update_thread
-    _daily_update_enabled = enabled
+    global _daily_update_thread
+    _daily_schedule_config["enabled"] = bool(enabled)
+    _save_market_schedule_config_to_db()
     if enabled and (_daily_update_thread is None or not _daily_update_thread.is_alive()):
         _daily_update_thread = threading.Thread(target=_daily_scheduler_loop, daemon=True)
         _daily_update_thread.start()
-    return {"enabled": _daily_update_enabled, "message": "已开启定时更新" if enabled else "已关闭定时更新"}
+    return {"enabled": bool(_daily_schedule_config.get("enabled", True)), "message": "已开启定时更新" if enabled else "已关闭定时更新"}
 
 
 # ── Entry point ───────────────────────────────────────────────────────

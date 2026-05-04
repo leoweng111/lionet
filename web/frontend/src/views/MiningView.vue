@@ -5,6 +5,11 @@
       <p>配置 GP 遗传算法超参数，一键启动因子挖掘任务，挖掘完成后自动展示回测结果和净值曲线</p>
     </div>
 
+    <el-tabs v-model="activeMiningTab" type="border-card" style="margin-bottom:12px;">
+      <el-tab-pane label="开始挖掘" name="start" />
+      <el-tab-pane label="自动挖掘" name="auto" />
+    </el-tabs>
+
     <el-row :gutter="20" class="responsive-row top-panel-row">
       <el-col :span="24">
         <el-card shadow="hover">
@@ -162,9 +167,9 @@
     </el-row>
 
     <el-row :gutter="20" class="responsive-row bottom-panel-row" style="margin-top:16px;">
-      <el-col :xs="24" :sm="24" :md="8" :lg="6" :xl="6" class="bottom-panel-col">
+      <el-col :xs="24" :sm="24" :md="10" :lg="9" :xl="9" class="bottom-panel-col">
         <el-card shadow="hover" class="action-panel-card" style="margin-bottom:16px;">
-          <template #header><span style="font-weight:600;">启动挖掘</span></template>
+          <template #header><span style="font-weight:600;">开始挖掘</span></template>
           <el-button type="primary" size="large" :loading="mining" @click="handleStartMining" style="width:100%;">
             <el-icon v-if="!mining"><VideoPlay /></el-icon>
             {{ mining ? '挖掘中...' : '🚀 启动因子挖掘' }}
@@ -173,9 +178,39 @@
             提示：先在上方调整超参数，再点击启动；任务状态与结果在右侧实时刷新。
           </div>
         </el-card>
+
+        <el-card v-if="activeMiningTab === 'auto'" shadow="hover" class="action-panel-card" style="margin-bottom:16px;">
+          <template #header><span style="font-weight:600;">自动挖掘配置</span></template>
+          <el-form :model="autoMiningSettings" label-position="top" size="small">
+            <el-form-item label="自动挖掘">
+              <el-switch v-model="autoMiningSettings.enabled" />
+            </el-form-item>
+            <el-form-item label="自动挖掘时间">
+              <el-time-picker
+                v-model="autoMiningSettings.scheduleTime"
+                value-format="HH:mm"
+                format="HH:mm"
+                :disabled="!autoMiningSettings.enabled"
+                style="width:100%;"
+              />
+            </el-form-item>
+            <el-form-item label="任务数量">
+              <el-input-number
+                v-model="autoMiningSettings.taskCount"
+                :min="1"
+                :max="20"
+                :disabled="!autoMiningSettings.enabled"
+                style="width:100%;"
+              />
+            </el-form-item>
+            <div style="font-size:12px;color:#909399;line-height:1.5;">
+              版本号预览：{{ autoVersionPreview }}
+            </div>
+          </el-form>
+        </el-card>
       </el-col>
 
-      <el-col :xs="24" :sm="24" :md="16" :lg="18" :xl="18" class="bottom-panel-col">
+      <el-col :xs="24" :sm="24" :md="14" :lg="15" :xl="15" class="bottom-panel-col">
         <el-card shadow="hover" style="margin-bottom:16px;" v-if="taskId">
           <template #header><span style="font-weight:600;">任务状态</span></template>
           <el-descriptions :column="2" size="small" border>
@@ -205,17 +240,23 @@
             <NavChart :title="fcName + ' 净值曲线'" :curve-data="curve" height="350px" />
           </el-card>
         </div>
-        <el-card v-if="!taskId" shadow="hover" class="hint-panel-card" style="margin-bottom:16px;"><template #header><span style="font-weight:600;">操作提示</span></template><el-empty description="配置参数后点击「启动因子挖掘」开始" /></el-card>
+
       </el-col>
     </el-row>
   </div>
 </template>
 
 <script setup>
-import { ref, reactive, computed, onMounted } from 'vue'
+import { ref, reactive, computed, onMounted, onUnmounted, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import { startMining, getMiningStatus, getTasks, getMiningIndicatorOptions } from '../api'
 import NavChart from '../components/NavChart.vue'
+
+const MINING_TAB_KEY = 'GP_MINING_ACTIVE_TAB'
+const AUTO_PARAMS_KEY = 'GP_AUTO_SEARCH_PARAMS'
+const AUTO_WEIGHT_KEY = 'GP_AUTO_SEARCH_FITNESS_INDICATOR_WEIGHT'
+const AUTO_SETTINGS_KEY = 'GP_AUTO_SEARCH_SETTINGS'
+const AUTO_LAST_TRIGGER_DAY_KEY = 'GP_AUTO_SEARCH_LAST_TRIGGER_DAY'
 
 const supportedIndicators = ref(['Net Return', 'Net Sharpe', 'TS IC'])
 const indicatorDirection = ref({ 'Net Return': 1, 'Net Sharpe': 1, 'TS IC': 1 })
@@ -275,26 +316,131 @@ const defaultParams = () => ({
   filter_net_return_mean: 0.05, filter_net_return_yearly: 0.03,
   filter_net_sharpe_mean: 0.5, filter_net_sharpe_yearly: 0.3,
 })
+
+const _clone = (obj) => JSON.parse(JSON.stringify(obj))
+const _safeParse = (txt, fallback = null) => {
+  if (!txt) return fallback
+  try { return JSON.parse(txt) } catch { return fallback }
+}
+
+const activeMiningTab = ref(localStorage.getItem(MINING_TAB_KEY) || 'start')
 const params = reactive(defaultParams())
-const resetParams = () => Object.assign(params, defaultParams())
+const manualParamsSnapshot = ref(_clone(params))
+const autoMiningSettings = reactive({
+  enabled: false,
+  scheduleTime: '18:00',
+  taskCount: 1,
+})
+
+const _localDateText = () => {
+  const d = new Date()
+  const y = d.getFullYear()
+  const m = String(d.getMonth() + 1).padStart(2, '0')
+  const day = String(d.getDate()).padStart(2, '0')
+  return `${y}${m}${day}`
+}
+
+const _localTimeText = () => {
+  const d = new Date()
+  const hh = String(d.getHours()).padStart(2, '0')
+  const mm = String(d.getMinutes()).padStart(2, '0')
+  return `${hh}:${mm}`
+}
+
+const autoVersionPreview = computed(() => {
+  const datePart = _localDateText()
+  const count = Number(autoMiningSettings.taskCount || 1)
+  if (count <= 1) return `${datePart}_gp_test`
+  const versions = Array.from({ length: count }, (_, idx) => idx === 0 ? `${datePart}_gp_test` : `${datePart}_gp_test_${idx}`)
+  return versions.join(', ')
+})
+
+const _loadAutoParams = () => {
+  const savedParams = _safeParse(localStorage.getItem(AUTO_PARAMS_KEY), {}) || {}
+  const next = { ...defaultParams(), ...savedParams }
+  const savedWeight = _safeParse(localStorage.getItem(AUTO_WEIGHT_KEY), {}) || {}
+  next.fitness_indicator_dict = {
+    ..._buildDefaultFitnessIndicatorWeight(supportedIndicators.value),
+    ...(next.fitness_indicator_dict || {}),
+    ...(savedWeight || {}),
+  }
+  Object.assign(params, next)
+}
+
+const _saveAutoParams = () => {
+  localStorage.setItem(AUTO_PARAMS_KEY, JSON.stringify(_clone(params)))
+  localStorage.setItem(AUTO_WEIGHT_KEY, JSON.stringify(_clone(params.fitness_indicator_dict || {})))
+}
+
+const _loadAutoSettings = () => {
+  const saved = _safeParse(localStorage.getItem(AUTO_SETTINGS_KEY), {}) || {}
+  autoMiningSettings.enabled = !!saved.enabled
+  autoMiningSettings.scheduleTime = saved.scheduleTime || '18:00'
+  autoMiningSettings.taskCount = Number(saved.taskCount) > 0 ? Number(saved.taskCount) : 1
+}
+
+const _saveAutoSettings = () => {
+  localStorage.setItem(AUTO_SETTINGS_KEY, JSON.stringify(_clone(autoMiningSettings)))
+}
+
+const resetParams = () => {
+  Object.assign(params, defaultParams())
+  if (activeMiningTab.value === 'auto') {
+    _saveAutoParams()
+  } else {
+    manualParamsSnapshot.value = _clone(params)
+  }
+}
 
 onMounted(async () => {
+  _loadAutoSettings()
   try {
     const { data } = await getMiningIndicatorOptions()
     supportedIndicators.value = data.supported_indicator || supportedIndicators.value
     indicatorDirection.value = data.indicator_direction || indicatorDirection.value
 
-    const nextDefault = defaultParams()
-    Object.assign(params, nextDefault)
+    Object.assign(params, defaultParams())
+    manualParamsSnapshot.value = _clone(params)
+    if (activeMiningTab.value === 'auto') {
+      _loadAutoParams()
+    }
   } catch {
     // fallback to local defaults when backend metadata endpoint is unavailable
+    if (activeMiningTab.value === 'auto') {
+      _loadAutoParams()
+    }
   }
 })
+
+watch(activeMiningTab, (next, prev) => {
+  localStorage.setItem(MINING_TAB_KEY, next)
+  if (prev === 'auto') {
+    _saveAutoParams()
+  } else {
+    manualParamsSnapshot.value = _clone(params)
+  }
+  if (next === 'auto') {
+    _loadAutoParams()
+  } else {
+    Object.assign(params, _clone(manualParamsSnapshot.value || defaultParams()))
+  }
+})
+
+watch(() => params, () => {
+  if (activeMiningTab.value === 'auto') {
+    _saveAutoParams()
+  }
+}, { deep: true })
+
+watch(() => autoMiningSettings, () => {
+  _saveAutoSettings()
+}, { deep: true })
 
 const mining = ref(false), taskId = ref(''), taskStatus = ref(''), taskProgress = ref(''), taskError = ref('')
 const miningResult = ref(null), navCurves = ref({}), perfSummary = ref([]), perfColumns = ref([])
 const statusTag = computed(() => taskStatus.value==='completed'?'success':taskStatus.value==='failed'?'danger':'warning')
 let pollTimer = null
+let autoScheduleTimer = null
 
 const _toNullableNumber = (raw) => {
   if (raw === '' || raw === null || raw === undefined) return null
@@ -327,9 +473,82 @@ const _buildMiningPayload = () => {
   }
 }
 
+const _buildAutoVersionList = () => {
+  const datePart = _localDateText()
+  const base = `${datePart}_gp_test`
+  const count = Math.max(1, Number(autoMiningSettings.taskCount || 1))
+  return Array.from({ length: count }, (_, idx) => (idx === 0 ? base : `${base}_${idx}`))
+}
+
+const _submitMiningByVersions = async (versionList, submitMode = 'manual') => {
+  if (!versionList?.length) return
+
+  try {
+    const { data: taskData } = await getTasks()
+    const runningVersions = new Set((taskData.tasks || [])
+      .filter(t => t.status === 'running')
+      .map(t => String(t.version || '').trim()))
+    const duplicated = versionList.find(v => runningVersions.has(v))
+    if (duplicated) {
+      if (submitMode === 'auto') {
+        taskProgress.value = `自动挖掘跳过：版本 ${duplicated} 正在运行`
+      } else {
+        ElMessage.warning(`禁止提交：版本号 ${duplicated} 已在运行中`)
+      }
+      return
+    }
+  } catch {
+    // If pre-check fails, still try backend submission; backend has the final duplicate guard.
+  }
+
+  const payloadBase = _buildMiningPayload()
+  const submittedTaskIds = []
+  for (const version of versionList) {
+    const { data } = await startMining({ ...payloadBase, version })
+    submittedTaskIds.push(data.task_id)
+  }
+  if (submittedTaskIds.length) {
+    taskId.value = submittedTaskIds[0]
+    taskStatus.value = 'running'
+    taskProgress.value = submittedTaskIds.length > 1
+      ? `已提交 ${submittedTaskIds.length} 个任务，当前显示第1个任务进度`
+      : '任务已提交...'
+    startPolling()
+    if (submitMode !== 'auto') {
+      ElMessage.success(submittedTaskIds.length > 1
+        ? `自动挖掘已启动，共 ${submittedTaskIds.length} 个任务`
+        : `挖掘任务已启动: ${submittedTaskIds[0]}`)
+    }
+  }
+}
+
+const _autoScheduleTick = async () => {
+  if (!autoMiningSettings.enabled || mining.value) return
+  const target = String(autoMiningSettings.scheduleTime || '18:00').trim()
+  if (!/^\d{2}:\d{2}$/.test(target)) return
+
+  const today = _localDateText()
+  const nowHm = _localTimeText()
+  const lastTriggered = localStorage.getItem(AUTO_LAST_TRIGGER_DAY_KEY) || ''
+
+  if (nowHm >= target && lastTriggered !== today) {
+    localStorage.setItem(AUTO_LAST_TRIGGER_DAY_KEY, today)
+    try {
+      const versionList = _buildAutoVersionList()
+      taskProgress.value = `自动挖掘触发：${today} ${target}`
+      await _submitMiningByVersions(versionList, 'auto')
+    } catch {
+      localStorage.removeItem(AUTO_LAST_TRIGGER_DAY_KEY)
+    }
+  }
+}
+
 const handleStartMining = async () => {
-  const version = String(params.version || '').trim()
-  if (!version) {
+  const manualVersion = String(params.version || '').trim()
+  const versionList = activeMiningTab.value === 'auto'
+    ? _buildAutoVersionList()
+    : [manualVersion]
+  if (!versionList[0]) {
     ElMessage.warning('版本号不能为空')
     return
   }
@@ -340,23 +559,7 @@ const handleStartMining = async () => {
   navCurves.value = {}
   perfSummary.value = []
   try {
-    try {
-      const { data: taskData } = await getTasks()
-      const duplicated = (taskData.tasks || []).find(
-        t => t.status === 'running' && String(t.version || '').trim() === version,
-      )
-      if (duplicated) {
-        ElMessage.warning(`禁止提交：版本号 ${version} 已在运行中（任务ID: ${duplicated.task_id}）`)
-        return
-      }
-    } catch {
-      // If pre-check fails, still try backend submission; backend has the final duplicate guard.
-    }
-
-    const { data } = await startMining(_buildMiningPayload())
-    taskId.value = data.task_id; taskStatus.value = 'running'; taskProgress.value = '任务已提交...'
-    ElMessage.success('挖掘任务已启动: ' + data.task_id)
-    startPolling()
+    await _submitMiningByVersions(versionList, activeMiningTab.value === 'auto' ? 'auto' : 'manual')
   } catch (err) {
     ElMessage.error('启动失败: ' + (err.response?.data?.detail || err.message))
   } finally {
@@ -382,6 +585,18 @@ const startPolling = () => {
     } catch { /* keep polling */ }
   }, 3000)
 }
+
+onMounted(() => {
+  if (autoScheduleTimer) clearInterval(autoScheduleTimer)
+  autoScheduleTimer = setInterval(() => {
+    _autoScheduleTick()
+  }, 15000)
+})
+
+onUnmounted(() => {
+  if (pollTimer) clearInterval(pollTimer)
+  if (autoScheduleTimer) clearInterval(autoScheduleTimer)
+})
 </script>
 
 <style scoped>
@@ -453,22 +668,16 @@ const startPolling = () => {
   display: flex;
 }
 
-.action-panel-card,
-.hint-panel-card {
+.action-panel-card {
   width: 100%;
   height: 100%;
 }
 
-.action-panel-card :deep(.el-card__body),
-.hint-panel-card :deep(.el-card__body) {
+.action-panel-card :deep(.el-card__body) {
   min-height: 140px;
   display: flex;
   flex-direction: column;
   justify-content: center;
-}
-
-.hint-panel-card :deep(.el-card__body) {
-  align-items: center;
 }
 </style>
 
