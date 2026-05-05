@@ -111,6 +111,13 @@ def _default_market_schedule_config() -> Dict[str, Any]:
 
 _daily_schedule_config: Dict[str, Any] = _default_market_schedule_config()
 
+
+def _reload_market_schedule_config_from_file() -> Dict[str, Any]:
+    latest = _default_market_schedule_config()
+    _daily_schedule_config.clear()
+    _daily_schedule_config.update(latest)
+    return dict(_daily_schedule_config)
+
 # ── Auto mining scheduler state ───────────────────────────────────────
 _auto_mining_scheduler_thread: Optional[threading.Thread] = None
 _auto_mining_status_lock = threading.Lock()
@@ -825,8 +832,103 @@ async def list_factors(version: Optional[str] = None, collection: Optional[str] 
 
 # ── GP Mining ─────────────────────────────────────────────────────────
 
+
+def _refresh_gp_runtime_configs_from_files() -> None:
+    global GP_SUPPORTED_INDICATOR, GP_INDICATOR_DIRECTION
+    global GP_DEFAULT_FITNESS_INDICATOR_WEIGHT, GP_DEFAULT_FILTER_INDICATOR_DICT
+
+    supported_raw = load_json_config(GP_SUPPORTED_INDICATOR_FILE, list(GP_SUPPORTED_INDICATOR))
+    if isinstance(supported_raw, list):
+        supported_list = [str(v).strip() for v in supported_raw if str(v).strip()]
+    else:
+        supported_list = []
+    if not supported_list:
+        supported_list = list(GP_SUPPORTED_INDICATOR)
+    GP_SUPPORTED_INDICATOR = supported_list
+
+    direction_default = dict(GP_INDICATOR_DIRECTION)
+    direction_raw = load_json_config(GP_INDICATOR_DIRECTION_FILE, direction_default)
+    direction_out: Dict[str, int] = {}
+    if isinstance(direction_raw, dict):
+        for indicator in GP_SUPPORTED_INDICATOR:
+            try:
+                direction_val = int(direction_raw.get(indicator, direction_default.get(indicator, 1)))
+            except (TypeError, ValueError):
+                direction_val = int(direction_default.get(indicator, 1))
+            direction_out[indicator] = 1 if direction_val >= 0 else -1
+    if not direction_out:
+        direction_out = {
+            indicator: int(direction_default.get(indicator, 1))
+            for indicator in GP_SUPPORTED_INDICATOR
+        }
+    GP_INDICATOR_DIRECTION = direction_out
+
+    fitness_default = dict(GP_DEFAULT_FITNESS_INDICATOR_WEIGHT)
+    fitness_raw = load_json_config(GP_DEFAULT_FITNESS_WEIGHT_FILE, fitness_default)
+    fitness_out: Dict[str, float] = {}
+    if isinstance(fitness_raw, dict):
+        for indicator in GP_SUPPORTED_INDICATOR:
+            if indicator not in fitness_raw:
+                continue
+            try:
+                fitness_out[indicator] = float(fitness_raw[indicator])
+            except (TypeError, ValueError):
+                continue
+    if not fitness_out:
+        fitness_out = {
+            indicator: float(fitness_default.get(indicator, 0.0))
+            for indicator in GP_SUPPORTED_INDICATOR
+        }
+    GP_DEFAULT_FITNESS_INDICATOR_WEIGHT = fitness_out
+
+    filter_default_dict = {
+        k: {
+            "mean_threshold": v[0],
+            "yearly_threshold": v[1],
+            "direction": v[2],
+        }
+        for k, v in GP_DEFAULT_FILTER_INDICATOR_DICT.items()
+    }
+    filter_raw = load_json_config(GP_DEFAULT_FILTER_DICT_FILE, filter_default_dict)
+    filter_out: Dict[str, tuple[Optional[float], Optional[float], int]] = {}
+    for indicator in GP_SUPPORTED_INDICATOR:
+        conf = filter_raw.get(indicator) if isinstance(filter_raw, dict) else None
+        if not isinstance(conf, dict):
+            conf = filter_default_dict.get(indicator, {})
+        mean_raw = conf.get("mean_threshold")
+        yearly_raw = conf.get("yearly_threshold")
+        direction_raw_val = conf.get("direction", GP_INDICATOR_DIRECTION.get(indicator, 1))
+
+        mean_val = None
+        yearly_val = None
+        if mean_raw is not None:
+            try:
+                mean_val = float(mean_raw)
+            except (TypeError, ValueError):
+                mean_val = None
+        if yearly_raw is not None:
+            try:
+                yearly_val = float(yearly_raw)
+            except (TypeError, ValueError):
+                yearly_val = None
+        try:
+            direction_val = int(direction_raw_val)
+        except (TypeError, ValueError):
+            direction_val = int(GP_INDICATOR_DIRECTION.get(indicator, 1))
+        if direction_val not in (1, -1):
+            direction_val = int(GP_INDICATOR_DIRECTION.get(indicator, 1))
+        filter_out[indicator] = (mean_val, yearly_val, direction_val)
+
+    if not filter_out:
+        filter_out = {
+            indicator: (None, None, int(GP_INDICATOR_DIRECTION.get(indicator, 1)))
+            for indicator in GP_SUPPORTED_INDICATOR
+        }
+    GP_DEFAULT_FILTER_INDICATOR_DICT = filter_out
+
 @app.get('/api/mining/indicator-options')
 async def get_mining_indicator_options():
+    _refresh_gp_runtime_configs_from_files()
     return {
         'supported_indicator': list(GP_SUPPORTED_INDICATOR),
         'indicator_direction': dict(GP_INDICATOR_DIRECTION),
@@ -843,6 +945,7 @@ async def get_mining_indicator_options():
 
 
 def _normalize_fitness_weight_for_save(raw_weight: Dict[str, Optional[float]]) -> Dict[str, float]:
+    _refresh_gp_runtime_configs_from_files()
     out: Dict[str, float] = {}
     for indicator in GP_SUPPORTED_INDICATOR:
         if indicator not in raw_weight:
@@ -855,6 +958,7 @@ def _normalize_fitness_weight_for_save(raw_weight: Dict[str, Optional[float]]) -
 
 
 def _normalize_filter_dict_for_save(raw_filter: Dict[str, Dict[str, Optional[float]]]) -> Dict[str, Dict[str, Optional[float]]]:
+    _refresh_gp_runtime_configs_from_files()
     out: Dict[str, Dict[str, Optional[float]]] = {}
     for indicator in GP_SUPPORTED_INDICATOR:
         conf = raw_filter.get(indicator)
@@ -905,6 +1009,7 @@ def _normalize_filter_dict_for_save(raw_filter: Dict[str, Dict[str, Optional[flo
 
 @app.get('/api/mining/auto-config')
 async def get_mining_auto_config():
+    _refresh_gp_runtime_configs_from_files()
     auto_settings_default = {
         "enabled": False,
         "schedule_time": "18:00",
@@ -936,6 +1041,7 @@ async def get_mining_auto_config():
 @app.post('/api/mining/auto-config')
 async def update_mining_auto_config(params: MiningConfigUpdateParams):
     global GP_DEFAULT_FITNESS_INDICATOR_WEIGHT, GP_DEFAULT_FILTER_INDICATOR_DICT
+    _refresh_gp_runtime_configs_from_files()
 
     if params.default_fitness_indicator_weight is not None:
         fitness_weight = _normalize_fitness_weight_for_save(dict(params.default_fitness_indicator_weight))
@@ -2156,6 +2262,7 @@ def _daily_scheduler_loop():
     from datetime import timedelta
 
     while True:
+        _reload_market_schedule_config_from_file()
         if not bool(_daily_schedule_config.get("enabled", True)):
             _time.sleep(5)
             continue
@@ -2650,6 +2757,7 @@ async def api_delete_price(params: DeleteDataParams):
 @app.get("/api/market-data/scheduled-status")
 async def api_scheduled_status():
     """Return full daily scheduled update config."""
+    _reload_market_schedule_config_from_file()
     return {
         "enabled": bool(_daily_schedule_config.get("enabled", True)),
         "schedule_time": str(_daily_schedule_config.get("schedule_time") or "18:00"),
@@ -2664,6 +2772,7 @@ async def api_scheduled_status():
 @app.post("/api/market-data/schedule-config")
 async def api_update_schedule_config(params: ScheduleConfigParams):
     """Update daily scheduled market-data config and persist it in market_data_task."""
+    _reload_market_schedule_config_from_file()
     _daily_schedule_config.update({
         "enabled": bool(params.enabled),
         "schedule_time": str(params.schedule_time or "18:00"),
@@ -2684,6 +2793,7 @@ async def api_update_schedule_config(params: ScheduleConfigParams):
 async def api_toggle_schedule(enabled: bool = True):
     """Toggle daily scheduled update."""
     global _daily_update_thread
+    _reload_market_schedule_config_from_file()
     _daily_schedule_config["enabled"] = bool(enabled)
     _save_market_schedule_config_to_db()
     if enabled and (_daily_update_thread is None or not _daily_update_thread.is_alive()):

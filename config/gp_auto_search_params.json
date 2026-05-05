@@ -130,7 +130,7 @@
     "Net Volatility": 0,
     "Net Win Rate": 0,
     "T-corr": 0,
-    "TS IC": "0.2",
+    "TS IC": 0.2,
     "TS ICIR": 0.8,
     "TS RankIC": 0,
     "TS RankICIR": 0,

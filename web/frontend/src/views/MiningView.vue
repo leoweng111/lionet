@@ -286,6 +286,10 @@ const MINING_TAB_KEY = 'GP_MINING_ACTIVE_TAB'
 
 const supportedIndicators = ref(['Net Return', 'Net Sharpe', 'TS IC'])
 const indicatorDirection = ref({ 'Net Return': 1, 'Net Sharpe': 1, 'TS IC': 1 })
+const serverDefaultFitnessWeight = ref({})
+const serverDefaultFilterIndicatorDict = ref({})
+
+const _clone = (obj) => JSON.parse(JSON.stringify(obj))
 
 const _buildDefaultFitnessIndicatorWeight = (indicators) => {
   const out = {}
@@ -323,7 +327,10 @@ const defaultParams = () => ({
   calculate_baseline: true, apply_weighted_price: true, n_jobs: 5, max_factor_count: 50,
   min_window_size: 30,
   fitness_metric: 'ic',
-  fitness_indicator_dict: _buildDefaultFitnessIndicatorWeight(supportedIndicators.value),
+  fitness_indicator_dict: {
+    ..._buildDefaultFitnessIndicatorWeight(supportedIndicators.value),
+    ...(serverDefaultFitnessWeight.value || {}),
+  },
   apply_rolling_norm: true, rolling_norm_window: 30, rolling_norm_min_periods: 20,
   rolling_norm_eps: 1e-8, rolling_norm_clip: 5.0,
   check_leakage_count: 20, check_relative: true, relative_threshold: 0.7,
@@ -337,13 +344,14 @@ const defaultParams = () => ({
   gp_small_factor_penalty_coef: 0.0, gp_assumed_initial_capital: 100000,
   gp_elite_stagnation_generation_count: 4, gp_max_shock_generation: 3,
   consistency_penalty_enabled: false, consistency_penalty_coef: 1.0,
-  filter_indicator_dict: _buildDefaultFilterIndicatorDict(supportedIndicators.value, indicatorDirection.value),
+  filter_indicator_dict: Object.keys(serverDefaultFilterIndicatorDict.value || {}).length
+    ? _clone(serverDefaultFilterIndicatorDict.value)
+    : _buildDefaultFilterIndicatorDict(supportedIndicators.value, indicatorDirection.value),
   // Legacy fields kept for backward compatibility with older backend contracts.
   filter_net_return_mean: 0.05, filter_net_return_yearly: 0.03,
   filter_net_sharpe_mean: 0.5, filter_net_sharpe_yearly: 0.3,
 })
 
-const _clone = (obj) => JSON.parse(JSON.stringify(obj))
 const activeMiningTab = ref(localStorage.getItem(MINING_TAB_KEY) || 'start')
 const params = reactive(defaultParams())
 const manualParamsSnapshot = ref(_clone(params))
@@ -409,6 +417,10 @@ const _loadAutoParams = (savedParams = {}, savedWeight = {}) => {
     ...(next.fitness_indicator_dict || {}),
     ...(savedWeight || {}),
   }
+  next.filter_indicator_dict = {
+    ...(defaultParams().filter_indicator_dict || {}),
+    ...(next.filter_indicator_dict || {}),
+  }
   Object.assign(params, next)
 }
 
@@ -465,6 +477,8 @@ onMounted(async () => {
     ])
     supportedIndicators.value = indicatorData.supported_indicator || supportedIndicators.value
     indicatorDirection.value = indicatorData.indicator_direction || indicatorDirection.value
+    serverDefaultFitnessWeight.value = indicatorData.default_fitness_indicator_weight || {}
+    serverDefaultFilterIndicatorDict.value = indicatorData.default_filter_indicator_dict || {}
 
     Object.assign(params, defaultParams())
     manualParamsSnapshot.value = _clone(params)

@@ -53,7 +53,7 @@
               <span style="font-weight:600;">更新连续合约价格</span>
               <div style="display:flex;align-items:center;gap:12px;">
                 <span style="font-size:12px;color:#909399;">每日自动更新</span>
-                <el-switch v-model="scheduleParams.enabled" @change="handleScheduleEnabledChange" />
+                <el-switch v-model="scheduleParams.enabled" />
               </div>
             </div>
           </template>
@@ -149,9 +149,6 @@
             </el-form-item>
             <el-form-item label="仅更新缺失【日期,合约】">
               <el-switch v-model="scheduleParams.only_update_new" :disabled="!scheduleParams.enabled" />
-            </el-form-item>
-            <el-form-item>
-              <el-button type="success" plain @click="saveScheduleConfig" :loading="scheduleSaving">保存自动更新配置</el-button>
             </el-form-item>
           </el-form>
 
@@ -336,7 +333,7 @@
 </template>
 
 <script setup>
-import { ref, reactive, computed, onMounted, watch, nextTick } from 'vue'
+import { ref, reactive, computed, onMounted, onUnmounted, watch, nextTick } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import * as echarts from 'echarts'
 import {
@@ -352,7 +349,6 @@ import {
   deleteMarketData,
   getScheduledStatus,
   updateScheduledConfig,
-  toggleSchedule,
 } from '../api'
 
 defineOptions({ name: 'MarketDataView' })
@@ -447,7 +443,10 @@ const priceLoading = ref(false)
 const priceLogs = ref([])
 const priceStopping = ref(false)
 const currentPriceTaskId = ref('')
-const scheduleSaving = ref(false)
+const scheduleConfigReady = ref(false)
+const scheduleSyncingFromServer = ref(false)
+let scheduleSaveTimer = null
+let scheduleStatusTimer = null
 const scheduleParams = reactive({
   enabled: true,
   schedule_time: '18:00',
@@ -476,6 +475,7 @@ const priceParams = reactive({
 const loadScheduleStatus = async () => {
   try {
     const { data } = await getScheduledStatus()
+    scheduleSyncingFromServer.value = true
     scheduleParams.enabled = !!data.enabled
     scheduleParams.schedule_time = data.schedule_time || '18:00'
     scheduleParams.instrument_id = Array.isArray(data.instrument_id) && data.instrument_id.length
@@ -485,12 +485,15 @@ const loadScheduleStatus = async () => {
     scheduleParams.wait_time = Number.isFinite(Number(data.wait_time)) ? Number(data.wait_time) : 2.0
     scheduleParams.method = data.method || 'bulk_write_update'
     scheduleParams.only_update_new = data.only_update_new !== false
+    scheduleConfigReady.value = true
   } catch { /* ignore */ }
+  finally {
+    scheduleSyncingFromServer.value = false
+  }
 }
 
 const saveScheduleConfig = async () => {
   try {
-    scheduleSaving.value = true
     await updateScheduledConfig({
       enabled: scheduleParams.enabled,
       schedule_time: scheduleParams.schedule_time,
@@ -500,24 +503,18 @@ const saveScheduleConfig = async () => {
       method: scheduleParams.method,
       only_update_new: scheduleParams.only_update_new,
     })
-    ElMessage.success('自动更新配置已保存')
   } catch (err) {
     ElMessage.error('保存失败: ' + (err.response?.data?.detail || err.message))
-  } finally {
-    scheduleSaving.value = false
   }
 }
 
-const handleScheduleEnabledChange = async (val) => {
-  try {
-    await toggleSchedule(val)
-    scheduleParams.enabled = !!val
-    await saveScheduleConfig()
-    ElMessage.success(val ? '已开启定时更新' : '已关闭定时更新')
-  } catch {
-    ElMessage.error('操作失败')
-  }
+const queueSaveScheduleConfig = () => {
+  if (scheduleSaveTimer) clearTimeout(scheduleSaveTimer)
+  scheduleSaveTimer = setTimeout(() => {
+    saveScheduleConfig()
+  }, 300)
 }
+
 const onStartDateChange = (val) => {
   if (val && val !== researchStartDate.value && val.trim()) {
     ElMessageBox.confirm(
@@ -726,6 +723,25 @@ const viewOperationTaskLogs = async (row) => {
 
 watch(activeTab, (val) => {
   if (val === 'op-logs') loadOperationLogs()
+})
+
+watch(() => scheduleParams, () => {
+  if (!scheduleConfigReady.value || scheduleSyncingFromServer.value) return
+  queueSaveScheduleConfig()
+}, { deep: true })
+
+onMounted(() => {
+  if (scheduleStatusTimer) clearInterval(scheduleStatusTimer)
+  scheduleStatusTimer = setInterval(() => {
+    if (activeTab.value === 'price-update') {
+      loadScheduleStatus()
+    }
+  }, 5000)
+})
+
+onUnmounted(() => {
+  if (scheduleSaveTimer) clearTimeout(scheduleSaveTimer)
+  if (scheduleStatusTimer) clearInterval(scheduleStatusTimer)
 })
 
 // ── Tab 6: Delete ──
