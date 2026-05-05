@@ -91,18 +91,21 @@
           <template #header>
             <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;">
               <span style="font-weight:600;">最近交易明细</span>
-              <div style="display:flex;align-items:center;gap:8px;">
-                <el-date-picker
-                  v-model="tradeDateRange"
-                  type="daterange"
-                  range-separator="至"
-                  start-placeholder="开始日期"
-                  end-placeholder="结束日期"
-                  value-format="YYYY-MM-DD"
-                  size="small"
-                  unlink-panels
-                />
-                <el-button size="small" @click="setDefaultTradeDateRange">最近一个月</el-button>
+              <div style="display:flex;flex-direction:column;align-items:flex-end;gap:6px;">
+                <div style="display:flex;align-items:center;gap:8px;">
+                  <el-date-picker
+                    v-model="tradeDateRange"
+                    type="daterange"
+                    range-separator="至"
+                    start-placeholder="开始日期"
+                    end-placeholder="结束日期"
+                    value-format="YYYY-MM-DD"
+                    size="small"
+                    unlink-panels
+                  />
+                  <el-button size="small" @click="setDefaultTradeDateRange">最近一个月</el-button>
+                </div>
+                <el-tag size="small" type="success">累计收益：{{ fmtSelectedRangeCumulative }}</el-tag>
               </div>
             </div>
           </template>
@@ -239,6 +242,36 @@ const filteredLatestTrades = computed(() => {
     const dt = _dateText(row?.time)
     return dt && dt >= start && dt <= end
   })
+})
+
+const selectedRangePnl = computed(() => {
+  return (filteredLatestTrades.value || []).reduce((acc, row) => {
+    const pnl = Number(row?.daily_net_pnl)
+    return acc + (Number.isFinite(pnl) ? pnl : 0)
+  }, 0)
+})
+
+const selectedRangeStartEquityBeforeDailyPnl = computed(() => {
+  const rows = filteredLatestTrades.value || []
+  if (!rows.length) return NaN
+  const first = rows[0] || {}
+  const equity = Number(first?.equity)
+  const dailyNetPnl = Number(first?.daily_net_pnl)
+  if (!Number.isFinite(equity)) return NaN
+  const pnl = Number.isFinite(dailyNetPnl) ? dailyNetPnl : 0
+  // 起始日期净值按“当日收益结算前”的口径计算。
+  return equity - pnl
+})
+
+const selectedRangeCumulativeReturn = computed(() => {
+  const base = selectedRangeStartEquityBeforeDailyPnl.value
+  if (!Number.isFinite(base) || base <= 0) return 0
+  const pnlSum = selectedRangePnl.value
+  return pnlSum / base
+})
+
+const fmtSelectedRangeCumulative = computed(() => {
+  return `${fmtMoney(selectedRangePnl.value)} (${fmtPct(selectedRangeCumulativeReturn.value)})`
 })
 
 const resetParams = () => {
