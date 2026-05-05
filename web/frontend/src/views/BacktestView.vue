@@ -105,6 +105,42 @@ const p = reactive({
   interest_method: 'simple', risk_free_rate: false, calculate_baseline: true, apply_weighted_price: true, n_jobs: 5,
 })
 
+const _buildPersistState = () => ({
+  p: { ...p },
+  inputMode: inputMode.value,
+  formulaInput: formulaInput.value,
+  oosStart: oosStart.value,
+  oosEnd: oosEnd.value,
+  enableRealOos: enableRealOos.value,
+  realOosStart: realOosStart.value,
+  realOosEnd: realOosEnd.value,
+  resultMap: resultMap.value,
+})
+
+const _restorePersistState = () => {
+  try {
+    const raw = sessionStorage.getItem(SK)
+    if (!raw) return
+    const parsed = JSON.parse(raw)
+    // Backward compatibility: old payload stores only resultMap.
+    if (parsed && !parsed.p && typeof parsed === 'object') {
+      resultMap.value = parsed
+      return
+    }
+    if (parsed?.p && typeof parsed.p === 'object') Object.assign(p, parsed.p)
+    inputMode.value = parsed?.inputMode || 'db'
+    formulaInput.value = parsed?.formulaInput || ''
+    oosStart.value = parsed?.oosStart || '20250101'
+    oosEnd.value = parsed?.oosEnd || '20251231'
+    enableRealOos.value = !!parsed?.enableRealOos
+    realOosStart.value = parsed?.realOosStart || '20260101'
+    realOosEnd.value = parsed?.realOosEnd || '20260330'
+    resultMap.value = parsed?.resultMap || null
+  } catch {
+    // noop
+  }
+}
+
 const filteredVersions = computed(() => p.collection && versionMap.value[p.collection] ? versionMap.value[p.collection] : allVersions.value)
 
 const resetParams = () => {
@@ -151,8 +187,8 @@ const pickFormulaFromRecord = (rec) => {
   )
 }
 
-const onVerChange = async () => {
-  p.fc_name_list = []
+const onVerChange = async (preserveSelected = false) => {
+  if (!preserveSelected) p.fc_name_list = []
   if (!p.version) { availableFactors.value = []; factorFormulaMap.value = {}; return }
   try {
     const q = { version: p.version }
@@ -168,9 +204,13 @@ const onVerChange = async () => {
       if (formula) m[fn] = formula
     })
     factorFormulaMap.value = m
+    if (preserveSelected && Array.isArray(p.fc_name_list)) {
+      p.fc_name_list = p.fc_name_list.filter(fn => availableFactors.value.includes(fn))
+    }
   } catch {
     availableFactors.value = []
     factorFormulaMap.value = {}
+    if (preserveSelected) p.fc_name_list = []
   }
 }
 
@@ -295,28 +335,21 @@ const handleBt = async () => {
 
 const clearResults = () => {
   resultMap.value = null
-  sessionStorage.removeItem(SK)
 }
 
-watch(resultMap, () => {
+watch(() => _buildPersistState(), (state) => {
   try {
-    if (resultMap.value && Object.keys(resultMap.value).length) {
-      sessionStorage.setItem(SK, JSON.stringify(resultMap.value))
-    } else {
-      sessionStorage.removeItem(SK)
-    }
+    sessionStorage.setItem(SK, JSON.stringify(state))
   } catch {
     // noop
   }
 }, { deep: true })
 
 onMounted(() => {
+  _restorePersistState()
   fetchVersions()
-  try {
-    const s = sessionStorage.getItem(SK)
-    if (s) resultMap.value = JSON.parse(s)
-  } catch {
-    // noop
+  if (p.version) {
+    onVerChange(true)
   }
 })
 </script>

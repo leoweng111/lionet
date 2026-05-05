@@ -88,8 +88,25 @@
         </el-card>
 
         <el-card shadow="hover" v-if="latestTrades.length" style="margin-top:12px;">
-          <template #header><span style="font-weight:600;">最近交易明细</span></template>
-          <el-table :data="latestTrades" stripe size="small" max-height="260">
+          <template #header>
+            <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;">
+              <span style="font-weight:600;">最近交易明细</span>
+              <div style="display:flex;align-items:center;gap:8px;">
+                <el-date-picker
+                  v-model="tradeDateRange"
+                  type="daterange"
+                  range-separator="至"
+                  start-placeholder="开始日期"
+                  end-placeholder="结束日期"
+                  value-format="YYYY-MM-DD"
+                  size="small"
+                  unlink-panels
+                />
+                <el-button size="small" @click="setDefaultTradeDateRange">最近一个月</el-button>
+              </div>
+            </div>
+          </template>
+          <el-table :data="filteredLatestTrades" stripe size="small" max-height="260">
             <el-table-column prop="time" label="日期" width="120"><template #default="{row}">{{ row.time?.slice(0,10) }}</template></el-table-column>
             <el-table-column prop="factor_value" label="因子值" width="90"><template #default="{row}">{{ fmtNum(row.factor_value, 4) }}</template></el-table-column>
             <el-table-column prop="position_lots" label="持仓" width="70" />
@@ -122,6 +139,7 @@ const monitor = ref(null)
 const summaryRows = ref([])
 const summaryColumns = ref([])
 const latestTrades = ref([])
+const tradeDateRange = ref([])
 
 const sp = reactive({
   version: '', factor_name: '', instrument_id: 'C0',
@@ -140,6 +158,7 @@ const _buildPersistState = () => ({
   summaryRows: summaryRows.value,
   summaryColumns: summaryColumns.value,
   latestTrades: latestTrades.value,
+  tradeDateRange: tradeDateRange.value,
 })
 
 const _restorePersistState = () => {
@@ -154,6 +173,7 @@ const _restorePersistState = () => {
     summaryRows.value = Array.isArray(parsed?.summaryRows) ? parsed.summaryRows : []
     summaryColumns.value = Array.isArray(parsed?.summaryColumns) ? parsed.summaryColumns : []
     latestTrades.value = Array.isArray(parsed?.latestTrades) ? parsed.latestTrades : []
+    tradeDateRange.value = Array.isArray(parsed?.tradeDateRange) ? parsed.tradeDateRange : []
   } catch {
     // ignore broken session payload
   }
@@ -185,6 +205,42 @@ const fmtMoney = (v) => Number.isFinite(Number(v)) ? Number(v).toFixed(2) : '-'
 const fmtNum = (v, p = 4) => Number.isFinite(Number(v)) ? Number(v).toFixed(p) : '-'
 const fmtPct = (v) => Number.isFinite(Number(v)) ? `${(Number(v) * 100).toFixed(2)}%` : '-'
 
+const _dateText = (raw) => {
+  const d = new Date(raw)
+  if (Number.isNaN(d.getTime())) return ''
+  const y = d.getFullYear()
+  const m = String(d.getMonth() + 1).padStart(2, '0')
+  const day = String(d.getDate()).padStart(2, '0')
+  return `${y}-${m}-${day}`
+}
+
+const setDefaultTradeDateRange = () => {
+  if (!latestTrades.value.length) {
+    tradeDateRange.value = []
+    return
+  }
+  const lastTime = latestTrades.value[latestTrades.value.length - 1]?.time
+  const end = new Date(lastTime)
+  if (Number.isNaN(end.getTime())) {
+    tradeDateRange.value = []
+    return
+  }
+  const start = new Date(end)
+  start.setMonth(start.getMonth() - 1)
+  tradeDateRange.value = [_dateText(start), _dateText(end)]
+}
+
+const filteredLatestTrades = computed(() => {
+  const list = latestTrades.value || []
+  if (!Array.isArray(tradeDateRange.value) || tradeDateRange.value.length !== 2) return list
+  const [start, end] = tradeDateRange.value
+  if (!start || !end) return list
+  return list.filter((row) => {
+    const dt = _dateText(row?.time)
+    return dt && dt >= start && dt <= end
+  })
+})
+
 const resetParams = () => {
   const keep = { version: sp.version, factor_name: sp.factor_name, collection: sp.collection }
   Object.assign(sp, {
@@ -210,6 +266,7 @@ const resetParams = () => {
   summaryRows.value = []
   summaryColumns.value = []
   latestTrades.value = []
+  tradeDateRange.value = []
 }
 
 const fetchVersions = async () => {
@@ -265,7 +322,10 @@ const _consumeMonitorResult = (result) => {
   summaryRows.value = summary
   summaryColumns.value = summary.length ? Object.keys(summary[0]) : []
   const trades = monitor.value?.nav_data?.trade_detail || []
-  latestTrades.value = trades.slice(Math.max(0, trades.length - 20))
+  latestTrades.value = trades
+  if (!Array.isArray(tradeDateRange.value) || tradeDateRange.value.length !== 2) {
+    setDefaultTradeDateRange()
+  }
 }
 
 const handleUpdatePrice = async () => {
@@ -318,6 +378,9 @@ onMounted(() => {
   fetchVersions()
   if (sp.version) {
     onVerChange(true)
+  }
+  if (!tradeDateRange.value?.length && latestTrades.value?.length) {
+    setDefaultTradeDateRange()
   }
 })
 

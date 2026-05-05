@@ -122,6 +122,38 @@ const sp = reactive({
   signal_delay_days: 1, min_open_ratio: 1.0,
 })
 
+const _buildPersistState = () => ({
+  sp: { ...sp },
+  oosStart: oosStart.value,
+  oosEnd: oosEnd.value,
+  enableRealOos: enableRealOos.value,
+  realOosStart: realOosStart.value,
+  realOosEnd: realOosEnd.value,
+  results: results.value,
+})
+
+const _restorePersistState = () => {
+  try {
+    const raw = sessionStorage.getItem(SK)
+    if (!raw) return
+    const parsed = JSON.parse(raw)
+    // Backward compatibility: old payload stores only results array.
+    if (Array.isArray(parsed)) {
+      results.value = parsed
+      return
+    }
+    if (parsed?.sp && typeof parsed.sp === 'object') Object.assign(sp, parsed.sp)
+    oosStart.value = parsed?.oosStart || '20250101'
+    oosEnd.value = parsed?.oosEnd || '20251231'
+    enableRealOos.value = !!parsed?.enableRealOos
+    realOosStart.value = parsed?.realOosStart || '20260101'
+    realOosEnd.value = parsed?.realOosEnd || '20260330'
+    results.value = Array.isArray(parsed?.results) ? parsed.results : []
+  } catch {
+    // noop
+  }
+}
+
 const filteredVersions = computed(() =>
   sp.collection && versionMap.value[sp.collection]
     ? versionMap.value[sp.collection]
@@ -164,8 +196,8 @@ const onCollChange = () => {
 const pickFormulaFromRecord = (rec) =>
   String(rec?.formula || rec?.factor_formula || rec?.['Factor Formula'] || rec?.expr || '')
 
-const onVerChange = async () => {
-  sp.factor_name_list = []
+const onVerChange = async (preserveSelected = false) => {
+  if (!preserveSelected) sp.factor_name_list = []
   if (!sp.version) { availableFactors.value = []; factorFormulaMap.value = {}; return }
   try {
     const q = { version: sp.version }
@@ -180,8 +212,12 @@ const onVerChange = async () => {
       if (formula) m[f.factor_name] = formula
     })
     factorFormulaMap.value = m
+    if (preserveSelected && Array.isArray(sp.factor_name_list)) {
+      sp.factor_name_list = sp.factor_name_list.filter(fn => availableFactors.value.includes(fn))
+    }
   } catch {
     availableFactors.value = []; factorFormulaMap.value = {}
+    if (preserveSelected) sp.factor_name_list = []
   }
 }
 
@@ -269,15 +305,15 @@ const handleRun = async () => {
   }
 }
 
-const clearResults = () => { results.value = []; sessionStorage.removeItem(SK) }
-watch(results, () => {
-  try { sessionStorage.setItem(SK, JSON.stringify(results.value)) } catch { /* */ }
+const clearResults = () => { results.value = [] }
+watch(() => _buildPersistState(), (state) => {
+  try { sessionStorage.setItem(SK, JSON.stringify(state)) } catch { /* */ }
 }, { deep: true })
 onMounted(() => {
+  _restorePersistState()
   fetchVersions()
-  try {
-    const s = sessionStorage.getItem(SK)
-    if (s) results.value = JSON.parse(s)
-  } catch { /* */ }
+  if (sp.version) {
+    onVerChange(true)
+  }
 })
 </script>
