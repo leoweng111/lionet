@@ -39,6 +39,8 @@ export const getFusionStatus = (taskId) => api.get(`/api/fusion/status/${taskId}
 
 // ── Strategy ──────────────────────────────────────────
 export const runStrategy = (data) => api.post('/api/strategy', data)
+export const updateStrategyMonitorPrice = (data) => api.post('/api/strategy/monitor/update-price', data)
+export const generateStrategyMonitor = (data) => api.post('/api/strategy/monitor/generate', data)
 
 // ── Tasks ─────────────────────────────────────────────
 export const getTasks = (params) => api.get('/api/tasks', { params })

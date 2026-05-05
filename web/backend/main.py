@@ -9,6 +9,7 @@ import sys
 import threading
 import traceback
 import uuid
+from math import floor
 from datetime import datetime
 import time
 from pathlib import Path
@@ -38,8 +39,11 @@ from data.futures import (
 )
 from factors.factor_auto_search import GeneticFactorGenerator, FactorFusioner
 from factors.backtest import BackTester
+from factors.factor_ops import calc_formula_series
+from factors.factor_utils import get_weighted_price
 from strategy.strategy import Strategy
 from utils.params import (
+    FUTURES_CONTRACT_MULTIPLIER,
     GP_DEFAULT_FILTER_INDICATOR_DICT,
     GP_DEFAULT_FITNESS_INDICATOR_WEIGHT,
     GP_INDICATOR_DIRECTION,
@@ -402,6 +406,34 @@ class StrategyBatchParams(BaseModel):
     min_open_ratio: float = 1.0
 
 
+class StrategyMonitorParams(BaseModel):
+    version: str
+    factor_name: str
+    instrument_id: str = "C0"
+    trading_start_time: str = "20200101"
+    database: str = "factors"
+    collection: str = "genetic_programming"
+    initial_capital: float = 1000000.0
+    margin_rate: float = 0.1
+    fee_per_lot: float = 2.0
+    slippage: float = 1.0
+    apply_rolling_norm: bool = True
+    rolling_norm_window: int = 30
+    rolling_norm_min_periods: int = 20
+    rolling_norm_eps: float = 1e-8
+    rolling_norm_clip: float = 5.0
+    signal_delay_days: int = 1
+    min_open_ratio: float = 1.0
+
+    # Monitor-specific options.
+    price_update_start_date: Optional[str] = None
+    price_update_end_date: Optional[str] = None
+    load_prev_weighted_factor: Optional[bool] = None
+    wait_time: Optional[float] = None
+    method: Optional[str] = None
+    only_update_new: Optional[bool] = None
+
+
 class FactorQueryParams(BaseModel):
     version: Optional[str] = None
     collection: Optional[str] = None
@@ -650,6 +682,302 @@ def _extract_strategy_nav_data(strat: Strategy) -> Dict[str, Any]:
         ] if c in detail.columns]
         result["trade_detail"] = _df_to_records(detail[keep_cols])
     return result
+
+
+def _to_ymd_text(ts_obj: Any) -> str:
+    ts = pd.to_datetime(ts_obj, errors='coerce')
+    if pd.isna(ts):
+        return ""
+    return ts.strftime('%Y%m%d')
+
+
+def _to_cn_date_text(ts_obj: Any) -> str:
+    ts = pd.to_datetime(ts_obj, errors='coerce')
+    if pd.isna(ts):
+        return "-"
+    return ts.strftime('%Y年%m月%d日')
+
+
+def _annualized_and_cumulative_from_detail(detail: pd.DataFrame, monitor_start_time: str) -> Dict[str, float]:
+    if detail.empty:
+        return {"cumulative_return": 0.0, "annualized_return": 0.0}
+
+    start_ts = pd.to_datetime(monitor_start_time, errors='coerce')
+    scoped = detail.copy()
+    if pd.notna(start_ts):
+        scoped = scoped.loc[scoped['time'] >= start_ts]
+    if scoped.empty:
+        scoped = detail.copy()
+
+    daily_net_ret = pd.to_numeric(scoped.get('daily_net_ret', pd.Series(dtype=float)), errors='coerce').fillna(0.0)
+    cumulative_return = float(daily_net_ret.sum())
+    annualized_return = float(daily_net_ret.mean() * 252) if len(daily_net_ret) else 0.0
+    return {
+        "cumulative_return": cumulative_return,
+        "annualized_return": annualized_return,
+    }
+
+
+def _build_monitor_message(cumulative_return: float, annualized_return: float) -> str:
+    if cumulative_return < 0 and annualized_return < 0:
+        return "当前阶段承压，不要放弃，先稳住仓位与回撤控制。"
+    if cumulative_return < 0:
+        return "累计收益暂时回撤，保持耐心，策略调优正在发挥价值。"
+    if annualized_return > 0.15:
+        return "表现很亮眼，再接再厉，继续严格执行交易纪律。"
+    if annualized_return > 0:
+        return "策略保持正收益节奏，稳扎稳打，继续优化细节。"
+    return "收益接近持平，继续观察信号质量与交易成本控制。"
+
+
+def _build_next_trade_action(current_lots: int, target_lots: int) -> Dict[str, Any]:
+    delta_lots = int(target_lots - current_lots)
+    if delta_lots == 0:
+        return {
+            "action": "HOLD",
+            "action_text": "无需开仓，维持当前仓位",
+            "delta_lots": 0,
+        }
+    if current_lots == 0:
+        if target_lots > 0:
+            return {
+                "action": "OPEN_LONG",
+                "action_text": f"开多仓 {abs(delta_lots)} 手",
+                "delta_lots": delta_lots,
+            }
+        return {
+            "action": "OPEN_SHORT",
+            "action_text": f"开空仓 {abs(delta_lots)} 手",
+            "delta_lots": delta_lots,
+        }
+
+    if current_lots > 0 and target_lots >= 0:
+        txt = f"加多 {abs(delta_lots)} 手" if delta_lots > 0 else f"减多 {abs(delta_lots)} 手"
+        return {"action": "ADJUST_LONG", "action_text": txt, "delta_lots": delta_lots}
+    if current_lots < 0 and target_lots <= 0:
+        txt = f"加空 {abs(delta_lots)} 手" if delta_lots < 0 else f"减空 {abs(delta_lots)} 手"
+        return {"action": "ADJUST_SHORT", "action_text": txt, "delta_lots": delta_lots}
+
+    # Reverse position.
+    if target_lots > 0:
+        txt = f"先平空 {abs(current_lots)} 手，再开多 {abs(target_lots)} 手"
+        return {"action": "REVERSE_TO_LONG", "action_text": txt, "delta_lots": delta_lots}
+    txt = f"先平多 {abs(current_lots)} 手，再开空 {abs(target_lots)} 手"
+    return {"action": "REVERSE_TO_SHORT", "action_text": txt, "delta_lots": delta_lots}
+
+
+def _monitor_expected_latest_trading_day() -> str:
+    today = datetime.now().strftime('%Y%m%d')
+    start = (pd.Timestamp.today().normalize() - pd.Timedelta(days=20)).strftime('%Y%m%d')
+    trading_days = get_trading_days(start_date=start, end_date=today)
+    if trading_days:
+        return trading_days[-1].strftime('%Y%m%d')
+    return today
+
+
+def _monitor_latest_db_day(instrument_id: str) -> Optional[str]:
+    main_id = Strategy._main_instrument(instrument_id)
+    # Prefer recent windows to avoid scanning a very large collection.
+    end_day = datetime.now().strftime('%Y%m%d')
+    recent_starts = [
+        (pd.Timestamp.today().normalize() - pd.Timedelta(days=90)).strftime('%Y%m%d'),
+        (pd.Timestamp.today().normalize() - pd.Timedelta(days=365)).strftime('%Y%m%d'),
+        '20000101',
+    ]
+    for start_day in recent_starts:
+        df = get_futures_continuous_contract_price(
+            instrument_id=main_id,
+            start_date=start_day,
+            end_date=end_day,
+            from_database=True,
+        )
+        if not isinstance(df, pd.DataFrame) or df.empty or 'time' not in df.columns:
+            continue
+        ts = pd.to_datetime(df['time'], errors='coerce').dropna()
+        if ts.empty:
+            continue
+        return ts.max().strftime('%Y%m%d')
+    return None
+
+
+def _check_monitor_price_freshness(instrument_id: str) -> Dict[str, Any]:
+    latest_db_day = _monitor_latest_db_day(instrument_id)
+    expected_day = _monitor_expected_latest_trading_day()
+    is_latest = bool(latest_db_day and latest_db_day >= expected_day)
+    return {
+        "latest_db_day": latest_db_day,
+        "expected_latest_trading_day": expected_day,
+        "is_latest": is_latest,
+    }
+
+
+def _normalize_trading_start_day(raw_day: Optional[str]) -> str:
+    day = str(raw_day or '').strip()
+    if not day:
+        return RESEARCH_START_DATE
+    try:
+        return pd.Timestamp(day).strftime('%Y%m%d')
+    except Exception:
+        return RESEARCH_START_DATE
+
+
+def _safe_int_value(raw: Any, default: int = 0) -> int:
+    v = pd.to_numeric(raw, errors='coerce')
+    if pd.isna(v):
+        return int(default)
+    return int(v)
+
+
+def _safe_float_value(raw: Any, default: float = 0.0) -> float:
+    v = pd.to_numeric(raw, errors='coerce')
+    if pd.isna(v):
+        return float(default)
+    return float(v)
+
+
+def _run_strategy_monitor_update_price(params: StrategyMonitorParams) -> Dict[str, Any]:
+    cfg = _reload_market_schedule_config_from_file()
+    trading_start_day = _normalize_trading_start_day(params.trading_start_time)
+    update_kwargs = {
+        "instrument_id": [params.instrument_id],
+        "start_date": params.price_update_start_date or trading_start_day,
+        "end_date": params.price_update_end_date,
+        "load_prev_weighted_factor": (
+            bool(params.load_prev_weighted_factor)
+            if params.load_prev_weighted_factor is not None
+            else bool(cfg.get("load_prev_weighted_factor", True))
+        ),
+        "wait_time": (
+            float(params.wait_time)
+            if params.wait_time is not None
+            else float(cfg.get("wait_time", 2.0))
+        ),
+        "method": str(params.method or cfg.get("method") or "bulk_write_update"),
+        "only_update_new": (
+            bool(params.only_update_new)
+            if params.only_update_new is not None
+            else bool(cfg.get("only_update_new", True))
+        ),
+    }
+    update_futures_continuous_contract_price(**update_kwargs)
+    return _check_monitor_price_freshness(params.instrument_id)
+
+
+def _run_strategy_monitor_generate(params: StrategyMonitorParams) -> Dict[str, Any]:
+    freshness = _check_monitor_price_freshness(params.instrument_id)
+    latest_db_day = freshness.get("latest_db_day")
+    if not latest_db_day:
+        raise ValueError(f"未找到 {params.instrument_id} 的价格数据，请先更新行情数据")
+
+    trading_start_day = _normalize_trading_start_day(params.trading_start_time)
+    strat = Strategy(
+        version=params.version,
+        factor_name=params.factor_name,
+        instrument_id=params.instrument_id,
+        start_time=trading_start_day,
+        end_time=latest_db_day,
+        database=params.database,
+        collection=params.collection,
+        initial_capital=params.initial_capital,
+        margin_rate=params.margin_rate,
+        fee_per_lot=params.fee_per_lot,
+        slippage=params.slippage,
+        apply_rolling_norm=params.apply_rolling_norm,
+        rolling_norm_window=params.rolling_norm_window,
+        rolling_norm_min_periods=params.rolling_norm_min_periods,
+        rolling_norm_eps=params.rolling_norm_eps,
+        rolling_norm_clip=params.rolling_norm_clip,
+        signal_delay_days=params.signal_delay_days,
+        min_open_ratio=params.min_open_ratio,
+    )
+    strat.backtest()
+
+    detail = strat.performance_detail.copy().sort_values('time').reset_index(drop=True)
+    if detail.empty:
+        raise ValueError('Strategy monitor got empty detail result.')
+
+    raw_df = strat._load_price_df().sort_values('time').reset_index(drop=True)
+    factor_input = get_weighted_price(raw_df)
+    factor_formula = strat._resolve_factor_formula()
+    factor_input['monitor_factor_raw'] = pd.to_numeric(
+        calc_formula_series(df=factor_input, formula=factor_formula),
+        errors='coerce',
+    )
+
+    latest_market = raw_df.iloc[-1]
+    latest_factor_row = factor_input.iloc[-1]
+    latest_trade = detail.iloc[-1]
+
+    latest_day = pd.Timestamp(latest_market['time'])
+    trading_days = get_trading_days(
+        start_date=latest_day.strftime('%Y%m%d'),
+        end_date=(latest_day + pd.Timedelta(days=14)).strftime('%Y%m%d'),
+    )
+    next_trade_day = trading_days[1] if len(trading_days) >= 2 else None
+
+    root = Strategy._root_instrument(params.instrument_id)
+    multiplier = int(FUTURES_CONTRACT_MULTIPLIER[root])
+
+    factor_for_t_open = _safe_float_value(latest_trade.get('factor_value'), 0.0)
+    factor_for_t1_open = _safe_float_value(latest_factor_row.get('monitor_factor_raw'), 0.0)
+    current_lots = _safe_int_value(latest_trade.get('position_lots'), 0)
+    current_equity = _safe_float_value(latest_trade.get('equity'), float(params.initial_capital))
+
+    # T+1 open is unknown at monitor time; use latest close as reference quote.
+    reference_price = _safe_float_value(latest_market.get('close'), 0.0)
+    if reference_price <= 0:
+        reference_price = _safe_float_value(latest_market.get('open'), 0.0)
+    if reference_price <= 0:
+        raise ValueError('最新价格无效，无法生成T+1交易策略')
+    target_lots = Strategy._calc_target_lots(
+        float(params.initial_capital),
+        factor_for_t1_open,
+        reference_price,
+        multiplier,
+        float(params.min_open_ratio),
+    )
+    max_lots_by_margin = floor(max(current_equity, 0.0) / (reference_price * multiplier * float(params.margin_rate))) if reference_price > 0 else 0
+    if abs(target_lots) > max_lots_by_margin:
+        target_lots = int(np.sign(target_lots)) * int(max_lots_by_margin)
+
+    action = _build_next_trade_action(current_lots=current_lots, target_lots=target_lots)
+    perf = _annualized_and_cumulative_from_detail(
+        detail=detail,
+        monitor_start_time=trading_start_day,
+    )
+
+    nav_data = _extract_strategy_nav_data(strat)
+    return {
+        "factor_name": params.factor_name,
+        "version": params.version,
+        "instrument_id": params.instrument_id,
+        "latest_price_date": _to_ymd_text(latest_day),
+        "latest_price_date_cn": _to_cn_date_text(latest_day),
+        "next_trade_date": _to_ymd_text(next_trade_day),
+        "next_trade_date_cn": _to_cn_date_text(next_trade_day),
+        "latest_open": float(pd.to_numeric(latest_market.get('open'), errors='coerce')),
+        "latest_close": float(pd.to_numeric(latest_market.get('close'), errors='coerce')),
+        "reference_price_for_next_trade": reference_price,
+        "reference_price_note": "按T日收盘价估算T+1开盘下单手数",
+        "account_equity": current_equity,
+        "current_position_lots": current_lots,
+        "target_position_lots": int(target_lots),
+        "required_margin_est": abs(int(target_lots)) * reference_price * multiplier * float(params.margin_rate),
+        "available_cash_est": current_equity - abs(int(target_lots)) * reference_price * multiplier * float(params.margin_rate),
+        "factor_value_t": factor_for_t_open,
+        "factor_value_t1": factor_for_t1_open,
+        "action": action,
+        "cumulative_return": perf["cumulative_return"],
+        "annualized_return": perf["annualized_return"],
+        "encouragement": _build_monitor_message(perf["cumulative_return"], perf["annualized_return"]),
+        "nav_data": nav_data,
+        "price_freshness": freshness,
+    }
+
+
+def _run_strategy_monitor(params: StrategyMonitorParams) -> Dict[str, Any]:
+    # Backward-compatible helper for tests and scripts.
+    return _run_strategy_monitor_generate(params)
 
 
 def _save_task_to_db(task_id: str, params_dict: dict, status: str,
@@ -1871,6 +2199,39 @@ async def run_strategy(params: StrategyBatchParams):
 
         return {"status": "ok", "results": all_results, "version": params.version}
     except Exception as e:
+        raise HTTPException(status_code=500, detail=traceback.format_exc())
+
+
+@app.post("/api/strategy/monitor/update-price")
+async def run_strategy_monitor_update_price(params: StrategyMonitorParams):
+    """Update market data to latest day for strategy monitor."""
+    try:
+        loop = asyncio.get_event_loop()
+        result = await loop.run_in_executor(None, _run_strategy_monitor_update_price, params)
+        return {"status": "ok", "result": result}
+    except Exception:
+        raise HTTPException(status_code=500, detail=traceback.format_exc())
+
+
+@app.post("/api/strategy/monitor/generate")
+async def run_strategy_monitor_generate(params: StrategyMonitorParams):
+    """Generate T+1 strategy suggestion based on latest market data."""
+    try:
+        freshness = _check_monitor_price_freshness(params.instrument_id)
+        if not freshness.get("is_latest", False):
+            latest_db_day = freshness.get("latest_db_day") or "无"
+            expected_day = freshness.get("expected_latest_trading_day") or "未知"
+            raise HTTPException(
+                status_code=409,
+                detail=f"最新交易日价格数据尚未更新（当前DB: {latest_db_day}, 预期至少: {expected_day}），请先点击“更新行情数据”。",
+            )
+
+        loop = asyncio.get_event_loop()
+        result = await loop.run_in_executor(None, _run_strategy_monitor_generate, params)
+        return {"status": "ok", "result": result}
+    except HTTPException:
+        raise
+    except Exception:
         raise HTTPException(status_code=500, detail=traceback.format_exc())
 
 

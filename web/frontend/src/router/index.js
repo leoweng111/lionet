@@ -36,6 +36,12 @@ const routes = [
     meta: { title: '策略分析', icon: 'Coin' },
   },
   {
+    path: '/strategy-monitor',
+    name: 'StrategyMonitor',
+    component: () => import('../views/StrategyMonitorView.vue'),
+    meta: { title: '策略监控', icon: 'Monitor' },
+  },
+  {
     path: '/market-data',
     name: 'MarketData',
     component: () => import('../views/MarketDataView.vue'),

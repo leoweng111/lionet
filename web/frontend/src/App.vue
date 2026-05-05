@@ -61,6 +61,7 @@ const menuRoutes = [
   { path: '/factors', meta: { title: '因子库', icon: 'DataAnalysis' } },
   { path: '/backtest', meta: { title: '回测分析', icon: 'TrendCharts' } },
   { path: '/strategy', meta: { title: '策略分析', icon: 'Coin' } },
+  { path: '/strategy-monitor', meta: { title: '策略监控', icon: 'Monitor' } },
   { path: '/market-data', meta: { title: '行情数据', icon: 'Histogram' } },
   { path: '/tasks', meta: { title: '任务管理', icon: 'List' } },
 ]
