@@ -25,6 +25,9 @@ export const startMining = (data) => api.post('/api/mining/start', data)
 export const getMiningStatus = (taskId) => api.get(`/api/mining/status/${taskId}`)
 export const terminateMining = (taskId) => api.post(`/api/mining/terminate/${taskId}`)
 export const getMiningIndicatorOptions = () => api.get('/api/mining/indicator-options')
+export const getMiningAutoConfig = () => api.get('/api/mining/auto-config')
+export const updateMiningAutoConfig = (data) => api.post('/api/mining/auto-config', data)
+export const getMiningAutoSchedulerStatus = () => api.get('/api/mining/auto-scheduler-status')
 
 // ── Backtest ──────────────────────────────────────────
 export const runBacktest = (data) => api.post('/api/backtest', data)

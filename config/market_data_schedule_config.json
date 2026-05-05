@@ -1,0 +1,11 @@
+{
+  "enabled": true,
+  "instrument_id": [
+    "C0"
+  ],
+  "load_prev_weighted_factor": true,
+  "method": "bulk_write_update",
+  "only_update_new": true,
+  "schedule_time": "18:00",
+  "wait_time": 2.0
+}

@@ -1,0 +1,102 @@
+{
+  "Gross Calmar": {
+    "direction": 1,
+    "mean_threshold": null,
+    "yearly_threshold": null
+  },
+  "Gross MaxDD": {
+    "direction": -1,
+    "mean_threshold": null,
+    "yearly_threshold": null
+  },
+  "Gross Return": {
+    "direction": 1,
+    "mean_threshold": null,
+    "yearly_threshold": null
+  },
+  "Gross Sharpe": {
+    "direction": 1,
+    "mean_threshold": null,
+    "yearly_threshold": null
+  },
+  "Gross Sortino": {
+    "direction": 1,
+    "mean_threshold": null,
+    "yearly_threshold": null
+  },
+  "Gross Volatility": {
+    "direction": -1,
+    "mean_threshold": null,
+    "yearly_threshold": null
+  },
+  "Gross Win Rate": {
+    "direction": 1,
+    "mean_threshold": null,
+    "yearly_threshold": null
+  },
+  "Net Calmar": {
+    "direction": 1,
+    "mean_threshold": null,
+    "yearly_threshold": null
+  },
+  "Net MaxDD": {
+    "direction": -1,
+    "mean_threshold": null,
+    "yearly_threshold": null
+  },
+  "Net Return": {
+    "direction": 1,
+    "mean_threshold": 0.05,
+    "yearly_threshold": 0.03
+  },
+  "Net Sharpe": {
+    "direction": 1,
+    "mean_threshold": 0.5,
+    "yearly_threshold": 0.3
+  },
+  "Net Sortino": {
+    "direction": 1,
+    "mean_threshold": null,
+    "yearly_threshold": null
+  },
+  "Net Volatility": {
+    "direction": -1,
+    "mean_threshold": null,
+    "yearly_threshold": null
+  },
+  "Net Win Rate": {
+    "direction": 1,
+    "mean_threshold": null,
+    "yearly_threshold": null
+  },
+  "T-corr": {
+    "direction": 1,
+    "mean_threshold": null,
+    "yearly_threshold": null
+  },
+  "TS IC": {
+    "direction": 1,
+    "mean_threshold": null,
+    "yearly_threshold": null
+  },
+  "TS ICIR": {
+    "direction": 1,
+    "mean_threshold": null,
+    "yearly_threshold": null
+  },
+  "TS RankIC": {
+    "direction": 1,
+    "mean_threshold": null,
+    "yearly_threshold": null
+  },
+  "TS RankICIR": {
+    "direction": 1,
+    "mean_threshold": null,
+    "yearly_threshold": null
+  },
+  "Turnover": {
+    "direction": -1,
+    "mean_threshold": null,
+    "yearly_threshold": null
+  }
+}

@@ -10,6 +10,65 @@
       <el-tab-pane label="自动挖掘" name="auto" />
     </el-tabs>
 
+    <el-row v-if="activeMiningTab === 'auto'" :gutter="20" style="margin-bottom:12px;">
+      <el-col :xs="24" :sm="24" :md="12" :lg="12" :xl="12">
+        <el-card shadow="hover" class="action-panel-card">
+          <template #header><span style="font-weight:600;">自动挖掘配置</span></template>
+          <el-form :model="autoMiningSettings" label-position="top" size="small">
+            <el-form-item label="自动挖掘">
+              <el-switch v-model="autoMiningSettings.enabled" />
+            </el-form-item>
+            <el-form-item label="自动挖掘时间">
+              <el-time-picker
+                v-model="autoMiningSettings.scheduleTime"
+                value-format="HH:mm"
+                format="HH:mm"
+                :disabled="!autoMiningSettings.enabled"
+                style="width:100%;"
+              />
+            </el-form-item>
+            <el-form-item label="任务数量">
+              <el-input-number
+                v-model="autoMiningSettings.taskCount"
+                :min="1"
+                :max="20"
+                :disabled="!autoMiningSettings.enabled"
+                style="width:100%;"
+              />
+            </el-form-item>
+            <div style="font-size:12px;color:#909399;line-height:1.5;">
+              版本号预览：{{ autoVersionPreview }}
+            </div>
+          </el-form>
+        </el-card>
+      </el-col>
+      <el-col :xs="24" :sm="24" :md="12" :lg="12" :xl="12">
+        <el-card shadow="hover" class="action-panel-card">
+          <template #header><span style="font-weight:600;">自动挖掘调度状态</span></template>
+          <el-descriptions :column="1" border size="small">
+            <el-descriptions-item label="调度开关">
+              <el-tag :type="schedulerStatus.enabled ? 'success' : 'info'" size="small">{{ schedulerStatus.enabled ? '已开启' : '已关闭' }}</el-tag>
+            </el-descriptions-item>
+            <el-descriptions-item label="调度线程">
+              <el-tag :type="schedulerStatus.thread_alive ? 'success' : 'danger'" size="small">{{ schedulerStatus.thread_alive ? '运行中' : '未运行' }}</el-tag>
+            </el-descriptions-item>
+            <el-descriptions-item label="上次轮询">{{ schedulerStatus.last_tick_at || '-' }}</el-descriptions-item>
+            <el-descriptions-item label="上次触发">{{ schedulerStatus.last_trigger_at || '-' }}</el-descriptions-item>
+            <el-descriptions-item label="下次触发">{{ schedulerStatus.next_trigger_at || '-' }}</el-descriptions-item>
+            <el-descriptions-item label="最近跳过原因">
+              <span :style="{ color: schedulerStatus.last_skip_reason ? '#e6a23c' : '#909399' }">{{ schedulerStatus.last_skip_reason || '-' }}</span>
+            </el-descriptions-item>
+            <el-descriptions-item label="最近提交任务ID">
+              <span>{{ (schedulerStatus.submitted_task_ids || []).join(', ') || '-' }}</span>
+            </el-descriptions-item>
+            <el-descriptions-item label="最近错误">
+              <span :style="{ color: schedulerStatus.last_error ? '#f56c6c' : '#909399' }">{{ schedulerStatus.last_error || '-' }}</span>
+            </el-descriptions-item>
+          </el-descriptions>
+        </el-card>
+      </el-col>
+    </el-row>
+
     <el-row :gutter="20" class="responsive-row top-panel-row">
       <el-col :span="24">
         <el-card shadow="hover">
@@ -167,7 +226,7 @@
     </el-row>
 
     <el-row :gutter="20" class="responsive-row bottom-panel-row" style="margin-top:16px;">
-      <el-col :xs="24" :sm="24" :md="10" :lg="9" :xl="9" class="bottom-panel-col">
+      <el-col v-if="activeMiningTab === 'start'" :xs="24" :sm="24" :md="10" :lg="9" :xl="9" class="bottom-panel-col">
         <el-card shadow="hover" class="action-panel-card" style="margin-bottom:16px;">
           <template #header><span style="font-weight:600;">开始挖掘</span></template>
           <el-button type="primary" size="large" :loading="mining" @click="handleStartMining" style="width:100%;">
@@ -179,38 +238,9 @@
           </div>
         </el-card>
 
-        <el-card v-if="activeMiningTab === 'auto'" shadow="hover" class="action-panel-card" style="margin-bottom:16px;">
-          <template #header><span style="font-weight:600;">自动挖掘配置</span></template>
-          <el-form :model="autoMiningSettings" label-position="top" size="small">
-            <el-form-item label="自动挖掘">
-              <el-switch v-model="autoMiningSettings.enabled" />
-            </el-form-item>
-            <el-form-item label="自动挖掘时间">
-              <el-time-picker
-                v-model="autoMiningSettings.scheduleTime"
-                value-format="HH:mm"
-                format="HH:mm"
-                :disabled="!autoMiningSettings.enabled"
-                style="width:100%;"
-              />
-            </el-form-item>
-            <el-form-item label="任务数量">
-              <el-input-number
-                v-model="autoMiningSettings.taskCount"
-                :min="1"
-                :max="20"
-                :disabled="!autoMiningSettings.enabled"
-                style="width:100%;"
-              />
-            </el-form-item>
-            <div style="font-size:12px;color:#909399;line-height:1.5;">
-              版本号预览：{{ autoVersionPreview }}
-            </div>
-          </el-form>
-        </el-card>
       </el-col>
 
-      <el-col :xs="24" :sm="24" :md="14" :lg="15" :xl="15" class="bottom-panel-col">
+      <el-col :xs="24" :sm="24" :md="activeMiningTab === 'start' ? 14 : 24" :lg="activeMiningTab === 'start' ? 15 : 24" :xl="activeMiningTab === 'start' ? 15 : 24" class="bottom-panel-col">
         <el-card shadow="hover" style="margin-bottom:16px;" v-if="taskId">
           <template #header><span style="font-weight:600;">任务状态</span></template>
           <el-descriptions :column="2" size="small" border>
@@ -249,14 +279,10 @@
 <script setup>
 import { ref, reactive, computed, onMounted, onUnmounted, watch } from 'vue'
 import { ElMessage } from 'element-plus'
-import { startMining, getMiningStatus, getTasks, getMiningIndicatorOptions } from '../api'
+import { startMining, getMiningStatus, getTasks, getMiningIndicatorOptions, getMiningAutoConfig, updateMiningAutoConfig, getMiningAutoSchedulerStatus } from '../api'
 import NavChart from '../components/NavChart.vue'
 
 const MINING_TAB_KEY = 'GP_MINING_ACTIVE_TAB'
-const AUTO_PARAMS_KEY = 'GP_AUTO_SEARCH_PARAMS'
-const AUTO_WEIGHT_KEY = 'GP_AUTO_SEARCH_FITNESS_INDICATOR_WEIGHT'
-const AUTO_SETTINGS_KEY = 'GP_AUTO_SEARCH_SETTINGS'
-const AUTO_LAST_TRIGGER_DAY_KEY = 'GP_AUTO_SEARCH_LAST_TRIGGER_DAY'
 
 const supportedIndicators = ref(['Net Return', 'Net Sharpe', 'TS IC'])
 const indicatorDirection = ref({ 'Net Return': 1, 'Net Sharpe': 1, 'TS IC': 1 })
@@ -318,11 +344,6 @@ const defaultParams = () => ({
 })
 
 const _clone = (obj) => JSON.parse(JSON.stringify(obj))
-const _safeParse = (txt, fallback = null) => {
-  if (!txt) return fallback
-  try { return JSON.parse(txt) } catch { return fallback }
-}
-
 const activeMiningTab = ref(localStorage.getItem(MINING_TAB_KEY) || 'start')
 const params = reactive(defaultParams())
 const manualParamsSnapshot = ref(_clone(params))
@@ -331,6 +352,39 @@ const autoMiningSettings = reactive({
   scheduleTime: '18:00',
   taskCount: 1,
 })
+const autoConfigReady = ref(false)
+let autoConfigSaveTimer = null
+let schedulerStatusTimer = null
+const schedulerStatus = reactive({
+  enabled: false,
+  thread_alive: false,
+  last_tick_at: '',
+  last_trigger_at: '',
+  next_trigger_at: '',
+  last_skip_reason: '',
+  submitted_task_ids: [],
+  last_error: '',
+})
+
+const _applySchedulerStatus = (payload = {}) => {
+  schedulerStatus.enabled = !!payload.enabled
+  schedulerStatus.thread_alive = !!payload.thread_alive
+  schedulerStatus.last_tick_at = payload.last_tick_at || ''
+  schedulerStatus.last_trigger_at = payload.last_trigger_at || ''
+  schedulerStatus.next_trigger_at = payload.next_trigger_at || ''
+  schedulerStatus.last_skip_reason = payload.last_skip_reason || ''
+  schedulerStatus.submitted_task_ids = Array.isArray(payload.submitted_task_ids) ? payload.submitted_task_ids : []
+  schedulerStatus.last_error = payload.last_error || ''
+}
+
+const _loadSchedulerStatus = async () => {
+  try {
+    const { data } = await getMiningAutoSchedulerStatus()
+    _applySchedulerStatus(data || {})
+  } catch {
+    // keep previous status on transient backend errors
+  }
+}
 
 const _localDateText = () => {
   const d = new Date()
@@ -338,13 +392,6 @@ const _localDateText = () => {
   const m = String(d.getMonth() + 1).padStart(2, '0')
   const day = String(d.getDate()).padStart(2, '0')
   return `${y}${m}${day}`
-}
-
-const _localTimeText = () => {
-  const d = new Date()
-  const hh = String(d.getHours()).padStart(2, '0')
-  const mm = String(d.getMinutes()).padStart(2, '0')
-  return `${hh}:${mm}`
 }
 
 const autoVersionPreview = computed(() => {
@@ -355,10 +402,8 @@ const autoVersionPreview = computed(() => {
   return versions.join(', ')
 })
 
-const _loadAutoParams = () => {
-  const savedParams = _safeParse(localStorage.getItem(AUTO_PARAMS_KEY), {}) || {}
-  const next = { ...defaultParams(), ...savedParams }
-  const savedWeight = _safeParse(localStorage.getItem(AUTO_WEIGHT_KEY), {}) || {}
+const _loadAutoParams = (savedParams = {}, savedWeight = {}) => {
+  const next = { ...defaultParams(), ...(savedParams || {}) }
   next.fitness_indicator_dict = {
     ..._buildDefaultFitnessIndicatorWeight(supportedIndicators.value),
     ...(next.fitness_indicator_dict || {}),
@@ -367,80 +412,106 @@ const _loadAutoParams = () => {
   Object.assign(params, next)
 }
 
-const _saveAutoParams = () => {
-  localStorage.setItem(AUTO_PARAMS_KEY, JSON.stringify(_clone(params)))
-  localStorage.setItem(AUTO_WEIGHT_KEY, JSON.stringify(_clone(params.fitness_indicator_dict || {})))
-}
-
-const _loadAutoSettings = () => {
-  const saved = _safeParse(localStorage.getItem(AUTO_SETTINGS_KEY), {}) || {}
+const _applyAutoSettings = (saved = {}) => {
   autoMiningSettings.enabled = !!saved.enabled
-  autoMiningSettings.scheduleTime = saved.scheduleTime || '18:00'
-  autoMiningSettings.taskCount = Number(saved.taskCount) > 0 ? Number(saved.taskCount) : 1
+  autoMiningSettings.scheduleTime = saved.schedule_time || saved.scheduleTime || '18:00'
+  autoMiningSettings.taskCount = Number(saved.task_count ?? saved.taskCount) > 0 ? Number(saved.task_count ?? saved.taskCount) : 1
 }
 
-const _saveAutoSettings = () => {
-  localStorage.setItem(AUTO_SETTINGS_KEY, JSON.stringify(_clone(autoMiningSettings)))
+const _saveAutoConfig = async () => {
+  if (!autoConfigReady.value || activeMiningTab.value !== 'auto') return
+  try {
+    await updateMiningAutoConfig({
+      auto_search_settings: {
+        enabled: autoMiningSettings.enabled,
+        schedule_time: autoMiningSettings.scheduleTime,
+        task_count: autoMiningSettings.taskCount,
+      },
+      auto_search_params: _clone(params),
+      default_fitness_indicator_weight: _clone(params.fitness_indicator_dict || {}),
+      default_filter_indicator_dict: _clone(params.filter_indicator_dict || {}),
+    })
+  } catch (e) {
+    schedulerStatus.last_error = `自动配置保存失败: ${e?.response?.data?.detail || e?.message || 'unknown error'}`
+  }
+}
+
+const _queueSaveAutoConfig = () => {
+  if (autoConfigSaveTimer) clearTimeout(autoConfigSaveTimer)
+  autoConfigSaveTimer = setTimeout(() => {
+    _saveAutoConfig()
+  }, 300)
 }
 
 const resetParams = () => {
   Object.assign(params, defaultParams())
   if (activeMiningTab.value === 'auto') {
-    _saveAutoParams()
+    _queueSaveAutoConfig()
   } else {
     manualParamsSnapshot.value = _clone(params)
   }
 }
 
 onMounted(async () => {
-  _loadAutoSettings()
+  await _loadSchedulerStatus()
+  if (schedulerStatusTimer) clearInterval(schedulerStatusTimer)
+  schedulerStatusTimer = setInterval(() => {
+    _loadSchedulerStatus()
+  }, 5000)
   try {
-    const { data } = await getMiningIndicatorOptions()
-    supportedIndicators.value = data.supported_indicator || supportedIndicators.value
-    indicatorDirection.value = data.indicator_direction || indicatorDirection.value
+    const [{ data: indicatorData }, { data: autoConfig }] = await Promise.all([
+      getMiningIndicatorOptions(),
+      getMiningAutoConfig(),
+    ])
+    supportedIndicators.value = indicatorData.supported_indicator || supportedIndicators.value
+    indicatorDirection.value = indicatorData.indicator_direction || indicatorDirection.value
 
     Object.assign(params, defaultParams())
     manualParamsSnapshot.value = _clone(params)
+
+    _applyAutoSettings(autoConfig.auto_search_settings || {})
+    const savedWeight = autoConfig.default_fitness_indicator_weight || {}
     if (activeMiningTab.value === 'auto') {
-      _loadAutoParams()
+      _loadAutoParams(autoConfig.auto_search_params || {}, savedWeight)
     }
+    autoConfigReady.value = true
   } catch {
-    // fallback to local defaults when backend metadata endpoint is unavailable
-    if (activeMiningTab.value === 'auto') {
-      _loadAutoParams()
-    }
+    // fallback to local defaults when backend config endpoint is unavailable
+    autoConfigReady.value = true
   }
 })
 
 watch(activeMiningTab, (next, prev) => {
   localStorage.setItem(MINING_TAB_KEY, next)
-  if (prev === 'auto') {
-    _saveAutoParams()
-  } else {
+  if (prev !== 'auto') {
     manualParamsSnapshot.value = _clone(params)
   }
   if (next === 'auto') {
-    _loadAutoParams()
+    getMiningAutoConfig()
+      .then(({ data }) => {
+        _applyAutoSettings(data.auto_search_settings || {})
+        _loadAutoParams(data.auto_search_params || {}, data.default_fitness_indicator_weight || {})
+      })
+      .catch(() => {
+        _loadAutoParams({}, {})
+      })
   } else {
     Object.assign(params, _clone(manualParamsSnapshot.value || defaultParams()))
   }
 })
 
 watch(() => params, () => {
-  if (activeMiningTab.value === 'auto') {
-    _saveAutoParams()
-  }
+  if (activeMiningTab.value === 'auto') _queueSaveAutoConfig()
 }, { deep: true })
 
 watch(() => autoMiningSettings, () => {
-  _saveAutoSettings()
+  _queueSaveAutoConfig()
 }, { deep: true })
 
 const mining = ref(false), taskId = ref(''), taskStatus = ref(''), taskProgress = ref(''), taskError = ref('')
 const miningResult = ref(null), navCurves = ref({}), perfSummary = ref([]), perfColumns = ref([])
 const statusTag = computed(() => taskStatus.value==='completed'?'success':taskStatus.value==='failed'?'danger':'warning')
 let pollTimer = null
-let autoScheduleTimer = null
 
 const _toNullableNumber = (raw) => {
   if (raw === '' || raw === null || raw === undefined) return null
@@ -522,27 +593,6 @@ const _submitMiningByVersions = async (versionList, submitMode = 'manual') => {
   }
 }
 
-const _autoScheduleTick = async () => {
-  if (!autoMiningSettings.enabled || mining.value) return
-  const target = String(autoMiningSettings.scheduleTime || '18:00').trim()
-  if (!/^\d{2}:\d{2}$/.test(target)) return
-
-  const today = _localDateText()
-  const nowHm = _localTimeText()
-  const lastTriggered = localStorage.getItem(AUTO_LAST_TRIGGER_DAY_KEY) || ''
-
-  if (nowHm >= target && lastTriggered !== today) {
-    localStorage.setItem(AUTO_LAST_TRIGGER_DAY_KEY, today)
-    try {
-      const versionList = _buildAutoVersionList()
-      taskProgress.value = `自动挖掘触发：${today} ${target}`
-      await _submitMiningByVersions(versionList, 'auto')
-    } catch {
-      localStorage.removeItem(AUTO_LAST_TRIGGER_DAY_KEY)
-    }
-  }
-}
-
 const handleStartMining = async () => {
   const manualVersion = String(params.version || '').trim()
   const versionList = activeMiningTab.value === 'auto'
@@ -586,16 +636,18 @@ const startPolling = () => {
   }, 3000)
 }
 
-onMounted(() => {
-  if (autoScheduleTimer) clearInterval(autoScheduleTimer)
-  autoScheduleTimer = setInterval(() => {
-    _autoScheduleTick()
-  }, 15000)
-})
-
 onUnmounted(() => {
-  if (pollTimer) clearInterval(pollTimer)
-  if (autoScheduleTimer) clearInterval(autoScheduleTimer)
+  console.log('MiningView onUnmounted started');
+  try {
+    // Flush one last save on leave so switching pages does not drop pending config edits.
+    _saveAutoConfig()
+    if (pollTimer) clearInterval(pollTimer)
+    if (autoConfigSaveTimer) clearTimeout(autoConfigSaveTimer)
+    if (schedulerStatusTimer) clearInterval(schedulerStatusTimer)
+    console.log('MiningView onUnmounted finished');
+  } catch (e) {
+    console.error('Error in onUnmounted:', e);
+  }
 })
 </script>
 

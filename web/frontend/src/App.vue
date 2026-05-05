@@ -37,9 +37,9 @@
 
       <!-- Content -->
       <el-main class="main-content">
-        <router-view v-slot="{ Component }">
+        <router-view v-slot="{ Component, route: currentRoute }">
           <keep-alive include="MarketDataView">
-            <component :is="Component" />
+            <component :is="Component" :key="currentRoute.fullPath" />
           </keep-alive>
         </router-view>
       </el-main>
@@ -67,6 +67,7 @@ const menuRoutes = [
 
 const backendOk = ref(false)
 let healthTimer = null
+
 
 const checkHealth = async () => {
   try {

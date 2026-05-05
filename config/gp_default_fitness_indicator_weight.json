@@ -1,0 +1,22 @@
+{
+  "Gross Calmar": 0.0,
+  "Gross MaxDD": 0.0,
+  "Gross Return": 0.0,
+  "Gross Sharpe": 0.0,
+  "Gross Sortino": 0.0,
+  "Gross Volatility": 0.0,
+  "Gross Win Rate": 0.0,
+  "Net Calmar": 0.0,
+  "Net MaxDD": 0.0,
+  "Net Return": 0.0,
+  "Net Sharpe": 0.0,
+  "Net Sortino": 0.0,
+  "Net Volatility": 0.0,
+  "Net Win Rate": 0.0,
+  "T-corr": 0.0,
+  "TS IC": 0.2,
+  "TS ICIR": 0.8,
+  "TS RankIC": 0.0,
+  "TS RankICIR": 0.0,
+  "Turnover": 0.0
+}

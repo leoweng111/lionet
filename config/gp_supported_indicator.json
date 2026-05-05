@@ -1,0 +1,22 @@
+[
+  "Gross Return",
+  "Net Return",
+  "Gross Volatility",
+  "Net Volatility",
+  "Gross Sharpe",
+  "Net Sharpe",
+  "Gross Sortino",
+  "Net Sortino",
+  "Gross MaxDD",
+  "Net MaxDD",
+  "Gross Calmar",
+  "Net Calmar",
+  "Gross Win Rate",
+  "Net Win Rate",
+  "Turnover",
+  "TS IC",
+  "TS RankIC",
+  "TS ICIR",
+  "TS RankICIR",
+  "T-corr"
+]

@@ -1,0 +1,183 @@
+{
+  "apply_rolling_norm": true,
+  "apply_weighted_price": true,
+  "calculate_baseline": true,
+  "check_leakage_count": 20,
+  "check_relative": true,
+  "consistency_penalty_coef": 1,
+  "consistency_penalty_enabled": false,
+  "end_time": "20241231",
+  "fc_freq": "1d",
+  "filter_indicator_dict": {
+    "Gross Calmar": {
+      "direction": 1,
+      "mean_threshold": null,
+      "yearly_threshold": null
+    },
+    "Gross MaxDD": {
+      "direction": -1,
+      "mean_threshold": null,
+      "yearly_threshold": null
+    },
+    "Gross Return": {
+      "direction": 1,
+      "mean_threshold": null,
+      "yearly_threshold": null
+    },
+    "Gross Sharpe": {
+      "direction": 1,
+      "mean_threshold": null,
+      "yearly_threshold": null
+    },
+    "Gross Sortino": {
+      "direction": 1,
+      "mean_threshold": null,
+      "yearly_threshold": null
+    },
+    "Gross Volatility": {
+      "direction": -1,
+      "mean_threshold": null,
+      "yearly_threshold": null
+    },
+    "Gross Win Rate": {
+      "direction": 1,
+      "mean_threshold": null,
+      "yearly_threshold": null
+    },
+    "Net Calmar": {
+      "direction": 1,
+      "mean_threshold": null,
+      "yearly_threshold": null
+    },
+    "Net MaxDD": {
+      "direction": -1,
+      "mean_threshold": null,
+      "yearly_threshold": null
+    },
+    "Net Return": {
+      "direction": 1,
+      "mean_threshold": 0.05,
+      "yearly_threshold": 0.03
+    },
+    "Net Sharpe": {
+      "direction": 1,
+      "mean_threshold": 0.5,
+      "yearly_threshold": 0.3
+    },
+    "Net Sortino": {
+      "direction": 1,
+      "mean_threshold": null,
+      "yearly_threshold": null
+    },
+    "Net Volatility": {
+      "direction": -1,
+      "mean_threshold": null,
+      "yearly_threshold": null
+    },
+    "Net Win Rate": {
+      "direction": 1,
+      "mean_threshold": null,
+      "yearly_threshold": null
+    },
+    "T-corr": {
+      "direction": 1,
+      "mean_threshold": null,
+      "yearly_threshold": null
+    },
+    "TS IC": {
+      "direction": 1,
+      "mean_threshold": null,
+      "yearly_threshold": null
+    },
+    "TS ICIR": {
+      "direction": 1,
+      "mean_threshold": null,
+      "yearly_threshold": null
+    },
+    "TS RankIC": {
+      "direction": 1,
+      "mean_threshold": null,
+      "yearly_threshold": null
+    },
+    "TS RankICIR": {
+      "direction": 1,
+      "mean_threshold": null,
+      "yearly_threshold": null
+    },
+    "Turnover": {
+      "direction": -1,
+      "mean_threshold": null,
+      "yearly_threshold": null
+    }
+  },
+  "filter_net_return_mean": 0.05,
+  "filter_net_return_yearly": 0.03,
+  "filter_net_sharpe_mean": 0.5,
+  "filter_net_sharpe_yearly": 0.3,
+  "fitness_indicator_dict": {
+    "Gross Calmar": 0,
+    "Gross MaxDD": 0,
+    "Gross Return": 0,
+    "Gross Sharpe": 0,
+    "Gross Sortino": 0,
+    "Gross Volatility": 0,
+    "Gross Win Rate": 0,
+    "Net Calmar": 0,
+    "Net MaxDD": 0,
+    "Net Return": 0,
+    "Net Sharpe": 0,
+    "Net Sortino": 0,
+    "Net Volatility": 0,
+    "Net Win Rate": 0,
+    "T-corr": 0,
+    "TS IC": "0.2",
+    "TS ICIR": 0.8,
+    "TS RankIC": 0,
+    "TS RankICIR": 0,
+    "Turnover": 0
+  },
+  "fitness_metric": "ic",
+  "gp_assumed_initial_capital": 100000,
+  "gp_const_prob": 0.02,
+  "gp_crossover_prob": 0.3,
+  "gp_depth_penalty_coef": 0,
+  "gp_depth_penalty_linear_coef": 0.03,
+  "gp_depth_penalty_quadratic_coef": 0,
+  "gp_depth_penalty_start_depth": 6,
+  "gp_early_stopping_generation_count": 20,
+  "gp_elite_relative_threshold": 0.65,
+  "gp_elite_size": 50,
+  "gp_elite_stagnation_generation_count": 4,
+  "gp_generations": 20,
+  "gp_leaf_prob": 0.2,
+  "gp_log_interval": 1,
+  "gp_max_depth": 6,
+  "gp_max_shock_generation": 3,
+  "gp_mutation_prob": 0.7,
+  "gp_population_size": 500,
+  "gp_small_factor_penalty_coef": 0,
+  "gp_tournament_size": 3,
+  "gp_window_choices": [
+    3,
+    5,
+    10,
+    20,
+    30
+  ],
+  "instrument_id_list": "C0",
+  "instrument_type": "futures_continuous_contract",
+  "interest_method": "simple",
+  "max_factor_count": 50,
+  "min_window_size": 30,
+  "n_jobs": 5,
+  "portfolio_adjust_method": "1D",
+  "random_seed": null,
+  "relative_threshold": 0.7,
+  "risk_free_rate": false,
+  "rolling_norm_clip": 5,
+  "rolling_norm_eps": 1e-08,
+  "rolling_norm_min_periods": 20,
+  "rolling_norm_window": 30,
+  "start_time": "20200101",
+  "version": "20260505_gp_test"
+}

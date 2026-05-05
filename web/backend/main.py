@@ -10,6 +10,7 @@ import threading
 import traceback
 import uuid
 from datetime import datetime
+import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -45,6 +46,7 @@ from utils.params import (
     GP_SUPPORTED_INDICATOR,
     RESEARCH_START_DATE,
 )
+from utils.config_json import load_json_config, save_json_config
 
 # ── App Init ───────────────────────────────────────────────────────────
 app = FastAPI(title="Lionet Factor Mining Platform", version="1.0.0")
@@ -69,6 +71,13 @@ TASK_TYPE_MARKET_DATA = "market_data"
 MARKET_DATA_SCHEDULE_CONFIG_TASK_ID = "market_data_schedule_config"
 MARKET_DATA_SCHEDULE_CONFIG_TYPE = "schedule-config"
 
+GP_SUPPORTED_INDICATOR_FILE = "gp_supported_indicator.json"
+GP_INDICATOR_DIRECTION_FILE = "gp_indicator_direction.json"
+GP_DEFAULT_FITNESS_WEIGHT_FILE = "gp_default_fitness_indicator_weight.json"
+GP_DEFAULT_FILTER_DICT_FILE = "gp_default_filter_indicator_dict.json"
+GP_AUTO_SEARCH_SETTINGS_FILE = "gp_auto_search_settings.json"
+GP_AUTO_SEARCH_PARAMS_FILE = "gp_auto_search_params.json"
+
 
 def _task_type_label(task_type: Optional[str]) -> str:
     if task_type == TASK_TYPE_FUSION:
@@ -83,7 +92,7 @@ def _task_collection(task_type: Optional[str]) -> str:
 
 
 def _default_market_schedule_config() -> Dict[str, Any]:
-    return {
+    default_cfg = {
         "enabled": True,
         "schedule_time": "18:00",
         "instrument_id": ["C0"],
@@ -92,9 +101,33 @@ def _default_market_schedule_config() -> Dict[str, Any]:
         "method": "bulk_write_update",
         "only_update_new": True,
     }
+    raw = load_json_config("market_data_schedule_config.json", default_cfg)
+    if not isinstance(raw, dict):
+        return default_cfg
+    merged = dict(default_cfg)
+    merged.update(raw)
+    return merged
 
 
 _daily_schedule_config: Dict[str, Any] = _default_market_schedule_config()
+
+# ── Auto mining scheduler state ───────────────────────────────────────
+_auto_mining_scheduler_thread: Optional[threading.Thread] = None
+_auto_mining_status_lock = threading.Lock()
+_auto_mining_last_trigger_day = ""
+_auto_mining_last_schedule_signature = ""
+_auto_mining_status: Dict[str, Any] = {
+    "enabled": False,
+    "schedule_time": "18:00",
+    "task_count": 1,
+    "last_tick_at": "",
+    "last_trigger_at": "",
+    "next_trigger_at": "",
+    "last_error": "",
+    "last_skip_reason": "",
+    "planned_versions": [],
+    "submitted_task_ids": [],
+}
 
 
 # ── Startup: clean up stale "running" tasks in DB ─────────────────────
@@ -287,6 +320,13 @@ class GPMiningParams(BaseModel):
     filter_indicator_dict: Dict[str, Dict[str, Optional[float]]] = Field(default_factory=dict)
     consistency_penalty_enabled: bool = False
     consistency_penalty_coef: float = 1.0
+
+
+class MiningConfigUpdateParams(BaseModel):
+    default_fitness_indicator_weight: Optional[Dict[str, Optional[float]]] = None
+    default_filter_indicator_dict: Optional[Dict[str, Dict[str, Optional[float]]]] = None
+    auto_search_settings: Optional[Dict[str, Any]] = None
+    auto_search_params: Optional[Dict[str, Any]] = None
 
 
 class BacktestParams(BaseModel):
@@ -734,33 +774,11 @@ def _load_market_data_task_from_db(task_id: str) -> Optional[Dict[str, Any]]:
 
 
 def _load_market_schedule_config_from_db() -> Dict[str, Any]:
-    cfg = _default_market_schedule_config()
-    try:
-        df = get_data(
-            database="task",
-            collection=MARKET_DATA_TASK_COLLECTION,
-            mongo_operator={"task_id": MARKET_DATA_SCHEDULE_CONFIG_TASK_ID},
-        )
-        if not isinstance(df, pd.DataFrame) or df.empty:
-            return cfg
-        params_val = _sanitize_nan(df.iloc[0].get("params"), {})
-        if isinstance(params_val, dict):
-            cfg.update(params_val)
-    except Exception:
-        return cfg
-    return cfg
+    return dict(_default_market_schedule_config())
 
 
 def _save_market_schedule_config_to_db() -> None:
-    market_data_tasks[MARKET_DATA_SCHEDULE_CONFIG_TASK_ID] = {
-        "type": MARKET_DATA_SCHEDULE_CONFIG_TYPE,
-        "status": "config",
-        "started_at": datetime.now().isoformat(),
-        "finished_at": datetime.now().isoformat(),
-        "params": dict(_daily_schedule_config),
-        "logs": [],
-    }
-    _save_market_data_task_to_db(MARKET_DATA_SCHEDULE_CONFIG_TASK_ID)
+    save_json_config("market_data_schedule_config.json", dict(_daily_schedule_config))
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -823,8 +841,198 @@ async def get_mining_indicator_options():
         },
     }
 
-@app.post("/api/mining/start")
-async def start_mining(params: GPMiningParams):
+
+def _normalize_fitness_weight_for_save(raw_weight: Dict[str, Optional[float]]) -> Dict[str, float]:
+    out: Dict[str, float] = {}
+    for indicator in GP_SUPPORTED_INDICATOR:
+        if indicator not in raw_weight:
+            continue
+        try:
+            out[indicator] = float(raw_weight[indicator])
+        except (TypeError, ValueError):
+            continue
+    return out or dict(GP_DEFAULT_FITNESS_INDICATOR_WEIGHT)
+
+
+def _normalize_filter_dict_for_save(raw_filter: Dict[str, Dict[str, Optional[float]]]) -> Dict[str, Dict[str, Optional[float]]]:
+    out: Dict[str, Dict[str, Optional[float]]] = {}
+    for indicator in GP_SUPPORTED_INDICATOR:
+        conf = raw_filter.get(indicator)
+        if not isinstance(conf, dict):
+            continue
+
+        mean_threshold_raw = conf.get("mean_threshold")
+        yearly_threshold_raw = conf.get("yearly_threshold")
+        direction_raw = conf.get("direction", GP_INDICATOR_DIRECTION.get(indicator, 1))
+
+        mean_threshold = None
+        yearly_threshold = None
+        if mean_threshold_raw is not None:
+            try:
+                mean_threshold = float(mean_threshold_raw)
+            except (TypeError, ValueError):
+                mean_threshold = None
+        if yearly_threshold_raw is not None:
+            try:
+                yearly_threshold = float(yearly_threshold_raw)
+            except (TypeError, ValueError):
+                yearly_threshold = None
+
+        try:
+            direction = int(direction_raw)
+        except (TypeError, ValueError):
+            direction = int(GP_INDICATOR_DIRECTION.get(indicator, 1))
+        if direction not in (1, -1):
+            direction = int(GP_INDICATOR_DIRECTION.get(indicator, 1))
+
+        out[indicator] = {
+            "mean_threshold": mean_threshold,
+            "yearly_threshold": yearly_threshold,
+            "direction": direction,
+        }
+
+    if not out:
+        out = {
+            indicator: {
+                "mean_threshold": v[0],
+                "yearly_threshold": v[1],
+                "direction": v[2],
+            }
+            for indicator, v in GP_DEFAULT_FILTER_INDICATOR_DICT.items()
+        }
+    return out
+
+
+@app.get('/api/mining/auto-config')
+async def get_mining_auto_config():
+    auto_settings_default = {
+        "enabled": False,
+        "schedule_time": "18:00",
+        "task_count": 1,
+    }
+    auto_params_default = {}
+    auto_settings = load_json_config(GP_AUTO_SEARCH_SETTINGS_FILE, auto_settings_default)
+    auto_params = load_json_config(GP_AUTO_SEARCH_PARAMS_FILE, auto_params_default)
+    if not isinstance(auto_settings, dict):
+        auto_settings = dict(auto_settings_default)
+    if not isinstance(auto_params, dict):
+        auto_params = {}
+
+    return {
+        "default_fitness_indicator_weight": dict(GP_DEFAULT_FITNESS_INDICATOR_WEIGHT),
+        "default_filter_indicator_dict": {
+            k: {
+                "mean_threshold": v[0],
+                "yearly_threshold": v[1],
+                "direction": v[2],
+            }
+            for k, v in GP_DEFAULT_FILTER_INDICATOR_DICT.items()
+        },
+        "auto_search_settings": auto_settings,
+        "auto_search_params": auto_params,
+    }
+
+
+@app.post('/api/mining/auto-config')
+async def update_mining_auto_config(params: MiningConfigUpdateParams):
+    global GP_DEFAULT_FITNESS_INDICATOR_WEIGHT, GP_DEFAULT_FILTER_INDICATOR_DICT
+
+    if params.default_fitness_indicator_weight is not None:
+        fitness_weight = _normalize_fitness_weight_for_save(dict(params.default_fitness_indicator_weight))
+        save_json_config(GP_DEFAULT_FITNESS_WEIGHT_FILE, fitness_weight)
+        GP_DEFAULT_FITNESS_INDICATOR_WEIGHT = dict(fitness_weight)
+
+    if params.default_filter_indicator_dict is not None:
+        filter_dict = _normalize_filter_dict_for_save(dict(params.default_filter_indicator_dict))
+        save_json_config(GP_DEFAULT_FILTER_DICT_FILE, filter_dict)
+        GP_DEFAULT_FILTER_INDICATOR_DICT = {
+            k: (v.get("mean_threshold"), v.get("yearly_threshold"), int(v.get("direction", 1)))
+            for k, v in filter_dict.items()
+        }
+
+    if params.auto_search_settings is not None:
+        default_settings = {
+            "enabled": False,
+            "schedule_time": "18:00",
+            "task_count": 1,
+        }
+        raw_settings = dict(params.auto_search_settings or {})
+        merged_settings = dict(default_settings)
+        merged_settings.update(raw_settings)
+        merged_settings["enabled"] = bool(merged_settings.get("enabled", False))
+        merged_settings["schedule_time"] = str(merged_settings.get("schedule_time") or "18:00")
+        try:
+            task_count = int(merged_settings.get("task_count", 1))
+        except (TypeError, ValueError):
+            task_count = 1
+        merged_settings["task_count"] = max(1, task_count)
+        save_json_config(GP_AUTO_SEARCH_SETTINGS_FILE, merged_settings)
+
+    if params.auto_search_params is not None:
+        save_json_config(GP_AUTO_SEARCH_PARAMS_FILE, dict(params.auto_search_params or {}))
+
+    return {"message": "挖掘配置已写入本地json", "success": True}
+
+
+def _set_auto_mining_status(**kwargs):
+    with _auto_mining_status_lock:
+        _auto_mining_status.update(kwargs)
+        _auto_mining_status["updated_at"] = datetime.now().isoformat()
+
+
+def _get_auto_mining_status_snapshot() -> Dict[str, Any]:
+    with _auto_mining_status_lock:
+        return dict(_auto_mining_status)
+
+
+def _build_auto_versions(today_yyyymmdd: str, task_count: int) -> List[str]:
+    base = f"{today_yyyymmdd}_gp_test"
+    count = max(1, int(task_count))
+    return [base if i == 0 else f"{base}_{i}" for i in range(count)]
+
+
+def _normalize_auto_search_payload(raw_params: Dict[str, Any], version: str) -> GPMiningParams:
+    payload = dict(raw_params or {})
+    payload["version"] = version
+
+    # Align with manual submit path: cast empty-string numbers to None/0 where needed.
+    if payload.get("random_seed", None) == "":
+        payload["random_seed"] = None
+
+    fitness_raw = payload.get("fitness_indicator_dict") or {}
+    if isinstance(fitness_raw, dict):
+        payload["fitness_indicator_dict"] = {
+            k: (0.0 if (v is None or v == "") else float(v))
+            for k, v in fitness_raw.items()
+            if isinstance(k, str)
+        }
+
+    filter_raw = payload.get("filter_indicator_dict") or {}
+    if isinstance(filter_raw, dict):
+        filter_norm = {}
+        for k, conf in filter_raw.items():
+            if not isinstance(k, str) or not isinstance(conf, dict):
+                continue
+            mean_raw = conf.get("mean_threshold")
+            yearly_raw = conf.get("yearly_threshold")
+            dir_raw = conf.get("direction", 1)
+            mean_val = None if mean_raw in (None, "") else float(mean_raw)
+            yearly_val = None if yearly_raw in (None, "") else float(yearly_raw)
+            try:
+                direction = int(dir_raw)
+            except (TypeError, ValueError):
+                direction = 1
+            filter_norm[k] = {
+                "mean_threshold": mean_val,
+                "yearly_threshold": yearly_val,
+                "direction": direction,
+            }
+        payload["filter_indicator_dict"] = filter_norm
+
+    return GPMiningParams(**payload)
+
+
+def _launch_mining_task(params: GPMiningParams, source: str = "manual") -> str:
     req_version = str(params.version).strip()
     if req_version:
         duplicated_running = [
@@ -843,11 +1051,13 @@ async def start_mining(params: GPMiningParams):
 
     task_id = str(uuid.uuid4())[:8]
     cancel_event = threading.Event()
+    params_dict = params.dict()
+    params_dict["submit_source"] = source
     tasks[task_id] = {
         "task_type": TASK_TYPE_GP,
         "status": "running",
         "started_at": datetime.now().isoformat(),
-        "params": params.dict(),
+        "params": params_dict,
         "progress": "初始化中...",
         "gp_progress": None,
         "result": None,
@@ -856,18 +1066,15 @@ async def start_mining(params: GPMiningParams):
         "cancel_event": cancel_event,
         "logs": [],
     }
-    # Persist initial running record immediately for cross-worker visibility.
-    _save_task_to_db(task_id, params.dict(), "running", {"message": "任务已提交"}, task_type=TASK_TYPE_GP)
+    _save_task_to_db(task_id, params_dict, "running", {"message": "任务已提交"}, task_type=TASK_TYPE_GP)
 
-    async def _run():
+    def _run_sync():
         try:
-            loop = asyncio.get_event_loop()
-            result = await loop.run_in_executor(None, _execute_mining, params, task_id, cancel_event)
-            # If terminated by user, still save partial results but keep terminated status
+            result = _execute_mining(params, task_id, cancel_event)
             if tasks[task_id]["status"] == "terminated":
                 tasks[task_id]["result"] = result
                 tasks[task_id]["result_overview"] = _build_mining_result_overview(result)
-                _save_task_to_db(task_id, params.dict(), "terminated", {
+                _save_task_to_db(task_id, params_dict, "terminated", {
                     "selected_fc_name_list": result.get("selected_fc_name_list", []),
                     "version": result.get("version", ""),
                     "message": result.get("message", "Task terminated by user."),
@@ -877,12 +1084,13 @@ async def start_mining(params: GPMiningParams):
                     "result_overview": tasks[task_id]["result_overview"],
                 }, task_type=TASK_TYPE_GP, result=result)
                 return
+
             tasks[task_id]["result"] = result
             tasks[task_id]["result_overview"] = _build_mining_result_overview(result)
             tasks[task_id]["status"] = "completed"
             tasks[task_id]["progress"] = "完成"
             tasks[task_id]["finished_at"] = datetime.now().isoformat()
-            _save_task_to_db(task_id, params.dict(), "completed", {
+            _save_task_to_db(task_id, params_dict, "completed", {
                 "selected_fc_name_list": result.get("selected_fc_name_list", []),
                 "version": result.get("version", ""),
                 "message": result.get("message", ""),
@@ -892,7 +1100,6 @@ async def start_mining(params: GPMiningParams):
                 "result_overview": tasks[task_id]["result_overview"],
             }, task_type=TASK_TYPE_GP, result=result)
         except Exception as e:
-            # If terminated by user, keep status but note the error
             if tasks[task_id]["status"] == "terminated":
                 tasks[task_id]["progress"] = "已终止（用户手动终止）"
                 tasks[task_id]["finished_at"] = datetime.now().isoformat()
@@ -901,9 +1108,153 @@ async def start_mining(params: GPMiningParams):
             tasks[task_id]["error"] = traceback.format_exc()
             tasks[task_id]["progress"] = f"失败: {str(e)}"
             tasks[task_id]["finished_at"] = datetime.now().isoformat()
-            _save_task_to_db(task_id, params.dict(), "failed", {"error": str(e)}, task_type=TASK_TYPE_GP)
+            _save_task_to_db(task_id, params_dict, "failed", {"error": str(e)}, task_type=TASK_TYPE_GP)
 
-    asyncio.create_task(_run())
+    threading.Thread(target=_run_sync, daemon=True).start()
+    return task_id
+
+
+def _auto_mining_scheduler_tick_once() -> int:
+    """Run one scheduler tick and return recommended sleep seconds."""
+    global _auto_mining_last_trigger_day, _auto_mining_last_schedule_signature
+    now = datetime.now()
+    settings_default = {
+        "enabled": False,
+        "schedule_time": "18:00",
+        "task_count": 1,
+    }
+    settings = load_json_config(GP_AUTO_SEARCH_SETTINGS_FILE, settings_default)
+    params_raw = load_json_config(GP_AUTO_SEARCH_PARAMS_FILE, {})
+    if not isinstance(settings, dict):
+        settings = dict(settings_default)
+    if not isinstance(params_raw, dict):
+        params_raw = {}
+
+    enabled = bool(settings.get("enabled", False))
+    schedule_time = str(settings.get("schedule_time", "18:00"))
+    try:
+        task_count = max(1, int(settings.get("task_count", 1)))
+    except (TypeError, ValueError):
+        task_count = 1
+
+    today = now.strftime("%Y%m%d")
+    planned_versions = _build_auto_versions(today, task_count)
+    schedule_signature = f"enabled={enabled}|time={schedule_time}|count={task_count}"
+    if schedule_signature != _auto_mining_last_schedule_signature:
+        _auto_mining_last_schedule_signature = schedule_signature
+        _auto_mining_last_trigger_day = ""
+        _set_auto_mining_status(last_skip_reason="检测到调度配置变更，已重置当日触发标记")
+
+    try:
+        hh, mm = [int(x) for x in schedule_time.split(":", 1)]
+        target = now.replace(hour=hh, minute=mm, second=0, microsecond=0)
+        next_target = target if now < target else target + pd.Timedelta(days=1)
+        next_trigger_text = next_target.isoformat()
+    except Exception:
+        next_trigger_text = ""
+
+    _set_auto_mining_status(
+        enabled=enabled,
+        schedule_time=schedule_time,
+        task_count=task_count,
+        planned_versions=planned_versions,
+        last_tick_at=now.isoformat(),
+        next_trigger_at=next_trigger_text,
+    )
+
+    if not enabled:
+        return 5
+
+    if not re.match(r"^\d{2}:\d{2}$", schedule_time):
+        _set_auto_mining_status(last_error=f"无效时间格式: {schedule_time}")
+        return 10
+
+    now_hm = now.strftime("%H:%M")
+    if now_hm < schedule_time:
+        return 5
+
+    if _auto_mining_last_trigger_day == today:
+        _set_auto_mining_status(last_skip_reason="今日已触发，等待下一交易日")
+        return 10
+
+    running_versions = {
+        str((info.get("params") or {}).get("version", "")).strip()
+        for info in tasks.values()
+        if info.get("status") == "running"
+    }
+    pending_versions = [v for v in planned_versions if v not in running_versions]
+    if not pending_versions:
+        _auto_mining_last_trigger_day = today
+        _set_auto_mining_status(
+            last_trigger_at=now.isoformat(),
+            last_skip_reason="目标版本已在运行，标记今日已触发",
+            submitted_task_ids=[],
+        )
+        return 10
+
+    submitted_task_ids: List[str] = []
+    last_error = ""
+    for version in pending_versions:
+        try:
+            auto_params = _normalize_auto_search_payload(params_raw, version)
+            task_id = _launch_mining_task(auto_params, source="auto_scheduler")
+            submitted_task_ids.append(task_id)
+        except Exception as e:
+            last_error = str(e)
+
+    if submitted_task_ids:
+        _auto_mining_last_trigger_day = today
+        _set_auto_mining_status(
+            last_trigger_at=datetime.now().isoformat(),
+            submitted_task_ids=submitted_task_ids,
+            last_error="",
+            last_skip_reason="",
+        )
+    else:
+        _set_auto_mining_status(
+            submitted_task_ids=[],
+            last_error=last_error or "自动挖掘提交失败",
+        )
+
+    return 10
+
+
+def _auto_mining_scheduler_loop():
+    while True:
+        try:
+            sleep_seconds = _auto_mining_scheduler_tick_once()
+            time.sleep(max(1, int(sleep_seconds)))
+        except Exception as e:
+            _set_auto_mining_status(last_error=f"调度线程异常: {e}")
+            time.sleep(5)
+
+
+@app.on_event("startup")
+async def _start_auto_mining_scheduler():
+    global _auto_mining_scheduler_thread
+    if _auto_mining_scheduler_thread is None or not _auto_mining_scheduler_thread.is_alive():
+        _auto_mining_scheduler_thread = threading.Thread(target=_auto_mining_scheduler_loop, daemon=True)
+        _auto_mining_scheduler_thread.start()
+
+
+@app.get('/api/mining/auto-scheduler-status')
+async def get_auto_mining_scheduler_status():
+    out = _get_auto_mining_status_snapshot()
+    out["thread_alive"] = bool(_auto_mining_scheduler_thread and _auto_mining_scheduler_thread.is_alive())
+    return out
+
+
+@app.post('/api/mining/auto-scheduler/tick')
+async def run_auto_mining_scheduler_tick_once():
+    sleep_seconds = _auto_mining_scheduler_tick_once()
+    return {
+        "sleep_seconds": sleep_seconds,
+        "status": _get_auto_mining_status_snapshot(),
+    }
+
+@app.post("/api/mining/start")
+async def start_mining(params: GPMiningParams):
+    task_id = _launch_mining_task(params, source="manual")
     return {"task_id": task_id, "status": "running"}
 
 
