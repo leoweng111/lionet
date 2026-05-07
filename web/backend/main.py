@@ -98,7 +98,7 @@ def _task_collection(task_type: Optional[str]) -> str:
 def _default_market_schedule_config() -> Dict[str, Any]:
     default_cfg = {
         "enabled": True,
-        "schedule_time": "18:00",
+        "schedule_time": "20:00",
         "instrument_id": ["C0"],
         "load_prev_weighted_factor": True,
         "wait_time": 2.0,
@@ -2567,7 +2567,7 @@ def _run_daily_price_update():
     from datetime import timedelta
 
     cfg = dict(_daily_schedule_config)
-    target_day = (datetime.now() - timedelta(days=1)).strftime("%Y%m%d")
+    target_day = datetime.now().strftime("%Y%m%d")
     instrument_id = cfg.get("instrument_id")
     if not instrument_id:
         instrument_id = None
@@ -3121,7 +3121,7 @@ async def api_scheduled_status():
     _reload_market_schedule_config_from_file()
     return {
         "enabled": bool(_daily_schedule_config.get("enabled", True)),
-        "schedule_time": str(_daily_schedule_config.get("schedule_time") or "18:00"),
+        "schedule_time": str(_daily_schedule_config.get("schedule_time") or "20:00"),
         "instrument_id": list(_daily_schedule_config.get("instrument_id") or []),
         "load_prev_weighted_factor": bool(_daily_schedule_config.get("load_prev_weighted_factor", True)),
         "wait_time": float(_daily_schedule_config.get("wait_time", 2.0)),
@@ -3136,7 +3136,7 @@ async def api_update_schedule_config(params: ScheduleConfigParams):
     _reload_market_schedule_config_from_file()
     _daily_schedule_config.update({
         "enabled": bool(params.enabled),
-        "schedule_time": str(params.schedule_time or "18:00"),
+        "schedule_time": str(params.schedule_time or "20:00"),
         "instrument_id": params.instrument_id or [],
         "load_prev_weighted_factor": bool(params.load_prev_weighted_factor),
         "wait_time": float(params.wait_time),

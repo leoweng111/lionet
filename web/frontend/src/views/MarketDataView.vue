@@ -102,16 +102,17 @@
             </el-form-item>
           </el-form>
 
-          <el-divider content-position="left">自动价格更新配置（T日更新T-1日）</el-divider>
+          <el-divider content-position="left">自动价格更新配置（T日更新T日）</el-divider>
           <el-form :model="scheduleParams" label-width="160px" size="small" style="max-width:600px;">
             <el-form-item label="自动更新时间">
               <el-time-picker
-                v-model="scheduleTimeValue"
+                v-model="scheduleTimeDisplay"
                 format="HH:mm"
                 value-format="HH:mm"
                 :clearable="false"
                 :disabled="!scheduleParams.enabled"
                 style="width:100%;"
+                @change="onScheduleTimeChange"
               />
             </el-form-item>
             <el-form-item label="自动更新合约（可多选）">
@@ -449,19 +450,33 @@ let scheduleSaveTimer = null
 let scheduleStatusTimer = null
 const scheduleParams = reactive({
   enabled: true,
-  schedule_time: '18:00',
+  schedule_time: '20:00',
   instrument_id: ['C0'],
   load_prev_weighted_factor: true,
   wait_time: 2.0,
   method: 'bulk_write_update',
   only_update_new: true,
 })
-const scheduleTimeValue = computed({
-  get: () => scheduleParams.schedule_time || '18:00',
-  set: (val) => {
-    scheduleParams.schedule_time = val || '18:00'
-  },
-})
+const scheduleTimeDisplay = ref(scheduleParams.schedule_time)
+const onScheduleTimeChange = (val) => {
+  const newVal = val || '20:00'
+  if (newVal < '20:00') {
+    ElMessageBox.confirm(
+      '设置的时间早于 20:00，当天数据源可能尚未更新，确定要修改吗？',
+      '警告',
+      { confirmButtonText: '确定', cancelButtonText: '取消', type: 'warning' }
+    ).then(() => {
+      scheduleParams.schedule_time = newVal
+      scheduleTimeDisplay.value = newVal
+    }).catch(() => {
+      // cancelled — revert display
+      scheduleTimeDisplay.value = scheduleParams.schedule_time
+    })
+  } else {
+    scheduleParams.schedule_time = newVal
+    scheduleTimeDisplay.value = newVal
+  }
+}
 const priceParams = reactive({
   instrument_id: [],
   start_date: '',
@@ -477,7 +492,8 @@ const loadScheduleStatus = async () => {
     const { data } = await getScheduledStatus()
     scheduleSyncingFromServer.value = true
     scheduleParams.enabled = !!data.enabled
-    scheduleParams.schedule_time = data.schedule_time || '18:00'
+    scheduleParams.schedule_time = data.schedule_time || '20:00'
+    scheduleTimeDisplay.value = scheduleParams.schedule_time
     scheduleParams.instrument_id = Array.isArray(data.instrument_id) && data.instrument_id.length
       ? data.instrument_id
       : ['C0']
