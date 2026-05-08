@@ -9,7 +9,13 @@ const routes = [
     path: '/mining',
     name: 'Mining',
     component: () => import('../views/MiningView.vue'),
-    meta: { title: '因子挖掘', icon: 'Cpu' },
+    meta: { title: 'GP因子挖掘', icon: 'Cpu' },
+  },
+  {
+    path: '/llm-mining',
+    name: 'LLMMining',
+    component: () => import('../views/LLMMiningView.vue'),
+    meta: { title: 'LLM因子挖掘', icon: 'MagicStick' },
   },
   {
     path: '/fusion',

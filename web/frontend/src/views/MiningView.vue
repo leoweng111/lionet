@@ -1,7 +1,7 @@
 <template>
   <div>
     <div class="page-header">
-      <h2><el-icon><Cpu /></el-icon> 遗传算法因子挖掘</h2>
+      <h2><el-icon><Cpu /></el-icon> GP 因子挖掘</h2>
       <p>配置 GP 遗传算法超参数，一键启动因子挖掘任务，挖掘完成后自动展示回测结果和净值曲线</p>
     </div>
 

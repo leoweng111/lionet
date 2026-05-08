@@ -37,7 +37,7 @@ from data.futures import (
     update_futures_continuous_contract_price,
     UpdateCancelledError,
 )
-from factors.factor_auto_search import GeneticFactorGenerator, FactorFusioner
+from factors.factor_auto_search import GeneticFactorGenerator, FactorFusioner, LLMPromptFactorGenerator
 from factors.backtest import BackTester
 from factors.factor_ops import calc_formula_series
 from factors.factor_utils import get_weighted_price
@@ -70,6 +70,7 @@ GP_TASK_COLLECTION = "gp_task"
 FUSION_TASK_COLLECTION = "fusion_task"
 MARKET_DATA_TASK_COLLECTION = "market_data_task"
 TASK_TYPE_GP = "gp_mining"
+TASK_TYPE_LLM = "llm_mining"
 TASK_TYPE_FUSION = "factor_fusion"
 TASK_TYPE_MARKET_DATA = "market_data"
 MARKET_DATA_SCHEDULE_CONFIG_TASK_ID = "market_data_schedule_config"
@@ -382,6 +383,39 @@ class FusionParams(BaseModel):
     version: str = Field(default_factory=lambda: datetime.now().strftime('%Y%m%d') + '_factor_fusion_test')
     n_jobs: int = 5
     base_col_list: Optional[List[str]] = None
+    outsample_ratio: float = 0.0
+    outsample_start_time: Optional[str] = None
+    outsample_end_time: Optional[str] = None
+
+
+class LLMMiningParams(BaseModel):
+    instrument_type: str = "futures_continuous_contract"
+    instrument_id_list: str = "C0"
+    fc_freq: str = "1d"
+    start_time: str = "20200101"
+    end_time: str = "20241231"
+    version: str = Field(default_factory=lambda: datetime.now().strftime("%Y%m%d") + "_llm_test")
+    portfolio_adjust_method: str = "1D"
+    interest_method: str = "simple"
+    risk_free_rate: bool = False
+    calculate_baseline: bool = True
+    apply_weighted_price: bool = True
+    n_jobs: int = 5
+    max_factor_count: int = 20
+    min_window_size: int = 30
+    apply_rolling_norm: bool = True
+    rolling_norm_window: int = 30
+    rolling_norm_min_periods: int = 20
+    rolling_norm_eps: float = 1e-8
+    rolling_norm_clip: float = 5.0
+    check_leakage_count: int = 20
+    check_relative: bool = True
+    relative_threshold: float = 0.7
+    llm_factor_count: int = 5
+    llm_early_stopping_round: int = 20
+    llm_user_requirement: str = "生成期货的日频量价因子"
+    llm_profile_name: str = "MiniMax-M2.7-highspeed"
+    filter_indicator_dict: Dict[str, Dict[str, Optional[float]]] = Field(default_factory=dict)
     outsample_ratio: float = 0.0
     outsample_start_time: Optional[str] = None
     outsample_end_time: Optional[str] = None
@@ -1861,6 +1895,189 @@ async def terminate_mining(task_id: str):
         traceback.print_exc()
 
     raise HTTPException(status_code=404, detail="Task not found")
+
+
+# ── LLM Mining ─────────────────────────────────────────────────────────
+
+@app.get("/api/llm-mining/profiles")
+async def get_llm_profiles():
+    """获取 .env 中配置的 LLM profiles 列表（仅返回 name，不暴露 api_key）。"""
+    from utils.llm_utils import load_llm_profiles
+    profiles = load_llm_profiles()
+    return {"profiles": [{"name": p.get("name", ""), "model": p.get("model", "")} for p in profiles]}
+
+
+@app.post("/api/llm-mining/start")
+async def start_llm_mining(params: LLMMiningParams):
+    task_id = _launch_llm_mining_task(params)
+    return {"task_id": task_id, "status": "running"}
+
+
+@app.get("/api/llm-mining/status/{task_id}")
+async def llm_mining_status(task_id: str):
+    if task_id not in tasks:
+        raise HTTPException(status_code=404, detail="Task not found")
+    task = tasks[task_id]
+    return {
+        "task_id": task_id,
+        "task_type": task.get("task_type", TASK_TYPE_LLM),
+        "status": task["status"],
+        "progress": task["progress"],
+        "started_at": task["started_at"],
+        "result": task.get("result"),
+        "error": task.get("error", ""),
+    }
+
+
+@app.post("/api/llm-mining/terminate/{task_id}")
+async def terminate_llm_mining(task_id: str):
+    if task_id in tasks:
+        task = tasks[task_id]
+        if task.get("status") != "running":
+            raise HTTPException(status_code=400, detail="Task is not running")
+        cancel_event = task.get("cancel_event")
+        if cancel_event:
+            cancel_event.set()
+        task["status"] = "terminated"
+        task["progress"] = "已终止（用户手动终止）"
+        task["finished_at"] = datetime.now().isoformat()
+        return {"task_id": task_id, "status": "terminated"}
+    raise HTTPException(status_code=404, detail="Task not found")
+
+
+def _launch_llm_mining_task(params: LLMMiningParams) -> str:
+    req_version = str(params.version).strip()
+    if req_version:
+        duplicated_running = [
+            tid for tid, info in tasks.items()
+            if info.get("status") == "running"
+            and str((info.get("params") or {}).get("version", "")).strip() == req_version
+        ]
+        if duplicated_running:
+            raise HTTPException(status_code=400, detail=f"已有相同版本正在运行: version={req_version}")
+
+    task_id = str(uuid.uuid4())[:8]
+    cancel_event = threading.Event()
+    params_dict = params.dict()
+    tasks[task_id] = {
+        "task_type": TASK_TYPE_LLM,
+        "status": "running",
+        "started_at": datetime.now().isoformat(),
+        "params": params_dict,
+        "progress": "初始化中...",
+        "result": None,
+        "error": None,
+        "cancel_event": cancel_event,
+        "logs": [],
+    }
+
+    def _run_sync():
+        from utils.logging import log as lionet_logger
+        handler = _GPProgressHandler(task_id=task_id, owner_thread_id=threading.get_ident())
+        lionet_logger.addHandler(handler)
+        try:
+            result = _execute_llm_mining(params, task_id, cancel_event)
+            if tasks[task_id]["status"] == "terminated":
+                tasks[task_id]["result"] = result
+                return
+            tasks[task_id]["result"] = result
+            tasks[task_id]["status"] = "completed"
+            tasks[task_id]["progress"] = "完成"
+            tasks[task_id]["finished_at"] = datetime.now().isoformat()
+        except Exception as e:
+            if tasks[task_id]["status"] == "terminated":
+                return
+            tasks[task_id]["status"] = "failed"
+            tasks[task_id]["error"] = traceback.format_exc()
+            tasks[task_id]["progress"] = f"失败: {str(e)}"
+            tasks[task_id]["finished_at"] = datetime.now().isoformat()
+        finally:
+            lionet_logger.removeHandler(handler)
+
+    threading.Thread(target=_run_sync, daemon=True).start()
+    return task_id
+
+
+def _execute_llm_mining(params: LLMMiningParams, task_id: str, cancel_event: threading.Event) -> Dict[str, Any]:
+    tasks[task_id]["progress"] = "创建 LLMPromptFactorGenerator..."
+
+    filter_indicator_dict = _normalize_filter_indicator_dict_from_raw(params.filter_indicator_dict)
+
+    fg = LLMPromptFactorGenerator(
+        instrument_type=params.instrument_type,
+        instrument_id_list=params.instrument_id_list,
+        fc_freq=params.fc_freq,
+        start_time=params.start_time,
+        end_time=params.end_time,
+        version=params.version,
+        portfolio_adjust_method=params.portfolio_adjust_method,
+        interest_method=params.interest_method,
+        risk_free_rate=params.risk_free_rate,
+        calculate_baseline=params.calculate_baseline,
+        apply_weighted_price=params.apply_weighted_price,
+        n_jobs=params.n_jobs,
+        max_factor_count=params.max_factor_count,
+        min_window_size=params.min_window_size,
+        apply_rolling_norm=params.apply_rolling_norm,
+        rolling_norm_window=params.rolling_norm_window,
+        rolling_norm_min_periods=params.rolling_norm_min_periods,
+        rolling_norm_eps=params.rolling_norm_eps,
+        rolling_norm_clip=params.rolling_norm_clip,
+        check_leakage_count=params.check_leakage_count,
+        check_relative=params.check_relative,
+        relative_threshold=params.relative_threshold,
+        llm_factor_count=params.llm_factor_count,
+        llm_early_stopping_round=params.llm_early_stopping_round,
+        llm_user_requirement=params.llm_user_requirement,
+        outsample_ratio=params.outsample_ratio,
+        outsample_start_time=params.outsample_start_time,
+        outsample_end_time=params.outsample_end_time,
+    )
+    fg.llm_profile_name = params.llm_profile_name
+    fg.cancel_event = cancel_event
+
+    tasks[task_id]["progress"] = "正在调用 LLM 生成因子..."
+    result = fg.auto_mine_select_and_save_fc(
+        filter_indicator_dict=filter_indicator_dict,
+        n_jobs=params.n_jobs,
+        require_all_row=True,
+        require_all_instruments=True,
+    )
+
+    tasks[task_id]["progress"] = "提取回测结果..."
+    bt = result.get("bt")
+    nav_data = _extract_nav_data(bt) if bt else {"nav_curves": {}, "performance_summary": []}
+    formulas = dict(fg.factor_formula_map) if hasattr(fg, "factor_formula_map") and fg.factor_formula_map else {}
+
+    return {
+        "config_path": result.get("config_path"),
+        "selected_fc_name_list": result.get("selected_fc_name_list", []),
+        "message": result.get("message", ""),
+        "best_failed_indicator_metrics": result.get("best_failed_indicator_metrics"),
+        "nav_data": nav_data,
+        "factor_formulas": formulas,
+        "version": params.version,
+        "collection": "llm_prompt",
+    }
+
+
+def _normalize_filter_indicator_dict_from_raw(
+    raw: Dict[str, Dict[str, Optional[float]]]
+) -> Dict[str, tuple]:
+    """Convert frontend filter_indicator_dict to the tuple format expected by auto_mine_select_and_save_fc."""
+    out = {}
+    for indicator, conf in (raw or {}).items():
+        if indicator not in GP_SUPPORTED_INDICATOR:
+            continue
+        mean_threshold = conf.get("mean_threshold")
+        yearly_threshold = conf.get("yearly_threshold")
+        direction = int(conf.get("direction") or GP_INDICATOR_DIRECTION.get(indicator, 1))
+        if mean_threshold is not None:
+            mean_threshold = float(mean_threshold)
+        if yearly_threshold is not None:
+            yearly_threshold = float(yearly_threshold)
+        out[indicator] = (mean_threshold, yearly_threshold, direction)
+    return out
 
 
 # ── Backtest ──────────────────────────────────────────────────────────

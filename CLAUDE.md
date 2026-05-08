@@ -97,12 +97,15 @@ lionet/
 ├── test/                      # Smoke tests and analysis scripts
 └── utils/
     ├── params.py              # Contract multipliers, config
+    ├── llm_utils.py           # LLM calling utilities (anthropic SDK, multi-profile from .env)
     └── logging.py             # Logging utilities
 ```
 
 ## Key Classes
 
 - **`GeneticFactorGenerator`** (`factors/factor_auto_search.py`) — Orchestrates GP evolution: population initialization, fitness evaluation via `BackTester`, selection, crossover, mutation, early stopping with shock mode for exploration bursts. Call `auto_mine_select_and_save_fc()` to run a full mining pipeline.
+
+- **`LLMPromptFactorGenerator`** (`factors/factor_auto_search.py`) — Uses LLM to generate factor formulas from natural language prompts. Supports multiple LLM backends via `utils/llm_utils.py` (configured in `.env` LLM_PROFILES). When `apply_rolling_norm=True`, wraps generated formulas with `OpRollNorm` (same behavior as GP). Supports cancel via `cancel_event`.
 
 - **`BackTester`** (`factors/backtest.py`) — Computes factor performance using weighted prices, portfolio adjustment, baseline comparison. Outputs `performance_detail` (daily NAV) and `performance_summary` (yearly metrics).
 
@@ -127,6 +130,10 @@ Formulas are evaluated via `calc_formula_series(df, formula)` in `factor_ops.py`
 Backend serves at `:8000` with these endpoints:
 - `POST /api/mining/start` — Start GP factor mining (async, returns task_id)
 - `GET /api/mining/status/{task_id}` — Poll mining progress with GP generation info
+- `POST /api/llm-mining/start` — Start LLM factor mining (async, returns task_id)
+- `GET /api/llm-mining/status/{task_id}` — Poll LLM mining progress
+- `POST /api/llm-mining/terminate/{task_id}` — Stop LLM mining task
+- `GET /api/llm-mining/profiles` — List available LLM profiles from .env
 - `POST /api/backtest` — Run factor backtest synchronously
 - `POST /api/fusion/start` — Start factor fusion task
 - `GET /api/tasks` — List all tasks (in-memory + MongoDB)

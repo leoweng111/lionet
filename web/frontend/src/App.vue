@@ -56,7 +56,8 @@ const route = useRoute()
 const activeMenu = computed(() => route.path)
 
 const menuRoutes = [
-  { path: '/mining', meta: { title: '因子挖掘', icon: 'Cpu' } },
+  { path: '/mining', meta: { title: 'GP因子挖掘', icon: 'Cpu' } },
+  { path: '/llm-mining', meta: { title: 'LLM因子挖掘', icon: 'MagicStick' } },
   { path: '/fusion', meta: { title: '因子融合', icon: 'Connection' } },
   { path: '/factors', meta: { title: '因子库', icon: 'DataAnalysis' } },
   { path: '/backtest', meta: { title: '回测分析', icon: 'TrendCharts' } },

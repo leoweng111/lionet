@@ -29,6 +29,12 @@ export const getMiningAutoConfig = () => api.get('/api/mining/auto-config')
 export const updateMiningAutoConfig = (data) => api.post('/api/mining/auto-config', data)
 export const getMiningAutoSchedulerStatus = () => api.get('/api/mining/auto-scheduler-status')
 
+// ── LLM Mining ────────────────────────────────────────
+export const getLLMProfiles = () => api.get('/api/llm-mining/profiles')
+export const startLLMMining = (data) => api.post('/api/llm-mining/start', data)
+export const getLLMMiningStatus = (taskId) => api.get(`/api/llm-mining/status/${taskId}`)
+export const terminateLLMMining = (taskId) => api.post(`/api/llm-mining/terminate/${taskId}`)
+
 // ── Backtest ──────────────────────────────────────────
 export const runBacktest = (data) => api.post('/api/backtest', data)
 

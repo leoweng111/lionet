@@ -9,6 +9,7 @@ bin-release/
 *.pyc
 __pycache__/
 .DS_Store
+.env
 
 
 # Executables
