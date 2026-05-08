@@ -5,7 +5,7 @@
   "check_leakage_count": 20,
   "check_relative": true,
   "consistency_penalty_coef": 1,
-  "consistency_penalty_enabled": false,
+  "consistency_penalty_enabled": true,
   "end_time": "20241231",
   "fc_freq": "1d",
   "filter_indicator_dict": {
