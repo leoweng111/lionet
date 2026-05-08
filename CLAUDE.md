@@ -40,6 +40,22 @@ Pay attention to the last words that it prints.
 If it prints RESULT: false (some tests failed), means one or more tests failed, you need to check the logs above to find out which test(s) failed and fix the issue before submitting code changes.
 If it prints RESULT: true  (all tests passed), means all three tests passed successfully.
 
+### GP Mining Smoke Test
+```bash
+# Run GP factor mining smoke test: random fitness weights, 1-generation evolution, extreme filter thresholds
+python -u test/gp_mining_smoke.py
+```
+This test verifies the full GP mining pipeline (`GeneticFactorGenerator.auto_mine_select_and_save_fc`) runs without errors:
+- Randomly selects fitness indicator weights (sum to 1).
+- Sets filter thresholds impossibly high so no factor gets saved to DB.
+- Runs only 1 generation with a small population for speed.
+- Asserts: factors are generated, backtest completes, no factor passes the extreme filter, formula map is populated.
+
+It includes 3 sub-tests:
+1. **GP Mining with Outsample** — Direct `GeneticFactorGenerator` call with `outsample_ratio=0.3`, verifies outsample data generation and outsample backtest.
+2. **Simulate Backend Mining** — Mirrors `main.py` `_execute_mining` parameter construction (all params, normalize logic), catches param-passing mismatches between backend and core.
+3. **Simulate Backend Fusion** — Mirrors `main.py` `_execute_fusion` parameter construction for `FactorFusioner`, verifies `fusion_indicator_dict` and outsample params (`outsample_ratio`, `outsample_start_time`, `outsample_end_time`) are correctly passed through.
+
 ## Architecture
 
 ```
@@ -77,7 +93,7 @@ lionet/
 
 - **`Strategy`** (`strategy/strategy.py`) — Simulates day-session open-to-open futures trading with margin, fees, slippage. T-signal → T+1 open execution convention. Uses `OpRollNorm` wrapper by default.
 
-- **`FactorFusioner`** (`factors/factor_auto_search.py`) — Combines multiple factors via weighted average or other fusion methods, with leakage and similarity checks.
+- **`FactorFusioner`** (`factors/factor_auto_search.py`) — Combines multiple factors via weighted average or other fusion methods, with leakage and similarity checks. Uses `fusion_indicator_dict` for weighted multi-indicator scoring (same indicator system as GP fitness). Supports outsample blending via `outsample_ratio`: `blended_score = (1 - outsample_ratio) * insample_score + outsample_ratio * outsample_score`.
 
 - **`gp_factor_engine.py`** — Low-level GP primitives: tree generation, crossover, mutation, depth penalties, tournament selection.
 

@@ -44,7 +44,7 @@ if __name__ == '__main__':
         apply_weighted_price=False,
         random_seed=7,
     )
-    generated = fg.generate()
-    print('generated shape:', generated.shape)
+    fg.generate()
+    print('generated shape:', fg.generated_data.shape)
     print('factor count:', len(fg.generated_fc_name_list))
 

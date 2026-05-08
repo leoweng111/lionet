@@ -331,6 +331,9 @@ class GPMiningParams(BaseModel):
     filter_indicator_dict: Dict[str, Dict[str, Optional[float]]] = Field(default_factory=dict)
     consistency_penalty_enabled: bool = False
     consistency_penalty_coef: float = 1.0
+    outsample_ratio: float = 0.0
+    outsample_start_time: Optional[str] = None
+    outsample_end_time: Optional[str] = None
 
 
 class MiningConfigUpdateParams(BaseModel):
@@ -376,13 +379,13 @@ class FusionParams(BaseModel):
     relative_threshold: float = 0.7
     relative_check_version_list: Optional[List[str]] = None
     max_fusion_count: int = 5
-    fusion_metrics: List[str] = ['ic']
+    fusion_indicator_dict: Dict[str, Optional[float]] = Field(default_factory=lambda: dict(GP_DEFAULT_FITNESS_INDICATOR_WEIGHT))
     version: str = Field(default_factory=lambda: datetime.now().strftime('%Y%m%d') + '_factor_fusion_test')
     n_jobs: int = 5
     base_col_list: Optional[List[str]] = None
-    consider_outsample: bool = False
-    outsample_start_day: Optional[str] = None
-    outsample_end_day: Optional[str] = None
+    outsample_ratio: float = 0.0
+    outsample_start_time: Optional[str] = None
+    outsample_end_time: Optional[str] = None
 
 
 class StrategyBatchParams(BaseModel):
@@ -1751,6 +1754,9 @@ def _execute_mining(params: GPMiningParams, task_id: str, cancel_event: threadin
             gp_max_shock_generation=params.gp_max_shock_generation,
             consistency_penalty_enabled=params.consistency_penalty_enabled,
             consistency_penalty_coef=params.consistency_penalty_coef,
+            outsample_ratio=params.outsample_ratio,
+            outsample_start_time=params.outsample_start_time,
+            outsample_end_time=params.outsample_end_time,
         )
 
         # Attach cancel_event so GP evolution can be interrupted
@@ -1931,6 +1937,16 @@ def _execute_fusion(params: FusionParams, task_id: Optional[str] = None) -> Dict
                 if names:
                     raw_factor_dict[str(version)] = list(dict.fromkeys(names))
 
+        # Normalize fusion_indicator_dict
+        fusion_indicator_dict = {}
+        for k, v in (params.fusion_indicator_dict or {}).items():
+            if k in GP_SUPPORTED_INDICATOR:
+                fv = float(v) if v is not None else 0.0
+                if abs(fv) > 1e-12:
+                    fusion_indicator_dict[k] = fv
+        if not fusion_indicator_dict:
+            fusion_indicator_dict = dict(GP_DEFAULT_FITNESS_INDICATOR_WEIGHT)
+
         fusioner = FactorFusioner(
             fusion_method=params.fusion_method,
             raw_factor_dict=raw_factor_dict,
@@ -1949,13 +1965,13 @@ def _execute_fusion(params: FusionParams, task_id: Optional[str] = None) -> Dict
             relative_threshold=params.relative_threshold,
             relative_check_version_list=params.relative_check_version_list,
             max_fusion_count=params.max_fusion_count,
-            fusion_metrics=params.fusion_metrics,
+            fusion_indicator_dict=fusion_indicator_dict,
             version=params.version,
             n_jobs=params.n_jobs,
             base_col_list=params.base_col_list,
-            consider_outsample=params.consider_outsample,
-            outsample_start_day=params.outsample_start_day,
-            outsample_end_day=params.outsample_end_day,
+            outsample_ratio=params.outsample_ratio,
+            outsample_start_time=params.outsample_start_time,
+            outsample_end_time=params.outsample_end_time,
         )
         result = fusioner.fuse()
         bt = result.get('bt')
@@ -1963,9 +1979,9 @@ def _execute_fusion(params: FusionParams, task_id: Optional[str] = None) -> Dict
 
         fusion_formula = result.get('fusion_formula')
         fusion_curve_name = result.get('fusion_factor_name') or (fusion_formula if fusion_formula else 'fusion_factor')
-        has_oos = bool(params.outsample_start_day and params.outsample_end_day)
-        nav_split_date = params.outsample_start_day if has_oos else None
-        curve_end_time = params.outsample_end_day if has_oos else params.end_time
+        has_oos = bool(params.outsample_ratio > 0 and params.outsample_start_time and params.outsample_end_time)
+        nav_split_date = params.outsample_start_time if has_oos else None
+        curve_end_time = params.outsample_end_time if has_oos else params.end_time
 
         if fusion_formula and has_oos:
             # Build a continuous in-sample + out-of-sample curve in one run.
@@ -2060,15 +2076,41 @@ def _execute_fusion(params: FusionParams, task_id: Optional[str] = None) -> Dict
             'final_metrics_outsample': result.get('final_metrics_outsample'),
             'leakage_check': result.get('leakage_check'),
             'relative_check': result.get('relative_check'),
-            'consider_outsample': result.get('consider_outsample', False),
-            'outsample_start_day': result.get('outsample_start_day'),
-            'outsample_end_day': result.get('outsample_end_day'),
+            'outsample_ratio': result.get('outsample_ratio', 0.0),
+            'outsample_start_time': result.get('outsample_start_time'),
+            'outsample_end_time': result.get('outsample_end_time'),
             'nav_split_date': nav_split_date,
             'nav_data': nav_data,
         }
     finally:
         if handler is not None and lionet_logger is not None:
             lionet_logger.removeHandler(handler)
+
+
+FUSION_INDICATOR_DICT_FILE = 'fusion_indicator_dict.json'
+
+
+@app.get('/api/fusion/indicator-options')
+async def get_fusion_indicator_options():
+    """Return supported indicators and default fusion indicator dict for the fusion page."""
+    _refresh_gp_runtime_configs_from_files()
+    fusion_dict_raw = load_json_config(FUSION_INDICATOR_DICT_FILE, dict(GP_DEFAULT_FITNESS_INDICATOR_WEIGHT))
+    fusion_dict = {}
+    for k in GP_SUPPORTED_INDICATOR:
+        fusion_dict[k] = fusion_dict_raw.get(k, 0)
+    return {
+        'supported_indicator': list(GP_SUPPORTED_INDICATOR),
+        'indicator_direction': dict(GP_INDICATOR_DIRECTION),
+        'default_fusion_indicator_dict': fusion_dict,
+    }
+
+
+@app.post('/api/fusion/indicator-options')
+async def update_fusion_indicator_options(body: Dict[str, Any]):
+    fusion_dict = body.get('default_fusion_indicator_dict')
+    if fusion_dict is not None:
+        save_json_config(FUSION_INDICATOR_DICT_FILE, fusion_dict)
+    return {'status': 'ok'}
 
 
 @app.post('/api/fusion/start')

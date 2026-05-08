@@ -2,7 +2,7 @@
   <div>
     <div class="page-header">
       <h2><el-icon><Connection /></el-icon> 因子融合</h2>
-      <p>基于数据库因子做逐步融合，支持样本外优先策略，并将结果落库到 `factors.factor_fusion`</p>
+      <p>基于数据库因子做逐步融合，支持多指标加权评估和样本外比例控制，结果落库到 `factors.factor_fusion`</p>
     </div>
 
     <el-row :gutter="20" class="responsive-row">
@@ -18,7 +18,7 @@
           <div class="param-scroll-panel">
             <el-form :model="p" label-width="auto" size="small">
               <div class="param-section">
-                <el-divider content-position="left">基础参数</el-divider>
+                <el-divider content-position="center">基础参数</el-divider>
                 <el-form-item label="融合方法">
                   <el-select v-model="p.fusion_method" style="width:100%">
                     <el-option label="avg_weight" value="avg_weight" />
@@ -42,23 +42,34 @@
                   <el-col :span="12"><el-form-item label="频率"><el-select v-model="p.fc_freq" style="width:100%"><el-option label="1d" value="1d" /><el-option label="5m" value="5m" /><el-option label="1m" value="1m" /></el-select></el-form-item></el-col>
                 </el-row>
                 <el-row :gutter="12">
-                  <el-col :span="12"><el-form-item label="开始"><el-input v-model="p.start_time" /></el-form-item></el-col>
-                  <el-col :span="12"><el-form-item label="结束"><el-input v-model="p.end_time" /></el-form-item></el-col>
+                  <el-col :span="12"><el-form-item label="开始日期"><el-input v-model="p.start_time" /></el-form-item></el-col>
+                  <el-col :span="12"><el-form-item label="结束日期"><el-input v-model="p.end_time" /></el-form-item></el-col>
+                </el-row>
+                <el-row :gutter="12">
+                  <el-col :span="8">
+                    <el-form-item label="样本外比例">
+                      <el-input-number v-model="p.outsample_ratio" :min="0" :max="1" :step="0.05" :precision="2" style="width:100%" />
+                    </el-form-item>
+                  </el-col>
+                  <el-col :span="8">
+                    <el-form-item label="样本外开始">
+                      <el-input v-model="p.outsample_start_time" placeholder="20250101" :disabled="!p.outsample_ratio" />
+                    </el-form-item>
+                  </el-col>
+                  <el-col :span="8">
+                    <el-form-item label="样本外结束">
+                      <el-input v-model="p.outsample_end_time" placeholder="20251231" :disabled="!p.outsample_ratio" />
+                    </el-form-item>
+                  </el-col>
                 </el-row>
               </div>
 
               <div class="param-section">
-                <el-divider content-position="left">融合控制</el-divider>
+                <el-divider content-position="center">融合控制</el-divider>
                 <el-row :gutter="12">
                   <el-col :span="12"><el-form-item label="最大融合数"><el-input-number v-model="p.max_fusion_count" :min="1" :max="50" style="width:100%" /></el-form-item></el-col>
                   <el-col :span="12"><el-form-item label="并行数"><el-input-number v-model="p.n_jobs" :min="1" :max="32" style="width:100%" /></el-form-item></el-col>
                 </el-row>
-                <el-form-item label="优化指标">
-                  <el-select v-model="p.fusion_metrics" multiple style="width:100%">
-                    <el-option label="ic" value="ic" />
-                    <el-option label="sharpe" value="sharpe" />
-                  </el-select>
-                </el-form-item>
                 <el-row :gutter="12">
                   <el-col :span="12"><el-form-item label="相似度检查"><el-switch v-model="p.check_relative" /></el-form-item></el-col>
                   <el-col :span="12"><el-form-item label="相似度阈值"><el-input-number v-model="p.relative_threshold" :min="0" :max="1" :step="0.05" :precision="2" style="width:100%" /></el-form-item></el-col>
@@ -70,17 +81,21 @@
               </div>
 
               <div class="param-section">
-                <el-divider content-position="left">样本外优先</el-divider>
-                <el-form-item label="启用样本外优先"><el-switch v-model="p.consider_outsample" /></el-form-item>
-                <el-row :gutter="12">
-                  <el-col :span="12"><el-form-item label="样本外开始"><el-input v-model="p.outsample_start_day" placeholder="20250101" /></el-form-item></el-col>
-                  <el-col :span="12"><el-form-item label="样本外结束"><el-input v-model="p.outsample_end_day" placeholder="20251231" /></el-form-item></el-col>
-                </el-row>
+                <el-divider content-position="center">融合评估指标权重</el-divider>
+                <div v-for="indicator in supportedIndicators" :key="`fusion-${indicator}`" class="indicator-row">
+                  <span class="indicator-label">{{ indicator }}</span>
+                  <el-input
+                    v-model="p.fusion_indicator_dict[indicator]"
+                    placeholder="0"
+                    clearable
+                    size="small"
+                  />
+                </div>
               </div>
 
-              <el-form-item>
+              <el-form-item style="margin-top:12px;">
                 <el-button type="primary" size="large" :loading="loading" @click="run" style="width:100%;">
-                  {{ loading ? '融合中...' : '开始融合' }}
+                  {{ loading ? '融合中...' : '🚀 开始融合' }}
                 </el-button>
               </el-form-item>
             </el-form>
@@ -144,12 +159,25 @@
 </template>
 
 <script setup>
-import { computed, reactive, ref, onMounted, onUnmounted } from 'vue'
+import { computed, reactive, ref, onMounted, onUnmounted, watch } from 'vue'
 import { ElMessage } from 'element-plus'
-import { getVersions, startFusion, getFusionStatus } from '../api'
+import { getVersions, startFusion, getFusionStatus, getFusionIndicatorOptions, updateFusionIndicatorOptions } from '../api'
 import NavChart from '../components/NavChart.vue'
 
 const today = () => new Date().toISOString().slice(0, 10).replace(/-/g, '')
+
+const supportedIndicators = ref(['Net Return', 'Net Sharpe', 'TS IC'])
+const indicatorDirection = ref({})
+const serverDefaultFusionIndicatorDict = ref({})
+
+const _buildDefaultFusionIndicatorDict = (indicators) => {
+  const out = {}
+  indicators.forEach((indicator) => {
+    out[indicator] = indicator === 'TS IC' ? 1 : 0
+  })
+  return out
+}
+
 const defaults = () => ({
   fusion_method: 'avg_weight',
   collection: ['genetic_programming'],
@@ -168,13 +196,16 @@ const defaults = () => ({
   relative_threshold: 0.7,
   relative_check_version_list: [],
   max_fusion_count: 5,
-  fusion_metrics: ['ic'],
+  fusion_indicator_dict: {
+    ..._buildDefaultFusionIndicatorDict(supportedIndicators.value),
+    ...(serverDefaultFusionIndicatorDict.value || {}),
+  },
   version: `${today()}_factor_fusion_test`,
   n_jobs: 5,
   base_col_list: ['open', 'high', 'low', 'close', 'volume', 'position'],
-  consider_outsample: false,
-  outsample_start_day: '20250101',
-  outsample_end_day: '20251231',
+  outsample_ratio: 0.0,
+  outsample_start_time: '20250101',
+  outsample_end_time: '20251231',
 })
 
 const p = reactive(defaults())
@@ -188,6 +219,7 @@ const taskError = ref('')
 const collections = ref([])
 const allVersions = ref([])
 let pollTimer = null
+let saveFusionDictTimer = null
 
 const selectedFactors = computed(() => result.value?.selected_factors_detail || [])
 
@@ -208,11 +240,49 @@ const chartTitleTooltip = (fcName) => {
   return fcName
 }
 
+const _toNullableNumber = (raw) => {
+  if (raw === '' || raw === null || raw === undefined) return null
+  const n = Number(raw)
+  return Number.isFinite(n) ? n : null
+}
+
+const _saveFusionIndicatorDict = async () => {
+  try {
+    const dict = {}
+    supportedIndicators.value.forEach((indicator) => {
+      const n = _toNullableNumber(p.fusion_indicator_dict?.[indicator])
+      dict[indicator] = n === null ? 0 : n
+    })
+    await updateFusionIndicatorOptions({ default_fusion_indicator_dict: dict })
+  } catch {
+    // silent
+  }
+}
+
+const _queueSaveFusionDict = () => {
+  if (saveFusionDictTimer) clearTimeout(saveFusionDictTimer)
+  saveFusionDictTimer = setTimeout(_saveFusionIndicatorDict, 500)
+}
+
+watch(() => p.fusion_indicator_dict, () => {
+  _queueSaveFusionDict()
+}, { deep: true })
+
 const loadMeta = async () => {
   try {
-    const { data } = await getVersions()
-    collections.value = data.collections || []
-    allVersions.value = data.all_versions || []
+    const [{ data: verData }, { data: indData }] = await Promise.all([
+      getVersions(),
+      getFusionIndicatorOptions(),
+    ])
+    collections.value = verData.collections || []
+    allVersions.value = verData.all_versions || []
+    supportedIndicators.value = indData.supported_indicator || supportedIndicators.value
+    indicatorDirection.value = indData.indicator_direction || {}
+    serverDefaultFusionIndicatorDict.value = indData.default_fusion_indicator_dict || {}
+    p.fusion_indicator_dict = {
+      ..._buildDefaultFusionIndicatorDict(supportedIndicators.value),
+      ...(serverDefaultFusionIndicatorDict.value || {}),
+    }
   } catch {
     collections.value = ['genetic_programming', 'llm_prompt', 'factor_fusion']
     allVersions.value = []
@@ -220,17 +290,30 @@ const loadMeta = async () => {
 }
 
 const run = async () => {
+  if (p.outsample_ratio < 0 || p.outsample_ratio > 1) {
+    ElMessage.error('样本外比例必须在 0 到 1 之间')
+    return
+  }
+
   loading.value = true
   try {
     taskError.value = ''
     result.value = null
     navCurves.value = {}
+
+    const fusionIndicatorDict = {}
+    supportedIndicators.value.forEach((indicator) => {
+      const n = _toNullableNumber(p.fusion_indicator_dict?.[indicator])
+      fusionIndicatorDict[indicator] = n === null ? 0 : n
+    })
+
     const payload = {
       ...p,
+      fusion_indicator_dict: fusionIndicatorDict,
       candidate_versions: (p.candidate_versions || []).length ? p.candidate_versions : null,
       relative_check_version_list: (p.relative_check_version_list || []).length ? p.relative_check_version_list : null,
-      outsample_start_day: p.outsample_start_day || null,
-      outsample_end_day: p.outsample_end_day || null,
+      outsample_start_time: p.outsample_start_time || null,
+      outsample_end_time: p.outsample_end_time || null,
     }
     const { data } = await startFusion(payload)
     taskId.value = data.task_id
@@ -264,6 +347,46 @@ const run = async () => {
 }
 
 onMounted(loadMeta)
-onUnmounted(() => { if (pollTimer) clearInterval(pollTimer) })
+onUnmounted(() => {
+  if (pollTimer) clearInterval(pollTimer)
+  if (saveFusionDictTimer) clearTimeout(saveFusionDictTimer)
+})
 </script>
 
+<style scoped>
+.param-scroll-panel {
+  max-height: 68vh;
+  overflow: auto;
+  padding-right: 4px;
+}
+
+.param-section {
+  border: 1px solid var(--el-border-color-lighter);
+  border-radius: 8px;
+  background: var(--el-fill-color-extra-light);
+  padding: 6px 10px 2px;
+  margin-bottom: 10px;
+}
+
+.param-section :deep(.el-divider) {
+  margin: 6px 0 14px;
+}
+
+.param-section :deep(.el-divider__text) {
+  font-weight: 600;
+  color: var(--el-text-color-primary);
+}
+
+.indicator-row {
+  display: grid;
+  grid-template-columns: 1fr 120px;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+
+.indicator-label {
+  font-size: 12px;
+  color: var(--el-text-color-regular);
+}
+</style>

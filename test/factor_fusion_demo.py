@@ -40,14 +40,22 @@ def main() -> None:
     parser.add_argument('--max-fusion-count', type=int, default=3)
     parser.add_argument('--version', type=str, required=True,
                         help='Fusion result version to persist into factors.factor_fusion.')
-    parser.add_argument('--fusion-metrics', type=str, default='ic,sharpe',
-                        help='Comma separated list, e.g. ic or ic,sharpe')
+    parser.add_argument('--fusion-indicator', type=str, default='TS IC:0.3,TS ICIR:0.7',
+                        help='Comma separated indicator:weight pairs, e.g. "TS IC:0.3,TS ICIR:0.7"')
     parser.add_argument('--use-raw-factor-dict', action='store_true',
                         help='If set, pick latest DB version and top-n factors to build raw_factor_dict.')
     parser.add_argument('--raw-top-n', type=int, default=8)
     args = parser.parse_args()
 
-    fusion_metrics = [x.strip() for x in args.fusion_metrics.split(',') if x.strip()]
+    fusion_indicator_dict = {}
+    for item in args.fusion_indicator.split(','):
+        item = item.strip()
+        if ':' in item:
+            k, v = item.rsplit(':', 1)
+            fusion_indicator_dict[k.strip()] = float(v.strip())
+    if not fusion_indicator_dict:
+        fusion_indicator_dict = {'TS IC': 0.3, 'TS ICIR': 0.7}
+
     raw_factor_dict = None
     if args.use_raw_factor_dict:
         raw_factor_dict = _build_raw_factor_dict(collection=args.collection, top_n=args.raw_top_n)
@@ -60,7 +68,7 @@ def main() -> None:
         start_time=args.start_time,
         end_time=args.end_time,
         max_fusion_count=args.max_fusion_count,
-        fusion_metrics=fusion_metrics,
+        fusion_indicator_dict=fusion_indicator_dict,
         version=args.version,
         apply_weighted_price=True,
         n_jobs=1,
@@ -69,7 +77,7 @@ def main() -> None:
     result = fusioner.fuse()
     out = {
         'fusion_method': result['fusion_method'],
-        'fusion_metrics': result['fusion_metrics'],
+        'fusion_indicator_dict': result['fusion_indicator_dict'],
         'selected_factor_keys': result['selected_factor_keys'],
         'final_metrics': result['final_metrics'],
         'selected_factors_detail': result['selected_factors_detail'],

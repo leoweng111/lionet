@@ -41,8 +41,8 @@ if __name__ == '__main__':
         version='smoke_20260317_000000',
         n_jobs=1,
     )
-    generated = fg.generate()
-    print('generated shape:', generated.shape)
+    fg.generate()
+    print('generated shape:', fg.generated_data.shape)
     print('factor count:', len(fg.generated_fc_name_list))
 
     selected = fg.generated_fc_name_list[:2]

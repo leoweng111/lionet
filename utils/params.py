@@ -213,5 +213,10 @@ GP_DEFAULT_FILTER_INDICATOR_DICT = _normalize_filter_indicator_dict(
 
 # Supported options for factor fusion.
 FusionSupportedMethods = {'avg_weight'}
-FusionSupportedMetrics = {'ic', 'sharpe'}
+
+# Default fusion indicator weight: loaded from JSON config, same format as GP fitness weights.
+FUSION_DEFAULT_INDICATOR_WEIGHT = _normalize_fitness_weight(
+    load_json_config('fusion_default_indicator_weight.json', {'TS IC': 0.3, 'TS ICIR': 0.7}),
+    GP_SUPPORTED_INDICATOR,
+)
 

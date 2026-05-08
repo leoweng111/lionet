@@ -22,7 +22,7 @@ from mongo.mongify import get_data
 from utils.logging import log
 from utils.params import (
     FusionSupportedMethods,
-    FusionSupportedMetrics,
+    FUSION_DEFAULT_INDICATOR_WEIGHT,
     GP_DEFAULT_FITNESS_INDICATOR_WEIGHT,
     GP_SUPPORTED_INDICATOR,
 )
@@ -75,7 +75,10 @@ class FactorGenerator:
                  check_relative: bool = True,
                  relative_threshold: float = 0.7,
                  relative_check_version_list: Optional[Sequence[str]] = None,
-                 version: Optional[str] = '20260407_gp_test_1'):
+                 version: Optional[str] = '20260407_gp_test_1',
+                 outsample_ratio: float = 0.0,
+                 outsample_start_time: Optional[str] = None,
+                 outsample_end_time: Optional[str] = None):
         self.instrument_type = instrument_type
         self.instrument_id_list = [instrument_id_list] if isinstance(instrument_id_list, str) else list(instrument_id_list)
         self.fc_freq = fc_freq
@@ -105,8 +108,16 @@ class FactorGenerator:
         self.version = version or datetime.now().strftime('%Y%m%d_%H%M%S')
 
         self.generated_data: Optional[pd.DataFrame] = None
+        self.generated_outsample_data: Optional[pd.DataFrame] = None
         self.generated_fc_name_list: List[str] = []
         self.bt: Optional[BackTester] = None
+        self.bt_outsample: Optional[BackTester] = None
+        self.insample_data: Optional[pd.DataFrame] = None
+        self.outsample_data: Optional[pd.DataFrame] = None
+
+        self.outsample_ratio = max(0.0, min(1.0, float(outsample_ratio)))
+        self.outsample_start_time = outsample_start_time
+        self.outsample_end_time = outsample_end_time
 
         self.factor_formula_map: Dict[str, str] = {}
         self.factor_fitness_map: Dict[str, Dict[str, Dict[str, float]]] = {}
@@ -119,7 +130,12 @@ class FactorGenerator:
         assert 0.0 <= self.relative_threshold <= 1.0, \
             f'relative_threshold should be in [0, 1], got {self.relative_threshold}.'
 
-    def load_base_data(self) -> pd.DataFrame:
+    def _prepare_data(self, start_time: Optional[str], end_time: Optional[str]) -> pd.DataFrame:
+        """加载并预处理指定时间范围的基础数据。
+
+        内部辅助方法，封装数据加载、列校验、排序和复权处理的通用逻辑。
+        当 self.data 已传入 DataFrame 时直接使用，否则从数据库加载。
+        """
         if isinstance(self.data, pd.DataFrame):
             df = self.data.copy()
         else:
@@ -127,8 +143,8 @@ class FactorGenerator:
                 raise ValueError(f'Unsupported instrument type: {self.instrument_type}.')
             df = get_futures_continuous_contract_price(
                 instrument_id=self.instrument_id_list,
-                start_date=self.start_time,
-                end_date=self.end_time,
+                start_date=start_time,
+                end_date=end_time,
                 from_database=True,
             )
 
@@ -157,6 +173,20 @@ class FactorGenerator:
                 f'Invalid instrument_id_list: {invalid_instruments}. Available instruments: {available_instruments}'
             )
         return df
+
+    def load_base_data(self) -> None:
+        """加载基础数据，将样本内数据赋值给 self.insample_data，样本外数据赋值给 self.outsample_data。
+
+        样本内数据使用 self.start_time ~ self.end_time 区间。
+        若配置了样本外参数（outsample_ratio > 0 且 outsample_start_time/outsample_end_time 均已设置），
+        则同时加载样本外数据并赋值给 self.outsample_data。
+        """
+        self.insample_data = self._prepare_data(self.start_time, self.end_time)
+
+        if self.outsample_ratio > 0 and self.outsample_start_time and self.outsample_end_time:
+            self.outsample_data = self._prepare_data(self.outsample_start_time, self.outsample_end_time)
+        else:
+            self.outsample_data = None
 
     @staticmethod
     def auto_load_project_env() -> bool:
@@ -193,12 +223,21 @@ class FactorGenerator:
         raise NotImplementedError('Please implement generate_factor_df in subclasses.')
 
     def generate(self,
-                 selected_fc_name_list: Optional[List[str]] = None) -> pd.DataFrame:
+                 selected_fc_name_list: Optional[List[str]] = None) -> None:
         raise NotImplementedError('Please use a concrete subclass, e.g. LLMPromptFactorGenerator or GeneticFactorGenerator.')
 
     def _finalize_generated_data(self,
                                  base_df: pd.DataFrame,
-                                 factor_df: pd.DataFrame) -> pd.DataFrame:
+                                 factor_df: pd.DataFrame,
+                                 is_outsample: bool = False) -> None:
+        """将基础数据与因子数据合并，生成最终的回测数据。
+
+        参数说明：
+        - base_df: 基础价格数据。
+        - factor_df: 因子值 DataFrame。
+        - is_outsample: 是否为样本外数据。为 True 时结果存入 self.generated_outsample_data，
+                        否则存入 self.generated_data 并更新 self.generated_fc_name_list。
+        """
         raw_cols = ['time', 'instrument_id', 'open', 'high', 'low', 'close', 'volume', 'position']
         optional_cols = [c for c in ['weighted_factor', 'cur_weighted_factor', 'is_rollover', 'symbol'] if c in base_df.columns]
         df_with_ret = get_future_ret(
@@ -215,17 +254,19 @@ class FactorGenerator:
             c for c in generated_data.columns
             if c not in ['time', 'instrument_id', 'future_ret', 'weighted_factor', 'cur_weighted_factor', 'is_rollover', 'symbol']
         ]
-        self.generated_data = generated_data
-        log.info(f'Generated {len(self.generated_fc_name_list)} factors by method={self.method}.')
-        return generated_data
+        if is_outsample:
+            self.generated_outsample_data = generated_data
+        else:
+            self.generated_data = generated_data
+        log.info(f'Generated {len(self.generated_fc_name_list)} factors by method={self.method} (outsample={is_outsample}).')
 
     def generate_with_fc(self,
-                         fc_name_list: Union[str, List[str]]) -> pd.DataFrame:
+                         fc_name_list: Union[str, List[str]]) -> None:
         if isinstance(fc_name_list, str):
             fc_name_list = [fc_name_list]
         if not fc_name_list:
             raise ValueError('fc_name_list is empty.')
-        return self.generate(selected_fc_name_list=list(fc_name_list))
+        self.generate(selected_fc_name_list=list(fc_name_list))
 
     def save_fc_value(self,
                       fc_name_list: Union[str, List[str]],
@@ -295,13 +336,20 @@ class FactorGenerator:
                                performance_summary: Optional[pd.DataFrame] = None,
                                filter_indicator_dict: Dict[str, Tuple[Optional[float], Optional[float], int]] = None,
                                require_all_row: bool = True,
-                               require_all_instruments: bool = True) -> List[str]:
+                               require_all_instruments: bool = True,
+                               outsample_performance_summary: Optional[pd.DataFrame] = None,
+                               outsample_ratio: float = 0.0) -> List[str]:
+        """Filter factors by threshold, supporting outsample_ratio blending.
+
+        For mean_threshold checks:
+            blended_mean = (1 - outsample_ratio) * insample_yearly_mean + outsample_ratio * outsample_yearly_mean
+            blended_mean must meet the mean_threshold.
+        For yearly_threshold checks:
+            Only insample yearly values are checked (unchanged logic).
+        """
         if performance_summary is None:
-            if self.bt is None or self.bt.performance_summary is None:
-                raise ValueError('No performance summary available. Please run backtest() first.')
-            summary_df = self.bt.performance_summary.copy()
-        else:
-            summary_df = performance_summary.copy()
+            raise ValueError('No performance summary available.')
+        summary_df = performance_summary.copy()
 
         if 'year' not in summary_df.columns:
             summary_df = summary_df.reset_index()
@@ -326,10 +374,19 @@ class FactorGenerator:
             if indicator not in summary_df.columns:
                 raise ValueError(f'performance_summary does not contain required indicator: {indicator}')
 
+        # Prepare outsample summary if ratio > 0
+        oos_ratio = max(0.0, min(1.0, float(outsample_ratio)))
+        oos_df: Optional[pd.DataFrame] = None
+        if oos_ratio > 0 and outsample_performance_summary is not None:
+            oos_df = outsample_performance_summary.copy()
+            if 'year' not in oos_df.columns:
+                oos_df = oos_df.reset_index()
+
         summary_df = summary_df.copy()
         summary_df['__year_str__'] = summary_df['year'].astype(str)
         summary_df['__is_yearly__'] = summary_df['__year_str__'] != 'all'
 
+        # Build yearly pass columns for insample (yearly threshold checks)
         for indicator, conf in active_indicator_dict.items():
             _, yearly_threshold, direction = conf
             numeric_series = pd.to_numeric(summary_df[indicator], errors='coerce')
@@ -343,6 +400,23 @@ class FactorGenerator:
 
         group_cols = ['Factor Name'] + (['Instrument ID'] if 'Instrument ID' in summary_df.columns else [])
 
+        def _get_oos_yearly_mean(fc_name: str, indicator: str, ins_id: Optional[str] = None) -> Optional[float]:
+            """Get outsample yearly mean for a factor+indicator (optionally per instrument)."""
+            if oos_df is None:
+                return None
+            mask = oos_df['Factor Name'].astype(str) == fc_name
+            if ins_id is not None and 'Instrument ID' in oos_df.columns:
+                mask = mask & (oos_df['Instrument ID'].astype(str) == ins_id)
+            oos_sub = oos_df.loc[mask].copy()
+            if oos_sub.empty:
+                return None
+            oos_sub['__year_str__'] = oos_sub['year'].astype(str)
+            oos_yearly = oos_sub.loc[oos_sub['__year_str__'] != 'all']
+            vals = pd.to_numeric(oos_yearly[indicator], errors='coerce').dropna() if indicator in oos_yearly.columns else pd.Series(dtype=float)
+            if vals.empty:
+                return None
+            return float(vals.mean())
+
         def _eval_group(df_group: pd.DataFrame) -> bool:
             if require_all_row and 'all' not in df_group['__year_str__'].values:
                 return False
@@ -350,18 +424,34 @@ class FactorGenerator:
             if df_year.empty:
                 return False
 
+            fc_name = str(df_group['Factor Name'].iloc[0])
+            ins_id = str(df_group['Instrument ID'].iloc[0]) if 'Instrument ID' in df_group.columns else None
+
             for indicator, conf in active_indicator_dict.items():
                 mean_threshold, _, direction = conf
                 yearly_values = pd.to_numeric(df_year[indicator], errors='coerce').dropna()
+
+                # Mean threshold check: blend insample + outsample
                 if mean_threshold is not None:
                     if yearly_values.empty:
                         return False
-                    yearly_mean = float(yearly_values.mean())
-                    if direction == 1 and not (yearly_mean >= float(mean_threshold)):
+                    insample_mean = float(yearly_values.mean())
+                    if oos_ratio > 0:
+                        oos_mean = _get_oos_yearly_mean(fc_name, indicator, ins_id)
+                        if oos_mean is not None:
+                            blended_mean = (1.0 - oos_ratio) * insample_mean + oos_ratio * oos_mean
+                        else:
+                            log.warning(f'Outsample mean not available for Factor="{fc_name}", Indicator="{indicator}", '
+                                        f'Instrument="{ins_id}". Using insample mean only.')
+                            blended_mean = insample_mean
+                    else:
+                        blended_mean = insample_mean
+                    if direction == 1 and not (blended_mean >= float(mean_threshold)):
                         return False
-                    if direction == -1 and not (yearly_mean <= float(mean_threshold)):
+                    if direction == -1 and not (blended_mean <= float(mean_threshold)):
                         return False
 
+                # Yearly threshold check: insample only (unchanged)
                 pass_col = f'__pass_yearly__{indicator}'
                 if not bool(df_group.loc[df_group['__is_yearly__'], pass_col].all()):
                     return False
@@ -848,8 +938,9 @@ class FactorGenerator:
         fc_name_list = self.load_fc(config_ref=config_ref, instrument_id_list=self.instrument_id_list)
         # Ensure replay computes formulas from the exact saved version.
         self.version = config_version
-        generated_df = self.generate_with_fc(fc_name_list=fc_name_list)
-        return self.backtest(data=generated_df, fc_name_list=fc_name_list, n_jobs=n_jobs)
+        self.generate_with_fc(fc_name_list=fc_name_list)
+        return self.backtest(data=self.generated_data, fc_name_list=fc_name_list, n_jobs=n_jobs,
+                             start_time=self.start_time, end_time=self.end_time)
 
     def check_if_leakage(self,
                          fc_name_list: Optional[Union[str, List[str]]] = None,
@@ -859,7 +950,9 @@ class FactorGenerator:
         if isinstance(fc_name_list, str):
             fc_name_list = [fc_name_list]
 
-        base_df = self.load_base_data()
+        if self.insample_data is None:
+            self.load_base_data()
+        base_df = self.insample_data
         if fc_name_list:
             selected_fc_name_list = list(fc_name_list)
         else:
@@ -868,7 +961,7 @@ class FactorGenerator:
 
         return check_if_leakage_util(
             selected_fc_name_list=selected_fc_name_list,
-            load_base_data_fn=self.load_base_data,
+            load_base_data_fn=lambda: self.insample_data,
             generate_factor_df_fn=self.generate_factor_df,
             check_leakage_count=self.check_leakage_count,
             atol=atol,
@@ -883,13 +976,41 @@ class FactorGenerator:
                                      require_all_instruments: bool = True) -> dict:
         self.validate_filter_indicator_dict(filter_indicator_dict)
 
-        generated_df = self.generate()
-        bt = self.backtest(data=generated_df, fc_name_list=self.generated_fc_name_list, n_jobs=n_jobs)
+        self.generate()
+        bt = self.backtest(data=self.generated_data, fc_name_list=self.generated_fc_name_list, n_jobs=n_jobs,
+                           start_time=self.start_time, end_time=self.end_time)
+
+        # Run outsample backtest if outsample_ratio > 0
+        outsample_perf_summary: Optional[pd.DataFrame] = None
+        if self.outsample_ratio > 0 and self.generated_outsample_data is not None:
+            try:
+                self.bt_outsample = self.backtest(
+                    data=self.generated_outsample_data,
+                    fc_name_list=self.generated_fc_name_list,
+                    n_jobs=n_jobs,
+                    start_time=self.outsample_start_time,
+                    end_time=self.outsample_end_time,
+                    calculate_baseline=False,
+                )
+                log.info(
+                    f'Outsample backtest completed: '
+                    f'start={self.outsample_start_time}, end={self.outsample_end_time}, '
+                    f'fc_count={len(self.generated_fc_name_list)}'
+                )
+                if self.bt_outsample is not None and self.bt_outsample.performance_summary is not None:
+                    outsample_perf_summary = self.bt_outsample.performance_summary
+                else:
+                    log.warning('Outsample backtest did not produce performance summary.')
+            except Exception as e:
+                log.warning(f'Outsample backtest failed: {e}')
+
         selected_fc_name_list = self.filter_fc_by_threshold(
             performance_summary=bt.performance_summary,
             filter_indicator_dict=filter_indicator_dict,
             require_all_row=require_all_row,
             require_all_instruments=require_all_instruments,
+            outsample_performance_summary=outsample_perf_summary,
+            outsample_ratio=self.outsample_ratio,
         )
 
         if not selected_fc_name_list:
@@ -939,7 +1060,7 @@ class FactorGenerator:
         if self.check_relative:
             relative_result = self.filter_fc_by_db_relative_spearman(
                 selected_fc_name_list=selected_after_leakage,
-                generated_df=generated_df,
+                generated_df=self.generated_data,
                 n_jobs=n_jobs,
             )
             selected_after_relative = relative_result.get('selected_fc_name_list', [])
@@ -995,7 +1116,7 @@ class FactorGenerator:
         return filter_fc_by_db_relative_spearman_util(
             selected_fc_name_list=selected_fc_name_list,
             generated_df=generated_df,
-            base_df=self.load_base_data(),
+            base_df=self.insample_data,
             base_col_list=self.base_col_list,
             relative_threshold=self.relative_threshold,
             relative_check_version_list=self.relative_check_version_list,
@@ -1010,7 +1131,20 @@ class FactorGenerator:
     def backtest(self,
                  data: Optional[pd.DataFrame] = None,
                  fc_name_list: Optional[Union[str, List[str]]] = None,
-                 n_jobs: Optional[int] = None) -> BackTester:
+                 n_jobs: Optional[int] = None,
+                 start_time: Optional[str] = None,
+                 end_time: Optional[str] = None,
+                 calculate_baseline: Optional[bool] = None) -> BackTester:
+        """运行因子回测。
+
+        参数说明：
+        - data: 回测数据，为 None 时使用 self.generated_data。
+        - fc_name_list: 因子名称列表，为 None 时使用 self.generated_fc_name_list。
+        - n_jobs: 并行任务数，为 None 时使用 self.n_jobs。
+        - start_time: 回测起始时间。
+        - end_time: 回测结束时间。
+        - calculate_baseline: 是否计算基准表现，为 None 时使用 self.calculate_baseline。
+        """
         if data is None:
             if self.generated_data is None:
                 raise ValueError('Please call generate() first, or pass `data` explicitly.')
@@ -1029,12 +1163,12 @@ class FactorGenerator:
             instrument_id_list=self.instrument_id_list,
             fc_freq=self.fc_freq,
             data=data,
-            start_time=self.start_time,
-            end_time=self.end_time,
+            start_time=start_time,
+            end_time=end_time,
             portfolio_adjust_method=self.portfolio_adjust_method,
             interest_method=self.interest_method,
             risk_free_rate=self.risk_free_rate,
-            calculate_baseline=self.calculate_baseline,
+            calculate_baseline=calculate_baseline if calculate_baseline is not None else self.calculate_baseline,
             # FactorGenerator data path already handles price adjustment in load_base_data.
             # Keep BackTester from applying weighted-price preprocessing again.
             # 这样设计是因为generate_factor_df需要使用到复权后的价格进行fitness计算。因此，不能只在backtest时才进行复权。
@@ -1081,7 +1215,10 @@ class LLMPromptFactorGenerator(FactorGenerator):
                  llm_factor_count: int = 5,
                  llm_early_stopping_round: int = 20,
                  llm_user_requirement: str = '生成期货的日频量价因子',
-                 version: Optional[str] = None):
+                 version: Optional[str] = None,
+                 outsample_ratio: float = 0.0,
+                 outsample_start_time: Optional[str] = None,
+                 outsample_end_time: Optional[str] = None):
         """LLM提示因子生成器。
 
         参数说明（中文）：
@@ -1141,6 +1278,9 @@ class LLMPromptFactorGenerator(FactorGenerator):
             relative_threshold=relative_threshold,
             relative_check_version_list=relative_check_version_list,
             version=version,
+            outsample_ratio=outsample_ratio,
+            outsample_start_time=outsample_start_time,
+            outsample_end_time=outsample_end_time,
         )
         self.model_name = model_name
         self.llm_temperature = llm_temperature
@@ -1317,10 +1457,17 @@ class LLMPromptFactorGenerator(FactorGenerator):
         return calc_formula_df(df=df, formula_map=self.factor_formula_map, data_fields=self.base_col_list)
 
     def generate(self,
-                 selected_fc_name_list: Optional[List[str]] = None) -> pd.DataFrame:
-        base_df = self.load_base_data()
-        factor_df = self.generate_factor_df(base_df, selected_fc_names=selected_fc_name_list)
-        return self._finalize_generated_data(base_df, factor_df)
+                 selected_fc_name_list: Optional[List[str]] = None) -> None:
+        """生成因子数据（样本内），同时生成样本外因子数据（如已配置）。"""
+        self.load_base_data()
+        factor_df = self.generate_factor_df(self.insample_data, selected_fc_names=selected_fc_name_list)
+        self._finalize_generated_data(self.insample_data, factor_df)
+
+        # 生成样本外因子数据
+        if self.outsample_data is not None:
+            oos_factor_df = self.generate_factor_df(self.outsample_data, selected_fc_names=selected_fc_name_list)
+            self._finalize_generated_data(self.outsample_data, oos_factor_df, is_outsample=True)
+
 
 
 class GeneticFactorGenerator(FactorGenerator):
@@ -1379,7 +1526,10 @@ class GeneticFactorGenerator(FactorGenerator):
                  gp_elite_stagnation_generation_count: int = 4,
                  gp_max_shock_generation: int = 3,
                  consistency_penalty_enabled: bool = False,
-                 consistency_penalty_coef: float = 1.0):
+                 consistency_penalty_coef: float = 1.0,
+                 outsample_ratio: float = 0.0,
+                 outsample_start_time: Optional[str] = None,
+                 outsample_end_time: Optional[str] = None):
         """遗传规划因子生成器。
 
         参数说明（中文）：
@@ -1457,6 +1607,9 @@ class GeneticFactorGenerator(FactorGenerator):
             relative_threshold=relative_threshold,
             relative_check_version_list=relative_check_version_list,
             version=version,
+            outsample_ratio=outsample_ratio,
+            outsample_start_time=outsample_start_time,
+            outsample_end_time=outsample_end_time,
         )
 
         self.gp_generations = gp_generations
@@ -1635,10 +1788,17 @@ class GeneticFactorGenerator(FactorGenerator):
         return self._build_factor_df_from_candidates(df_eval, candidates)
 
     def generate(self,
-                 selected_fc_name_list: Optional[List[str]] = None) -> pd.DataFrame:
-        base_df = self.load_base_data()
-        factor_df = self.generate_factor_df(base_df, selected_fc_names=selected_fc_name_list)
-        return self._finalize_generated_data(base_df, factor_df)
+                 selected_fc_name_list: Optional[List[str]] = None) -> None:
+        """生成GP因子数据（样本内），同时生成样本外因子数据（如已配置）。"""
+        self.load_base_data()
+        factor_df = self.generate_factor_df(self.insample_data, selected_fc_names=selected_fc_name_list)
+        self._finalize_generated_data(self.insample_data, factor_df)
+
+        # 生成样本外因子数据
+        if self.outsample_data is not None:
+            oos_factor_df = self.generate_factor_df(self.outsample_data, selected_fc_names=selected_fc_name_list)
+            self._finalize_generated_data(self.outsample_data, oos_factor_df, is_outsample=True)
+
 
 
 class FactorFusioner:
@@ -1664,45 +1824,29 @@ class FactorFusioner:
         relative_threshold: float = 0.7,
         relative_check_version_list: Optional[Sequence[str]] = None,
         max_fusion_count: int = 5,
-        fusion_metrics: Union[str, Sequence[str]] = 'ic',
+        fusion_indicator_dict: Optional[Dict[str, float]] = None,
         version: Optional[str] = None,
         n_jobs: int = 5,
         database: str = 'factors',
         base_col_list: Optional[Sequence[str]] = None,
-        consider_outsample: bool = False,
-        outsample_start_day: Optional[str] = None,
-        outsample_end_day: Optional[str] = None,
+        outsample_ratio: float = 0.0,
+        outsample_start_time: Optional[str] = None,
+        outsample_end_time: Optional[str] = None,
     ):
         """初始化因子融合器。
 
         参数说明：
         - fusion_method: 融合方式。当前仅支持 `avg_weight`（等权平均融合）。
-        - raw_factor_dict: 手动指定待融合因子池。格式为 `{version: [factor_name, ...]}`；
-          若为 None，则自动从 `collection` 指定的集合中拉取候选因子。
-        - collection: 候选因子来源集合名，支持字符串或字符串列表。
-        - instrument_type: 行情数据类型，当前仅支持期货连续合约场景。
-        - instrument_id_list: 回测与评估使用的标的列表；当前实现要求仅一个标的。
-        - fc_freq: 因子频率，支持 `1m`、`5m`、`1d`。
-        - data: 可直接传入已准备好的行情数据；为空时自动从数据层拉取。
-        - start_time: 融合评估起始日期（含），如 `20200101`。
-        - end_time: 融合评估结束日期（含），如 `20241231`。
-        - portfolio_adjust_method: 组合调仓频率，支持 `min`、`1D`、`1M`、`1Q`。
-        - interest_method: 收益累计方式（如 `simple`/`compound`），传递给回测器。
-        - risk_free_rate: 是否在绩效计算中考虑无风险利率。
-        - apply_weighted_price: 是否先对价格进行复权，再计算收益与因子。
-        - check_leakage_count: 泄露检查抽样次数。
-        - check_relative: 是否执行与历史融合因子的相似度检查。
-        - relative_threshold: 相似度阈值（Spearman abs），超过则判为过于相似。
-        - relative_check_version_list: 相似度检查版本白名单，None 表示不限制版本。
-        - max_fusion_count: 最多融合因子数量（包含首个基石因子）。
-        - fusion_metrics: 融合优化目标，可为 `ic`、`sharpe` 或其列表。
-        - version: 融合结果版本号，必填。最终落库记录 version 字段将使用该值。
-        - n_jobs: 并行任务数，用于候选因子计算等并行流程。
-        - database: 因子公式读取与融合结果写入的数据库名。
-        - base_col_list: 计算因子时需要保留的基础字段列表（默认 OHLCV+position）。
-        - consider_outsample: 是否在融合排序/筛选时优先使用样本外指标。
-        - outsample_start_day: 样本外区间起始日（YYYYMMDD）。
-        - outsample_end_day: 样本外区间结束日（YYYYMMDD）。
+        - raw_factor_dict: 手动指定待融合因子池。格式为 `{version: [factor_name, ...]}`。
+        - collection: 候选因子来源集合名。
+        - instrument_id_list: 回测使用的标的列表。
+        - start_time/end_time: 样本内评估区间。
+        - fusion_indicator_dict: 融合评估指标权重字典 {indicator: weight}，与GP因子挖掘共用同一套指标体系。
+          加权评分 = sum(weight * indicator_value)。仅用于融合因子的逐步前向选择评估。
+        - outsample_ratio: 样本外比例 [0, 1]。融合评估使用混合评分：
+          blended_score = (1 - outsample_ratio) * insample_score + outsample_ratio * outsample_score。
+        - outsample_start_time/outsample_end_time: 样本外区间。
+        - version: 本次融合的版本标识。
         """
         self.fusion_method = str(fusion_method).strip()
         if self.fusion_method not in FusionSupportedMethods:
@@ -1725,42 +1869,30 @@ class FactorFusioner:
         self.relative_threshold = float(relative_threshold)
         self.relative_check_version_list = None if relative_check_version_list is None else list(relative_check_version_list)
         self.max_fusion_count = int(max_fusion_count)
-        self.fusion_metrics = self._normalize_fusion_metrics(fusion_metrics)
         self.version = str(version).strip() if version is not None else ''
         self.n_jobs = int(n_jobs)
         self.database = str(database).strip() or 'factors'
         self.base_col_list = list(base_col_list) if base_col_list else ['open', 'high', 'low', 'close', 'volume', 'position']
-        self.consider_outsample = bool(consider_outsample)
-        self.outsample_start_day = str(outsample_start_day).strip() if outsample_start_day is not None else ''
-        self.outsample_end_day = str(outsample_end_day).strip() if outsample_end_day is not None else ''
+
+        # 融合评估指标权重
+        if fusion_indicator_dict is not None:
+            self.fusion_indicator_dict = {
+                k: float(v) for k, v in fusion_indicator_dict.items()
+                if k in GP_SUPPORTED_INDICATOR and abs(float(v)) > 1e-12
+            }
+        else:
+            self.fusion_indicator_dict = dict(FUSION_DEFAULT_INDICATOR_WEIGHT)
+        if not self.fusion_indicator_dict:
+            self.fusion_indicator_dict = dict(FUSION_DEFAULT_INDICATOR_WEIGHT)
+
+        # 样本外参数
+        self.outsample_ratio = max(0.0, min(1.0, float(outsample_ratio)))
+        self.outsample_start_time = outsample_start_time
+        self.outsample_end_time = outsample_end_time
 
         self._effective_end_time = str(self.end_time).strip() if self.end_time is not None else ''
-        if self.consider_outsample:
-            if not (self.outsample_start_day and self.outsample_end_day):
-                raise ValueError(
-                    'consider_outsample=True requires both outsample_start_day and outsample_end_day.'
-                )
-            try:
-                out_start = pd.to_datetime(self.outsample_start_day)
-                out_end = pd.to_datetime(self.outsample_end_day)
-                in_start = pd.to_datetime(self.start_time)
-                in_end = pd.to_datetime(self.end_time)
-            except Exception as e:
-                raise ValueError(
-                    'Invalid outsample date format. '
-                    f'outsample_start_day={self.outsample_start_day}, outsample_end_day={self.outsample_end_day}'
-                ) from e
-            if out_end < out_start:
-                raise ValueError(
-                    f'outsample_end_day must be >= outsample_start_day, got '
-                    f'{self.outsample_start_day}~{self.outsample_end_day}.'
-                )
-            if out_start < in_start:
-                raise ValueError(
-                    f'outsample_start_day must be >= start_time, got start_time={self.start_time}, '
-                    f'outsample_start_day={self.outsample_start_day}.'
-                )
-            self._effective_end_time = max(str(self.end_time), self.outsample_end_day)
+        if self.outsample_ratio > 0 and self.outsample_start_time and self.outsample_end_time:
+            self._effective_end_time = max(str(self.end_time), str(self.outsample_end_time))
 
         if not self.version:
             raise ValueError('FactorFusioner requires non-empty `version` and it must be explicitly provided.')
@@ -1819,24 +1951,6 @@ class FactorFusioner:
             out[version_text] = fc_names
         return out
 
-    def _normalize_fusion_metrics(self, fusion_metrics: Union[str, Sequence[str]]) -> List[str]:
-        if isinstance(fusion_metrics, str):
-            metrics = [fusion_metrics]
-        else:
-            metrics = list(fusion_metrics)
-        metrics = [str(x).strip().lower() for x in metrics if str(x).strip()]
-        if not metrics:
-            raise ValueError('fusion_metrics cannot be empty.')
-        invalid = [x for x in metrics if x not in FusionSupportedMetrics]
-        if invalid:
-            raise ValueError(
-                f'Unsupported fusion_metrics={invalid}. Available metrics: {sorted(FusionSupportedMetrics)}.'
-            )
-        duplicated = sorted([x for x in set(metrics) if metrics.count(x) > 1])
-        if duplicated:
-            raise ValueError(f'fusion_metrics contains duplicated metric(s): {duplicated}')
-        return metrics
-
     @staticmethod
     def _factor_key(version: str, factor_name: str) -> str:
         return f'{version}::{factor_name}'
@@ -1851,16 +1965,71 @@ class FactorFusioner:
             return float('-inf')
         return f
 
-    def _metric_sort_key(self, metrics: Dict[str, float]) -> Tuple[float, ...]:
-        return tuple(self._safe_metric_value(metrics.get(m)) for m in self.fusion_metrics)
+    def _compute_weighted_score(self, metrics: Dict[str, float]) -> float:
+        """根据 fusion_indicator_dict 加权计算综合评分。"""
+        score = 0.0
+        for indicator, weight in self.fusion_indicator_dict.items():
+            val = self._safe_metric_value(metrics.get(indicator))
+            if val == float('-inf'):
+                return float('-inf')
+            score += weight * val
+        return score
 
-    def _is_strictly_better(self,
-                            new_metrics: Dict[str, float],
-                            base_metrics: Dict[str, float]) -> bool:
-        return all(
-            self._safe_metric_value(new_metrics.get(m)) > self._safe_metric_value(base_metrics.get(m))
-            for m in self.fusion_metrics
+    def _evaluate_metrics(self,
+                          eval_df: pd.DataFrame,
+                          factor_col: str,
+                          start_time: Optional[str] = None,
+                          end_time: Optional[str] = None) -> Dict[str, float]:
+        """使用 BackTester 计算因子的所有指标，返回 {indicator: value} 字典。
+
+        与 GP 因子挖掘中的 performance_summary 使用相同的指标体系。
+        """
+        bt = BackTester(
+            fc_name_list=[factor_col],
+            version='fusion_eval',
+            collection='fusion_eval',
+            instrument_type=self.instrument_type,
+            instrument_id_list=self.instrument_id_list,
+            fc_freq=self.fc_freq,
+            data=eval_df[['time', 'instrument_id', 'future_ret', factor_col]].copy(),
+            start_time=start_time or self.start_time,
+            end_time=end_time or self.end_time,
+            portfolio_adjust_method=self.portfolio_adjust_method,
+            interest_method=self.interest_method,
+            risk_free_rate=self.risk_free_rate,
+            calculate_baseline=False,
+            apply_weighted_price=False,
+            n_jobs=1,
         )
+        bt.backtest()
+
+        if bt.performance_summary is None:
+            return {}
+
+        summary = bt.performance_summary.copy()
+        if 'year' not in summary.columns:
+            summary = summary.reset_index()
+        # 取 year=='all' 的总体指标行
+        all_row = summary[summary['year'].astype(str) == 'all']
+        if all_row.empty:
+            return {}
+
+        metrics: Dict[str, float] = {}
+        for indicator in GP_SUPPORTED_INDICATOR:
+            if indicator in all_row.columns:
+                val = pd.to_numeric(all_row[indicator].iloc[0], errors='coerce')
+                metrics[indicator] = float(val) if not pd.isna(val) else float('nan')
+        return metrics
+
+    def _format_metrics(self, metrics: Dict[str, float]) -> str:
+        """格式化输出融合指标权重字典中涉及的指标值。"""
+        parts = []
+        for k in self.fusion_indicator_dict:
+            v = self._safe_metric_value(metrics.get(k))
+            parts.append(f'{k}={v:.6f}')
+        score = self._compute_weighted_score(metrics)
+        parts.append(f'weighted_score={score:.6f}')
+        return ', '.join(parts)
 
     def _load_base_data(self) -> pd.DataFrame:
         if isinstance(self.data, pd.DataFrame):
@@ -1999,28 +2168,6 @@ class FactorFusioner:
 
         return out.sort_values(['instrument_id', 'time']).reset_index(drop=True)
 
-    def _evaluate_metrics(self,
-                          eval_df: pd.DataFrame,
-                          factor_col: str) -> Dict[str, float]:
-        data_i = eval_df[['time', 'instrument_id', 'future_ret', factor_col]].copy()
-        _, net_ret_df, _ = get_ts_ret_and_turnover(data_i, factor_col)
-        net_ret_df = net_ret_df.reset_index()
-
-        # Fusion Sharpe uses fee-adjusted net return series for consistency with executable performance.
-        annual_ret = get_annualized_ret(net_ret_df, factor_col, self.interest_method)
-        annual_vol = get_annualized_volatility(net_ret_df, factor_col)
-        annual_sharpe = get_annualized_sharpe(annual_ret, annual_vol)
-        ic_df, _ = get_annualized_ts_ic_and_t_corr(
-            data_i,
-            fc_col=factor_col,
-            fc_freq=self.fc_freq,
-            portfolio_adjust_method=self.portfolio_adjust_method,
-        )
-
-        ic_value = float(pd.to_numeric(ic_df.loc['all', 'TS IC'], errors='coerce')) if 'all' in ic_df.index else float('nan')
-        sharpe_value = float(pd.to_numeric(annual_sharpe.loc['all', factor_col], errors='coerce')) \
-            if 'all' in annual_sharpe.index else float('nan')
-        return {'ic': ic_value, 'sharpe': sharpe_value}
 
     def check_if_leakage(self,
                          fc_name_list: Sequence[str],
@@ -2097,10 +2244,6 @@ class FactorFusioner:
         bt.backtest()
         return bt
 
-    def _format_metrics(self,
-                        metrics: Dict[str, float]) -> str:
-        return ', '.join([f'{k}={self._safe_metric_value(metrics.get(k)):.6f}' for k in self.fusion_metrics])
-
     @staticmethod
     def _build_add_formula(formula_list: Sequence[str]) -> str:
         cleaned = [str(x).strip() for x in formula_list if str(x).strip()]
@@ -2125,13 +2268,47 @@ class FactorFusioner:
 
         return self._build_add_formula(selected_formulas)
 
+    def _compute_blended_score(self,
+                               eval_df: pd.DataFrame,
+                               factor_col: str) -> Tuple[float, Dict[str, float], Optional[Dict[str, float]]]:
+        """计算混合评分：(1 - outsample_ratio) * insample_score + outsample_ratio * outsample_score。
+
+        返回 (blended_score, insample_metrics, outsample_metrics)。
+        """
+        # 样本内评估
+        in_start = pd.to_datetime(self.start_time)
+        in_end = pd.to_datetime(self.end_time)
+        insample_df = eval_df[(eval_df['time'] >= in_start) & (eval_df['time'] <= in_end)].copy()
+        insample_metrics = self._evaluate_metrics(insample_df, factor_col,
+                                                   start_time=self.start_time, end_time=self.end_time)
+        insample_score = self._compute_weighted_score(insample_metrics)
+
+        use_outsample = (self.outsample_ratio > 0
+                         and self.outsample_start_time and self.outsample_end_time)
+        outsample_metrics: Optional[Dict[str, float]] = None
+        if use_outsample:
+            out_start = pd.to_datetime(self.outsample_start_time)
+            out_end = pd.to_datetime(self.outsample_end_time)
+            outsample_df = eval_df[(eval_df['time'] >= out_start) & (eval_df['time'] <= out_end)].copy()
+            if not outsample_df.empty:
+                outsample_metrics = self._evaluate_metrics(outsample_df, factor_col,
+                                                            start_time=self.outsample_start_time,
+                                                            end_time=self.outsample_end_time)
+                outsample_score = self._compute_weighted_score(outsample_metrics)
+                blended = (1.0 - self.outsample_ratio) * insample_score + self.outsample_ratio * outsample_score
+                return blended, insample_metrics, outsample_metrics
+            else:
+                log.warning(f'[Fusion] Outsample data is empty for {factor_col}, using insample only.')
+
+        return insample_score, insample_metrics, outsample_metrics
+
     def fuse(self) -> Dict[str, Any]:
         """Run stepwise forward-selection fusion and return fusion artifacts."""
         log.info(
             'Fusion started: '
             f'method={self.fusion_method}, '
             f'collections={self.collection_list}, '
-            f'fusion_metrics={self.fusion_metrics}, '
+            f'fusion_indicator_dict={self.fusion_indicator_dict}, '
             f'max_fusion_count={self.max_fusion_count}, '
             f'raw_factor_dict_provided={self.raw_factor_dict is not None}'
         )
@@ -2150,60 +2327,29 @@ class FactorFusioner:
             validate='1:1',
         )
 
-        # Optional out-of-sample slice used as the primary optimization target.
-        optimize_eval_df = eval_df
-        outsample_eval_df: Optional[pd.DataFrame] = None
-        use_outsample = bool(self.consider_outsample and self.outsample_start_day and self.outsample_end_day)
-        if use_outsample:
-            out_start = pd.to_datetime(self.outsample_start_day)
-            out_end = pd.to_datetime(self.outsample_end_day)
-            outsample_eval_df = eval_df[(eval_df['time'] >= out_start) & (eval_df['time'] <= out_end)].copy()
-            if outsample_eval_df.empty:
-                raise ValueError(
-                    '[Fusion][Outsample] empty outsample range under consider_outsample=True. '
-                    f'Please ensure end_time covers outsample_end_day and data exists in '
-                    f'{self.outsample_start_day}~{self.outsample_end_day}. '
-                    f'Current start_time={self.start_time}, end_time={self.end_time}, '
-                    f'effective_end_time={self._effective_end_time}.'
-                )
-            else:
-                optimize_eval_df = outsample_eval_df
-                log.info(
-                    '[Fusion][Outsample] enabled. '
-                    f'rows={len(outsample_eval_df)}, '
-                    f'start={self.outsample_start_day}, end={self.outsample_end_day}'
-                )
-
         # factor_keys: 形如 "version::factor_name" 的候选因子唯一键列表。
         factor_keys = factor_records['factor_key'].astype(str).tolist()
         if not factor_keys:
             raise ValueError('No available factors for fusion.')
 
-        # single_metric_map: 每个单因子的总体评估指标（例如 ic/sharpe）。
-        # 这些 metrics 用于初始化排序与后续比较基线，不是逐年指标。
+        # single_score_map: 每个单因子的混合加权评分。
+        single_score_map: Dict[str, float] = {}
         single_metric_map: Dict[str, Dict[str, float]] = {}
         for factor_key in factor_keys:
-            signal_df = optimize_eval_df[['time', 'instrument_id', 'future_ret', factor_key]].copy()
-            metrics = self._evaluate_metrics(signal_df, factor_key)
+            score, metrics, _ = self._compute_blended_score(eval_df, factor_key)
+            single_score_map[factor_key] = score
             single_metric_map[factor_key] = metrics
-            log.info(f'[Fusion][Init] factor={factor_key}, {self._format_metrics(metrics)}')
+            log.info(f'[Fusion][Init] factor={factor_key}, {self._format_metrics(metrics)}, blended_score={score:.6f}')
 
-        # sorted_factor_keys: 按 fusion_metrics 优先级从高到低排序后的候选池。
-        # 若 fusion_metrics=['ic','sharpe']，则先比较 ic，再比较 sharpe。
-        sorted_factor_keys = sorted(
-            factor_keys,
-            key=lambda x: self._metric_sort_key(single_metric_map[x]),
-            reverse=True,
-        )
+        # sorted_factor_keys: 按混合加权评分从高到低排序后的候选池。
+        sorted_factor_keys = sorted(factor_keys, key=lambda x: single_score_map[x], reverse=True)
         # 排名第一的单因子作为初始基石因子（Base Factor）。
         base_factor_key = sorted_factor_keys[0]
-        # selected_factor_keys: 当前已被接纳进融合组合的因子键。
         selected_factor_keys: List[str] = [base_factor_key]
-        # base_metrics: 当前“基线组合”的指标；只有全指标严格提升才会被新组合替代。
-        base_metrics = dict(single_metric_map[base_factor_key])
+        base_score = single_score_map[base_factor_key]
         log.info(
-            '[Fusion][Init] base factor selected: '
-            f'base_factor={base_factor_key}, {self._format_metrics(base_metrics)}'
+            f'[Fusion][Init] base factor selected: '
+            f'base_factor={base_factor_key}, blended_score={base_score:.6f}'
         )
 
         fusion_col = '__fused_factor__'
@@ -2218,12 +2364,12 @@ class FactorFusioner:
 
             log.info(
                 f'[Fusion][Round {round_idx}] start. '
-                f'base_factors={selected_factor_keys}, base_metrics={self._format_metrics(base_metrics)}, '
+                f'base_factors={selected_factor_keys}, base_score={base_score:.6f}, '
                 f'candidate_count={len(candidate_keys)}'
             )
 
             round_best_key: Optional[str] = None
-            round_best_metrics: Optional[Dict[str, float]] = None
+            round_best_score: float = float('-inf')
 
             for cand_key in candidate_keys:
                 # trial_keys: 本轮待评估组合 = 已选组合 + 当前候选。
@@ -2235,48 +2381,39 @@ class FactorFusioner:
                     raise ValueError(f'Unsupported fusion_method={self.fusion_method}')
 
                 trial_df = eval_df[['time', 'instrument_id', 'future_ret']].copy()
-                if use_outsample:
-                    trial_df = optimize_eval_df[['time', 'instrument_id', 'future_ret']].copy()
                 trial_df[fusion_col] = pd.to_numeric(fused_series, errors='coerce')
 
-                # trial_metrics: 该组合在整个回测区间上的总体指标。
-                trial_metrics = self._evaluate_metrics(trial_df, fusion_col)
+                trial_score, trial_metrics, _ = self._compute_blended_score(trial_df, fusion_col)
 
                 # is_better=True 表示 fusion_metrics 中每一项都严格优于当前基线。
-                is_better = self._is_strictly_better(trial_metrics, base_metrics)
+                is_better = trial_score > base_score
                 log.info(
                     f'[Fusion][Round {round_idx}] candidate={cand_key}, '
                     f'trial_factors={trial_keys}, '
                     f'{self._format_metrics(trial_metrics)}, '
-                    f'better_than_base={is_better}'
+                    f'blended_score={trial_score:.6f}, better_than_base={is_better}'
                 )
 
-                if not is_better:
-                    continue
-                if round_best_metrics is None:
+                if is_better and trial_score > round_best_score:
                     round_best_key = cand_key
-                    round_best_metrics = trial_metrics
-                    continue
-                if self._metric_sort_key(trial_metrics) > self._metric_sort_key(round_best_metrics):
-                    round_best_key = cand_key
-                    round_best_metrics = trial_metrics
+                    round_best_score = trial_score
 
-            if round_best_key is None or round_best_metrics is None:
-                # 本轮没有任何“全指标严格提升”的候选，提前停止融合。
+            # 本轮没有任何“全指标严格提升”的候选，提前停止融合。
+            if round_best_key is None:
                 log.info(
                     f'[Fusion][Round {round_idx}] no better candidate found. '
-                    f'base_factors={selected_factor_keys}, base_metrics={self._format_metrics(base_metrics)}'
+                    f'base_factors={selected_factor_keys}, base_score={base_score:.6f}'
                 )
                 break
 
             # 接纳本轮最佳候选，并将其指标更新为下一轮基线。
             selected_factor_keys.append(round_best_key)
-            base_metrics = round_best_metrics
+            base_score = round_best_score
             log.info(
                 f'[Fusion][Round {round_idx}] improved. '
                 f'new_base_factors={selected_factor_keys}, '
                 f'added_factor={round_best_key}, '
-                f'new_base_metrics={self._format_metrics(base_metrics)}'
+                f'new_base_score={base_score:.6f}'
             )
 
         # 3) 生成最终融合信号，并进行一次完整回测用于落库与返回。
@@ -2289,60 +2426,8 @@ class FactorFusioner:
             [fusion_col] + list(selected_factor_keys),
             calculate_baseline=True,
         )
-        final_metrics = self._evaluate_metrics(final_fused_df, fusion_col)
-        final_metrics_outsample: Optional[Dict[str, float]] = None
-        if use_outsample and outsample_eval_df is not None:
-            out_df = cast(pd.DataFrame, outsample_eval_df)
-            out_start = pd.to_datetime(self.outsample_start_day)
-            out_end = pd.to_datetime(self.outsample_end_day)
+        final_score, final_metrics, final_metrics_outsample = self._compute_blended_score(final_fused_df, fusion_col)
 
-            # Use the same continuous fused signal path (with full warmup history)
-            # to avoid mismatch between reported outsample metrics and NAV curves.
-            out_fused_df = final_fused_df[
-                (final_fused_df['time'] >= out_start) & (final_fused_df['time'] <= out_end)
-            ].copy()
-            if out_fused_df.empty:
-                raise ValueError(
-                    'Outsample slice is empty when computing final_metrics_outsample. '
-                    f'outsample_start_day={self.outsample_start_day}, '
-                    f'outsample_end_day={self.outsample_end_day}'
-                )
-
-            # IC on outsample window from continuous fused signal.
-            out_ic_df, _ = get_annualized_ts_ic_and_t_corr(
-                out_fused_df[['time', 'instrument_id', 'future_ret', fusion_col]].copy(),
-                fc_col=fusion_col,
-                fc_freq=self.fc_freq,
-                portfolio_adjust_method=self.portfolio_adjust_method,
-            )
-            out_ic_value = float(
-                pd.to_numeric(out_ic_df.loc['all', 'TS IC'], errors='coerce')
-            ) if 'all' in out_ic_df.index else float('nan')
-
-            # Sharpe from continuous net return series (keeps boundary position continuity).
-            instrument_id = self.instrument_id_list[0]
-            net_ret_df = final_bt.performance_dc[instrument_id][fusion_col]['daily_net_ret'].copy()
-            net_ret_df = net_ret_df[
-                (pd.to_datetime(net_ret_df['time']) >= out_start)
-                & (pd.to_datetime(net_ret_df['time']) <= out_end)
-            ].copy()
-            if net_ret_df.empty:
-                raise ValueError(
-                    'Outsample daily_net_ret is empty when computing final_metrics_outsample. '
-                    f'outsample_start_day={self.outsample_start_day}, '
-                    f'outsample_end_day={self.outsample_end_day}'
-                )
-            out_ret = get_annualized_ret(net_ret_df, fusion_col, self.interest_method)
-            out_vol = get_annualized_volatility(net_ret_df, fusion_col)
-            out_sharpe_df = get_annualized_sharpe(out_ret, out_vol)
-            out_sharpe_value = float(
-                pd.to_numeric(out_sharpe_df.loc['all', fusion_col], errors='coerce')
-            ) if 'all' in out_sharpe_df.index else float('nan')
-
-            final_metrics_outsample = {
-                'ic': out_ic_value,
-                'sharpe': out_sharpe_value,
-            }
         leakage_result = self.check_if_leakage(
             fc_name_list=[fusion_col],
             generated_df=final_fused_df[['time', 'instrument_id', fusion_col]].copy(),
@@ -2374,7 +2459,7 @@ class FactorFusioner:
         meta_df = factor_records.set_index('factor_key')
         selected_factor_keys_by_perf = sorted(
             selected_factor_keys,
-            key=lambda x: self._metric_sort_key(single_metric_map.get(x, {})),
+            key=lambda x: single_score_map.get(x, float('-inf')),
             reverse=True,
         )
         selected_factors_detail = [
@@ -2391,8 +2476,7 @@ class FactorFusioner:
         # 5) 构建融合后的公式表达式，并将结果写入 factors.fusion_factor。
         fusion_formula = self._build_fusion_formula(selected_factor_keys, factor_records)
 
-        # 5.1) Formula consistency check: recompute from formula and compare against
-        #      the pre-computed mean to catch any formula/eval mismatch early.
+        # 5.1) Formula consistency check
         if len(selected_factor_keys) > 1:
             calc_df = base_df[['time', 'instrument_id'] + self.base_col_list].copy()
             formula_series = calc_formula_series(df=calc_df, formula=fusion_formula, data_fields=self.base_col_list)
@@ -2404,23 +2488,15 @@ class FactorFusioner:
             if both_valid.sum() > 0:
                 max_diff = float(np.nanmax(np.abs(precomputed_series[both_valid] - formula_values[both_valid])))
                 corr = float(np.corrcoef(precomputed_series[both_valid], formula_values[both_valid])[0, 1])
-                nan_precomputed = int(pd.isna(precomputed_series).sum())
-                nan_formula = int(pd.isna(formula_values).sum())
                 log.info(
                     f'[Fusion][FormulaCheck] formula={fusion_formula[:120]}..., '
                     f'max_abs_diff={max_diff:.10f}, corr={corr:.8f}, '
-                    f'nan_precomputed={nan_precomputed}, nan_formula={nan_formula}, '
                     f'valid_count={int(both_valid.sum())}'
                 )
                 if max_diff > 1e-6:
                     log.warning(
-                        f'[Fusion][FormulaCheck] MISMATCH detected! '
-                        f'Formula recomputation differs from precomputed mean. '
-                        f'max_abs_diff={max_diff:.10f}. '
-                        f'The persisted formula may produce different results than the fusion evaluation.'
+                        f'[Fusion][FormulaCheck] MISMATCH detected! max_abs_diff={max_diff:.10f}.'
                     )
-            else:
-                log.warning('[Fusion][FormulaCheck] no overlapping valid values between formula and precomputed series.')
 
         fusion_collection = 'factor_fusion'
         fusion_idx = max(0, len(selected_factor_keys_by_perf) - 1)
@@ -2430,8 +2506,8 @@ class FactorFusioner:
             info_key = f"{item['collection']}:{item['version']}"
             fusion_info.setdefault(info_key, []).append(str(item['factor_name']))
         fitness_payload = {
-            metric: {'value': float(final_metrics.get(metric, float('nan')))}
-            for metric in self.fusion_metrics
+            indicator: {'value': float(final_metrics.get(indicator, float('nan')))}
+            for indicator in self.fusion_indicator_dict
         }
 
         perf_summary = final_bt.performance_summary.copy()
@@ -2466,11 +2542,7 @@ class FactorFusioner:
             log.info(
                 '[Fusion][Persist] '
                 f'database=factors, collection={fusion_collection}, '
-                f'version={self.version}, factor_name={fusion_factor_name}, '
-                f'selected_factor_keys={selected_factor_keys}, '
-                f'formula={fusion_formula}, '
-                f'fusion_info={fusion_info}, '
-                f'fitness={fitness_payload}'
+                f'version={self.version}, factor_name={fusion_factor_name}'
             )
 
         persisted = bool(len(selected_factor_keys) > 1 and persist_allowed)
@@ -2479,25 +2551,25 @@ class FactorFusioner:
             'Fusion finished: '
             f'selected_count={len(selected_factor_keys)}, '
             f'selected_factor_keys={selected_factor_keys}, '
-            f'final_metrics={self._format_metrics(final_metrics)}'
+            f'final_blended_score={final_score:.6f}'
         )
         return {
             'fusion_method': self.fusion_method,
-            'fusion_metrics': list(self.fusion_metrics),
+            'fusion_indicator_dict': dict(self.fusion_indicator_dict),
             'selected_factor_keys': selected_factor_keys,
             'selected_factors_detail': selected_factors_detail,
             'final_metrics': final_metrics,
             'final_metrics_outsample': final_metrics_outsample,
+            'final_blended_score': final_score,
             'single_factor_metrics': single_metric_map,
             'leakage_check': leakage_result,
             'relative_check': relative_result,
             'fused_col': fusion_col,
             'fused_data': final_fused_df,
             'bt': final_bt,
-            'round_base_metrics': base_metrics,
-            'consider_outsample': bool(use_outsample),
-            'outsample_start_day': self.outsample_start_day,
-            'outsample_end_day': self.outsample_end_day,
+            'outsample_ratio': self.outsample_ratio,
+            'outsample_start_time': self.outsample_start_time,
+            'outsample_end_time': self.outsample_end_time,
             'persisted': persisted,
             'fusion_collection': fusion_collection,
             'fusion_factor_name': fusion_factor_name,

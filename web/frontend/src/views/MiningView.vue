@@ -108,6 +108,23 @@
                 <el-col :span="8"><el-form-item label="无风险"><el-switch v-model="params.risk_free_rate" /></el-form-item></el-col>
                 <el-col :span="8"><el-form-item label="复权"><el-switch v-model="params.apply_weighted_price" /></el-form-item></el-col>
               </el-row>
+              <el-row :gutter="12">
+                <el-col :span="8">
+                  <el-form-item label="样本外比例">
+                    <el-input-number v-model="params.outsample_ratio" :min="0" :max="1" :step="0.05" :precision="2" style="width:100%" />
+                  </el-form-item>
+                </el-col>
+                <el-col :span="8">
+                  <el-form-item label="样本外开始">
+                    <el-input v-model="params.outsample_start_time" placeholder="20250101" :disabled="!params.outsample_ratio" />
+                  </el-form-item>
+                </el-col>
+                <el-col :span="8">
+                  <el-form-item label="样本外结束">
+                    <el-input v-model="params.outsample_end_time" placeholder="20251231" :disabled="!params.outsample_ratio" />
+                  </el-form-item>
+                </el-col>
+              </el-row>
             </div>
               </el-col>
 
@@ -344,6 +361,7 @@ const defaultParams = () => ({
   gp_small_factor_penalty_coef: 0.0, gp_assumed_initial_capital: 100000,
   gp_elite_stagnation_generation_count: 4, gp_max_shock_generation: 3,
   consistency_penalty_enabled: false, consistency_penalty_coef: 1.0,
+  outsample_ratio: 0.0, outsample_start_time: '20250101', outsample_end_time: '20251231',
   filter_indicator_dict: Object.keys(serverDefaultFilterIndicatorDict.value || {}).length
     ? _clone(serverDefaultFilterIndicatorDict.value)
     : _buildDefaultFilterIndicatorDict(supportedIndicators.value, indicatorDirection.value),

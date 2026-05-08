@@ -36,6 +36,8 @@ export const runBacktest = (data) => api.post('/api/backtest', data)
 export const runFusion = (data) => api.post('/api/fusion/run', data)
 export const startFusion = (data) => api.post('/api/fusion/start', data)
 export const getFusionStatus = (taskId) => api.get(`/api/fusion/status/${taskId}`)
+export const getFusionIndicatorOptions = () => api.get('/api/fusion/indicator-options')
+export const updateFusionIndicatorOptions = (data) => api.post('/api/fusion/indicator-options', data)
 
 // ── Strategy ──────────────────────────────────────────
 export const runStrategy = (data) => api.post('/api/strategy', data)

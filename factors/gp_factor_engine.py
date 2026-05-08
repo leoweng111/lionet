@@ -364,7 +364,7 @@ def crossover_trees(tree_a: FactorNode, tree_b: FactorNode, rng: random.Random):
     nodes_a = get_all_nodes_with_parents(child_a)
     nodes_b = get_all_nodes_with_parents(child_b)
 
-    for _ in range(20):
+    for _ in range(40):
         node_a, parent_a, dir_a = rng.choice(nodes_a)
         node_b, parent_b, dir_b = rng.choice(nodes_b)
         if parent_a is None or parent_b is None:

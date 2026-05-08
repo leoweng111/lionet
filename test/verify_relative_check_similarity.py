@@ -46,7 +46,8 @@ def main():
         gp_max_shock_generation=3,
     )
 
-    generated = fg.generate()
+    fg.generate()
+    generated = fg.generated_data
     if not fg.generated_fc_name_list:
         print('No factors generated.')
         return
@@ -56,7 +57,8 @@ def main():
     print('Selected factor:', fc_name)
     print('Formula:', formula)
 
-    base_df = fg.load_base_data()
+    fg.load_base_data()
+    base_df = fg.insample_data
     df_eval = fg._prepare_df_for_gp(base_df)
 
     # Recompute the same formula on the same data for comparison.
