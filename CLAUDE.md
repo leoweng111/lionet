@@ -56,6 +56,21 @@ It includes 3 sub-tests:
 2. **Simulate Backend Mining** — Mirrors `main.py` `_execute_mining` parameter construction (all params, normalize logic), catches param-passing mismatches between backend and core.
 3. **Simulate Backend Fusion** — Mirrors `main.py` `_execute_fusion` parameter construction for `FactorFusioner`, verifies `fusion_indicator_dict` and outsample params (`outsample_ratio`, `outsample_start_time`, `outsample_end_time`) are correctly passed through.
 
+### Fusion Smoke Test
+```bash
+# Run factor fusion smoke test: full fusion pipeline with real DB factors
+python -u test/fusion_smoke.py
+```
+This test verifies the full `FactorFusioner.fuse()` pipeline runs without errors using real factors from MongoDB:
+- Uses `genetic_programming` collection with versions `20260507_gp_test` and `20260505_gp_test`.
+- Sets `max_fusion_count=2` for speed.
+- Asserts: fusion completes, formula is generated, backtest runs successfully.
+
+It includes 3 sub-tests:
+1. **Direct Fusion** — Direct `FactorFusioner` call with default indicator weights, verifies end-to-end fusion flow.
+2. **Simulate Backend Fusion** — Mirrors `main.py` `_execute_fusion` parameter construction (normalize `fusion_indicator_dict`, pass `use_version_dict`), catches param-passing mismatches.
+3. **Simulate Frontend Payload** — Verifies the frontend's `_selectedCollections` + `_selectedVersions` → `use_version_dict` construction logic matches what `FactorFusioner` expects.
+
 ## Architecture
 
 ```
@@ -93,7 +108,7 @@ lionet/
 
 - **`Strategy`** (`strategy/strategy.py`) — Simulates day-session open-to-open futures trading with margin, fees, slippage. T-signal → T+1 open execution convention. Uses `OpRollNorm` wrapper by default.
 
-- **`FactorFusioner`** (`factors/factor_auto_search.py`) — Combines multiple factors via weighted average or other fusion methods, with leakage and similarity checks. Uses `fusion_indicator_dict` for weighted multi-indicator scoring (same indicator system as GP fitness). Supports outsample blending via `outsample_ratio`: `blended_score = (1 - outsample_ratio) * insample_score + outsample_ratio * outsample_score`.
+- **`FactorFusioner`** (`factors/factor_auto_search.py`) — Combines multiple factors via weighted average or other fusion methods, with leakage and similarity checks. Uses `use_version_dict` (`{collection: [version, ...]}`) to specify which factors to load from MongoDB. Uses `fusion_indicator_dict` for weighted multi-indicator scoring (same indicator system as GP fitness). Supports outsample blending via `outsample_ratio`: `blended_score = (1 - outsample_ratio) * insample_score + outsample_ratio * outsample_score`.
 
 - **`gp_factor_engine.py`** — Low-level GP primitives: tree generation, crossover, mutation, depth penalties, tournament selection.
 

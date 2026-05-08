@@ -60,10 +60,16 @@ def main() -> None:
     if args.use_raw_factor_dict:
         raw_factor_dict = _build_raw_factor_dict(collection=args.collection, top_n=args.raw_top_n)
 
+    # Build use_version_dict from collection + raw_factor_dict
+    if raw_factor_dict:
+        # raw_factor_dict is {version: [factor_names]}, extract versions
+        use_version_dict = {args.collection: list(raw_factor_dict.keys())}
+    else:
+        use_version_dict = {args.collection: []}
+
     fusioner = FactorFusioner(
         fusion_method='avg_weight',
-        raw_factor_dict=raw_factor_dict,
-        collection=args.collection,
+        use_version_dict=use_version_dict,
         instrument_id_list=args.instrument_id,
         start_time=args.start_time,
         end_time=args.end_time,

@@ -25,12 +25,12 @@
                   </el-select>
                 </el-form-item>
                 <el-form-item label="来源集合">
-                  <el-select v-model="p.collection" multiple collapse-tags collapse-tags-tooltip style="width:100%">
+                  <el-select v-model="_selectedCollections" multiple collapse-tags collapse-tags-tooltip style="width:100%">
                     <el-option v-for="c in collections" :key="c" :label="c" :value="c" />
                   </el-select>
                 </el-form-item>
                 <el-form-item label="限定版本(可选)">
-                  <el-select v-model="p.candidate_versions" multiple filterable collapse-tags collapse-tags-tooltip style="width:100%">
+                  <el-select v-model="_selectedVersions" multiple filterable collapse-tags collapse-tags-tooltip style="width:100%">
                     <el-option v-for="v in allVersions" :key="v" :label="v" :value="v" />
                   </el-select>
                 </el-form-item>
@@ -45,18 +45,16 @@
                   <el-col :span="12"><el-form-item label="开始日期"><el-input v-model="p.start_time" /></el-form-item></el-col>
                   <el-col :span="12"><el-form-item label="结束日期"><el-input v-model="p.end_time" /></el-form-item></el-col>
                 </el-row>
+                <el-form-item label="样本外比例">
+                  <el-input-number v-model="p.outsample_ratio" :min="0" :max="1" :step="0.05" :precision="2" style="width:100%" />
+                </el-form-item>
                 <el-row :gutter="12">
-                  <el-col :span="8">
-                    <el-form-item label="样本外比例">
-                      <el-input-number v-model="p.outsample_ratio" :min="0" :max="1" :step="0.05" :precision="2" style="width:100%" />
-                    </el-form-item>
-                  </el-col>
-                  <el-col :span="8">
+                  <el-col :span="12">
                     <el-form-item label="样本外开始">
                       <el-input v-model="p.outsample_start_time" placeholder="20250101" :disabled="!p.outsample_ratio" />
                     </el-form-item>
                   </el-col>
-                  <el-col :span="8">
+                  <el-col :span="12">
                     <el-form-item label="样本外结束">
                       <el-input v-model="p.outsample_end_time" placeholder="20251231" :disabled="!p.outsample_ratio" />
                     </el-form-item>
@@ -180,8 +178,7 @@ const _buildDefaultFusionIndicatorDict = (indicators) => {
 
 const defaults = () => ({
   fusion_method: 'avg_weight',
-  collection: ['genetic_programming'],
-  candidate_versions: [],
+  use_version_dict: { 'genetic_programming': [] },
   instrument_type: 'futures_continuous_contract',
   instrument_id_list: 'C0',
   fc_freq: '1d',
@@ -209,6 +206,8 @@ const defaults = () => ({
 })
 
 const p = reactive(defaults())
+const _selectedCollections = ref(['genetic_programming'])
+const _selectedVersions = ref([])
 const loading = ref(false)
 const result = ref(null)
 const navCurves = ref({})
@@ -225,6 +224,8 @@ const selectedFactors = computed(() => result.value?.selected_factors_detail || 
 
 const resetParams = () => {
   Object.assign(p, defaults())
+  _selectedCollections.value = ['genetic_programming']
+  _selectedVersions.value = []
 }
 
 const formatMetrics = (m) => {
@@ -307,10 +308,18 @@ const run = async () => {
       fusionIndicatorDict[indicator] = n === null ? 0 : n
     })
 
+    // Build use_version_dict from _selectedCollections and _selectedVersions
+    const useVersionDict = {}
+    const cols = _selectedCollections.value.length ? _selectedCollections.value : ['genetic_programming']
+    const vers = _selectedVersions.value || []
+    cols.forEach((c) => {
+      useVersionDict[c] = vers.length ? [...vers] : []
+    })
+
     const payload = {
       ...p,
+      use_version_dict: useVersionDict,
       fusion_indicator_dict: fusionIndicatorDict,
-      candidate_versions: (p.candidate_versions || []).length ? p.candidate_versions : null,
       relative_check_version_list: (p.relative_check_version_list || []).length ? p.relative_check_version_list : null,
       outsample_start_time: p.outsample_start_time || null,
       outsample_end_time: p.outsample_end_time || null,

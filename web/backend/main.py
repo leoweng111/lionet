@@ -363,8 +363,7 @@ class BacktestParams(BaseModel):
 
 class FusionParams(BaseModel):
     fusion_method: str = 'avg_weight'
-    collection: List[str] = ['genetic_programming']
-    candidate_versions: Optional[List[str]] = None
+    use_version_dict: Dict[str, List[str]] = Field(default_factory=lambda: {'genetic_programming': []})
     instrument_type: str = 'futures_continuous_contract'
     instrument_id_list: str = 'C0'
     fc_freq: str = '1d'
@@ -1919,24 +1918,6 @@ def _execute_fusion(params: FusionParams, task_id: Optional[str] = None) -> Dict
         lionet_logger.addHandler(handler)
 
     try:
-        raw_factor_dict = None
-        if params.candidate_versions:
-            records = get_factor_formula_records(
-                collections=params.collection,
-                versions=params.candidate_versions,
-                database='factors',
-            )
-            if records.empty:
-                raise ValueError(
-                    f'No factor formulas found for collections={params.collection}, '
-                    f'versions={params.candidate_versions}.'
-                )
-            raw_factor_dict = {}
-            for version, df_v in records.groupby('version', sort=False):
-                names = [str(x) for x in df_v['factor_name'].dropna().astype(str).tolist()]
-                if names:
-                    raw_factor_dict[str(version)] = list(dict.fromkeys(names))
-
         # Normalize fusion_indicator_dict
         fusion_indicator_dict = {}
         for k, v in (params.fusion_indicator_dict or {}).items():
@@ -1949,8 +1930,7 @@ def _execute_fusion(params: FusionParams, task_id: Optional[str] = None) -> Dict
 
         fusioner = FactorFusioner(
             fusion_method=params.fusion_method,
-            raw_factor_dict=raw_factor_dict,
-            collection=params.collection,
+            use_version_dict=params.use_version_dict,
             instrument_type=params.instrument_type,
             instrument_id_list=params.instrument_id_list,
             fc_freq=params.fc_freq,

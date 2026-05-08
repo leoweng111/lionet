@@ -346,8 +346,7 @@ def test_simulate_backend_fusion():
     try:
         fusioner = FactorFusioner(
             fusion_method='avg_weight',
-            raw_factor_dict={'__test_version__': ['fac_test_0001']},
-            collection='genetic_programming',
+            use_version_dict={'genetic_programming': ['__test_version__']},
             instrument_type='futures_continuous_contract',
             instrument_id_list='C0',
             fc_freq='1d',

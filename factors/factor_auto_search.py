@@ -1807,8 +1807,7 @@ class FactorFusioner:
     def __init__(
         self,
         fusion_method: str = 'avg_weight',
-        raw_factor_dict: Optional[Dict[str, Union[str, Sequence[str]]]] = None,
-        collection: Union[str, Sequence[str]] = 'genetic_programming',
+        use_version_dict: Optional[Dict[str, Union[str, Sequence[str]]]] = None,  # default: {'genetic_programming': []}
         instrument_type: str = 'futures_continuous_contract',
         instrument_id_list: Union[str, Sequence[str]] = 'C0',
         fc_freq: str = '1d',
@@ -1837,8 +1836,8 @@ class FactorFusioner:
 
         参数说明：
         - fusion_method: 融合方式。当前仅支持 `avg_weight`（等权平均融合）。
-        - raw_factor_dict: 手动指定待融合因子池。格式为 `{version: [factor_name, ...]}`。
-        - collection: 候选因子来源集合名。
+        - use_version_dict: 指定待融合因子来源。格式为 `{collection: [version, ...]}`，
+          表示每个 collection 下使用哪些 version 的因子。若为 None，则不加载任何因子（会报错）。
         - instrument_id_list: 回测使用的标的列表。
         - start_time/end_time: 样本内评估区间。
         - fusion_indicator_dict: 融合评估指标权重字典 {indicator: weight}，与GP因子挖掘共用同一套指标体系。
@@ -1852,8 +1851,7 @@ class FactorFusioner:
         if self.fusion_method not in FusionSupportedMethods:
             raise ValueError(f'Unsupported fusion_method={self.fusion_method}, use {sorted(FusionSupportedMethods)}.')
 
-        self.raw_factor_dict = self._normalize_raw_factor_dict(raw_factor_dict)
-        self.collection_list = self._normalize_str_or_seq(collection, name='collection')
+        self.use_version_dict = self._normalize_use_version_dict(use_version_dict)
         self.instrument_type = instrument_type
         self.instrument_id_list = self._normalize_str_or_seq(instrument_id_list, name='instrument_id_list')
         self.fc_freq = fc_freq
@@ -1925,30 +1923,25 @@ class FactorFusioner:
         return out
 
     @staticmethod
-    def _normalize_raw_factor_dict(
-        raw_factor_dict: Optional[Dict[str, Union[str, Sequence[str]]]]
-    ) -> Optional[Dict[str, List[str]]]:
-        if raw_factor_dict is None:
-            return None
-        if not isinstance(raw_factor_dict, dict) or not raw_factor_dict:
-            raise ValueError('raw_factor_dict must be a non-empty dict when provided.')
+    def _normalize_use_version_dict(
+        use_version_dict: Optional[Dict[str, Union[str, Sequence[str]]]]
+    ) -> Dict[str, List[str]]:
+        if use_version_dict is None:
+            use_version_dict = {'genetic_programming': []}
+        if not isinstance(use_version_dict, dict) or not use_version_dict:
+            raise ValueError('use_version_dict must be a non-empty dict.')
 
         out: Dict[str, List[str]] = {}
-        for version, factor_value in raw_factor_dict.items():
-            version_text = str(version).strip()
-            if not version_text:
-                raise ValueError(f'Invalid raw_factor_dict version key: {version}')
-            if isinstance(factor_value, str):
-                fc_names = [factor_value]
+        for collection, versions in use_version_dict.items():
+            col_text = str(collection).strip()
+            if not col_text:
+                raise ValueError(f'Invalid use_version_dict collection key: {collection}')
+            if isinstance(versions, str):
+                ver_list = [versions]
             else:
-                fc_names = list(factor_value)
-            fc_names = [str(x).strip() for x in fc_names if str(x).strip()]
-            if not fc_names:
-                raise ValueError(f'raw_factor_dict[{version_text}] must contain at least one factor_name.')
-            duplicated = sorted([x for x in set(fc_names) if fc_names.count(x) > 1])
-            if duplicated:
-                raise ValueError(f'raw_factor_dict[{version_text}] contains duplicated factor_name: {duplicated}')
-            out[version_text] = fc_names
+                ver_list = list(versions)
+            ver_list = [str(x).strip() for x in ver_list if str(x).strip()]
+            out[col_text] = ver_list
         return out
 
     @staticmethod
@@ -2077,50 +2070,46 @@ class FactorFusioner:
         return df.sort_values(['instrument_id', 'time']).reset_index(drop=True)
 
     def _load_candidate_records(self) -> pd.DataFrame:
-        if self.raw_factor_dict is None:
-            records = get_factor_formula_records(
-                collections=self.collection_list,
-                versions=None,
-                database=self.database,
-            )
-            if records.empty:
-                raise ValueError(
-                    f'No factor formulas found in DB for collections={self.collection_list}, database={self.database}.'
-                )
-            records = records[['collection', 'version', 'factor_name', 'formula']].copy()
-        else:
-            target_versions = sorted(self.raw_factor_dict.keys())
-            records = get_factor_formula_records(
-                collections=self.collection_list,
-                versions=target_versions,
-                database=self.database,
-            )
-            if records.empty:
-                raise ValueError(
-                    'No factor formulas found in DB for raw_factor_dict request. '
-                    f'collections={self.collection_list}, versions={target_versions}.'
-                )
+        collection_list = sorted(self.use_version_dict.keys())
+        all_versions = sorted({v for vl in self.use_version_dict.values() for v in vl})
+        # If all version lists are empty, load all versions from those collections
+        has_version_filter = bool(all_versions)
 
-            records = records[['collection', 'version', 'factor_name', 'formula']].copy()
-            expected_pairs = {
-                (version, factor_name)
-                for version, fc_list in self.raw_factor_dict.items()
-                for factor_name in fc_list
+        records = get_factor_formula_records(
+            collections=collection_list,
+            versions=all_versions if has_version_filter else None,
+            database=self.database,
+        )
+        if records.empty:
+            raise ValueError(
+                f'No factor formulas found in DB for use_version_dict. '
+                f'collections={collection_list}, versions={all_versions}.'
+            )
+
+        records = records[['collection', 'version', 'factor_name', 'formula']].copy()
+
+        # Filter to only (collection, version) pairs specified in use_version_dict
+        if has_version_filter:
+            valid_pairs = {
+                (col, ver)
+                for col, ver_list in self.use_version_dict.items()
+                for ver in ver_list
             }
+            # Also include collections with empty version list (all versions)
+            all_version_collections = {col for col, vl in self.use_version_dict.items() if not vl}
             records = records[
-                records.apply(lambda x: (str(x['version']), str(x['factor_name'])) in expected_pairs, axis=1)
+                records.apply(
+                    lambda x: (str(x['collection']) in all_version_collections) or
+                              (str(x['collection']), str(x['version'])) in valid_pairs,
+                    axis=1,
+                )
             ].copy()
 
-            found_pairs = {
-                (str(x['version']), str(x['factor_name']))
-                for _, x in records.iterrows()
-            }
-            missing_pairs = sorted(expected_pairs - found_pairs)
-            if missing_pairs:
-                raise ValueError(
-                    'Some factors specified by raw_factor_dict are not found in DB: '
-                    f'{missing_pairs}. collections={self.collection_list}, database={self.database}.'
-                )
+        if records.empty:
+            raise ValueError(
+                f'No factor formulas found matching use_version_dict. '
+                f'collections={collection_list}, versions={all_versions}.'
+            )
 
         records['version'] = records['version'].astype(str)
         records['factor_name'] = records['factor_name'].astype(str)
@@ -2307,10 +2296,9 @@ class FactorFusioner:
         log.info(
             'Fusion started: '
             f'method={self.fusion_method}, '
-            f'collections={self.collection_list}, '
+            f'use_version_dict={self.use_version_dict}, '
             f'fusion_indicator_dict={self.fusion_indicator_dict}, '
-            f'max_fusion_count={self.max_fusion_count}, '
-            f'raw_factor_dict_provided={self.raw_factor_dict is not None}'
+            f'max_fusion_count={self.max_fusion_count}'
         )
 
         # 1) 准备融合评估所需基础数据（行情 + future_ret）以及候选因子元信息。
