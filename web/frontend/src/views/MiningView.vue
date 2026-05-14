@@ -296,7 +296,7 @@
 <script setup>
 import { ref, reactive, computed, onMounted, onUnmounted, watch } from 'vue'
 import { ElMessage } from 'element-plus'
-import { startMining, getMiningStatus, getTasks, getMiningIndicatorOptions, getMiningAutoConfig, updateMiningAutoConfig, getMiningAutoSchedulerStatus } from '../api'
+import { startMining, getMiningStatus, getTasks, getMiningIndicatorOptions, getMiningAutoConfig, updateMiningAutoConfig, getMiningAutoSchedulerStatus, savePageConfig, getPageConfig, resetPageConfig } from '../api'
 import NavChart from '../components/NavChart.vue'
 
 const MINING_TAB_KEY = 'GP_MINING_ACTIVE_TAB'
@@ -351,7 +351,7 @@ const defaultParams = () => ({
   apply_rolling_norm: true, rolling_norm_window: 30, rolling_norm_min_periods: 20,
   rolling_norm_eps: 1e-8, rolling_norm_clip: 5.0,
   check_leakage_count: 20, check_relative: true, relative_threshold: 0.7,
-  gp_generations: 20, gp_population_size: 500, gp_max_depth: 6, gp_elite_size: 50,
+  gp_generations: 30, gp_population_size: 500, gp_max_depth: 6, gp_elite_size: 50,
   gp_elite_relative_threshold: 0.65, gp_crossover_prob: 0.3, gp_mutation_prob: 0.7,
   gp_leaf_prob: 0.2, gp_const_prob: 0.02, gp_tournament_size: 3,
   gp_window_choices: [3,5,10,20,30], random_seed: null,
@@ -380,6 +380,7 @@ const autoMiningSettings = reactive({
 })
 const autoConfigReady = ref(false)
 let autoConfigSaveTimer = null
+let manualConfigSaveTimer = null
 let schedulerStatusTimer = null
 const schedulerStatus = reactive({
   enabled: false,
@@ -473,8 +474,24 @@ const _queueSaveAutoConfig = () => {
   }, 300)
 }
 
-const resetParams = () => {
-  Object.assign(params, defaultParams())
+const resetParams = async () => {
+  try {
+    const { data } = await resetPageConfig('gp_mining')
+    const serverDefaults = data?.data || {}
+    const merged = { ...defaultParams(), ...serverDefaults }
+    // Ensure filter/fitness dicts have all indicators
+    merged.fitness_indicator_dict = {
+      ..._buildDefaultFitnessIndicatorWeight(supportedIndicators.value),
+      ...(serverDefaults.fitness_indicator_dict || {}),
+    }
+    merged.filter_indicator_dict = {
+      ..._buildDefaultFilterIndicatorDict(supportedIndicators.value, indicatorDirection.value),
+      ...(serverDefaults.filter_indicator_dict || {}),
+    }
+    Object.assign(params, merged)
+  } catch {
+    Object.assign(params, defaultParams())
+  }
   if (activeMiningTab.value === 'auto') {
     _queueSaveAutoConfig()
   } else {

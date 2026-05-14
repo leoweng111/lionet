@@ -1,0 +1,24 @@
+{
+  "fusion_method": "avg_weight",
+  "instrument_type": "futures_continuous_contract",
+  "instrument_id_list": "C0",
+  "fc_freq": "1d",
+  "start_time": "20200101",
+  "end_time": "20241231",
+  "portfolio_adjust_method": "1D",
+  "interest_method": "simple",
+  "risk_free_rate": false,
+  "apply_weighted_price": true,
+  "check_leakage_count": 20,
+  "check_relative": true,
+  "relative_threshold": 0.7,
+  "max_fusion_count": 5,
+  "fusion_indicator_dict": {},
+  "n_jobs": 5,
+  "outsample_ratio": 0.0,
+  "outsample_start_time": "20250101",
+  "outsample_end_time": "20251231",
+  "selected_collections": ["genetic_programming"],
+  "selected_versions": []
+}
+

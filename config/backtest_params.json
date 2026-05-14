@@ -1,0 +1,20 @@
+{
+  "collection": "genetic_programming",
+  "instrument_type": "futures_continuous_contract",
+  "instrument_id_list": "C0",
+  "fc_freq": "1d",
+  "start_time": "20200101",
+  "end_time": "20241231",
+  "portfolio_adjust_method": "1D",
+  "interest_method": "simple",
+  "risk_free_rate": false,
+  "calculate_baseline": true,
+  "apply_weighted_price": true,
+  "n_jobs": 5,
+  "oos_start": "20250101",
+  "oos_end": "20251231",
+  "enable_real_oos": false,
+  "real_oos_start": "20260101",
+  "real_oos_end": "20260330"
+}
+

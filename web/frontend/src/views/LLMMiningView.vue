@@ -209,7 +209,7 @@
 <script setup>
 import { ref, reactive, computed, onMounted, onUnmounted } from 'vue'
 import { ElMessage } from 'element-plus'
-import { getLLMProfiles, startLLMMining, getLLMMiningStatus, terminateLLMMining, getMiningIndicatorOptions } from '../api'
+import { getLLMProfiles, startLLMMining, getLLMMiningStatus, terminateLLMMining, getMiningIndicatorOptions, resetPageConfig } from '../api'
 import NavChart from '../components/NavChart.vue'
 
 const supportedIndicators = ref(['Net Return', 'Net Sharpe', 'TS IC'])
@@ -276,7 +276,20 @@ const autoVersionPreview = computed(() => {
   return Array.from({ length: count }, (_, idx) => idx === 0 ? `${datePart}_llm_test` : `${datePart}_llm_test_${idx}`).join(', ')
 })
 
-const resetParams = () => { Object.assign(params, defaultParams()) }
+const resetParams = async () => {
+  try {
+    const { data } = await resetPageConfig('llm_mining')
+    const serverDefaults = data?.data || {}
+    const merged = { ...defaultParams(), ...serverDefaults }
+    merged.filter_indicator_dict = {
+      ..._buildDefaultFilterIndicatorDict(supportedIndicators.value, indicatorDirection.value),
+      ...(serverDefaults.filter_indicator_dict || {}),
+    }
+    Object.assign(params, merged)
+  } catch {
+    Object.assign(params, defaultParams())
+  }
+}
 
 const mining = ref(false), taskId = ref(''), taskStatus = ref(''), taskProgress = ref(''), taskError = ref('')
 const miningResult = ref(null), navCurves = ref({}), perfSummary = ref([]), perfColumns = ref([])

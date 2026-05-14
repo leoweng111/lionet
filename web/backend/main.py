@@ -80,8 +80,19 @@ GP_SUPPORTED_INDICATOR_FILE = "gp_supported_indicator.json"
 GP_INDICATOR_DIRECTION_FILE = "gp_indicator_direction.json"
 GP_DEFAULT_FITNESS_WEIGHT_FILE = "gp_default_fitness_indicator_weight.json"
 GP_DEFAULT_FILTER_DICT_FILE = "gp_default_filter_indicator_dict.json"
-GP_AUTO_SEARCH_SETTINGS_FILE = "gp_auto_search_settings.json"
 GP_AUTO_SEARCH_PARAMS_FILE = "gp_auto_search_params.json"
+GP_AUTO_SEARCH_PARAMS_DEFAULT_FILE = "gp_auto_search_params_default.json"
+LLM_MINING_PARAMS_FILE = "llm_mining_params.json"
+LLM_MINING_PARAMS_DEFAULT_FILE = "llm_mining_params_default.json"
+FUSION_PARAMS_FILE = "fusion_params.json"
+FUSION_PARAMS_DEFAULT_FILE = "fusion_params_default.json"
+BACKTEST_PARAMS_FILE = "backtest_params.json"
+BACKTEST_PARAMS_DEFAULT_FILE = "backtest_params_default.json"
+STRATEGY_PARAMS_FILE = "strategy_params.json"
+STRATEGY_PARAMS_DEFAULT_FILE = "strategy_params_default.json"
+STRATEGY_MONITOR_PARAMS_FILE = "strategy_monitor_params.json"
+STRATEGY_MONITOR_PARAMS_DEFAULT_FILE = "strategy_monitor_params_default.json"
+STRATEGY_MONITOR_TASK_COLLECTION = "strategy_monitor_task"
 
 
 def _task_type_label(task_type: Optional[str]) -> str:
@@ -89,6 +100,8 @@ def _task_type_label(task_type: Optional[str]) -> str:
         return "因子融合"
     if task_type == TASK_TYPE_MARKET_DATA:
         return "行情数据"
+    if task_type == "strategy_monitor":
+        return "策略监控"
     return "因子挖掘"
 
 
@@ -1374,18 +1387,14 @@ def _normalize_filter_dict_for_save(raw_filter: Dict[str, Dict[str, Optional[flo
 @app.get('/api/mining/auto-config')
 async def get_mining_auto_config():
     _refresh_gp_runtime_configs_from_files()
-    auto_settings_default = {
-        "enabled": False,
-        "schedule_time": "18:00",
-        "task_count": 1,
-    }
-    auto_params_default = {}
-    auto_settings = load_json_config(GP_AUTO_SEARCH_SETTINGS_FILE, auto_settings_default)
-    auto_params = load_json_config(GP_AUTO_SEARCH_PARAMS_FILE, auto_params_default)
-    if not isinstance(auto_settings, dict):
-        auto_settings = dict(auto_settings_default)
+    auto_params = load_json_config(GP_AUTO_SEARCH_PARAMS_FILE, {})
     if not isinstance(auto_params, dict):
         auto_params = {}
+    auto_settings = {
+        "enabled": auto_params.get("enabled", False),
+        "schedule_time": auto_params.get("schedule_time", "18:00"),
+        "task_count": auto_params.get("task_count", 1),
+    }
 
     return {
         "default_fitness_indicator_weight": dict(GP_DEFAULT_FITNESS_INDICATOR_WEIGHT),
@@ -1421,27 +1430,68 @@ async def update_mining_auto_config(params: MiningConfigUpdateParams):
         }
 
     if params.auto_search_settings is not None:
-        default_settings = {
-            "enabled": False,
-            "schedule_time": "18:00",
-            "task_count": 1,
-        }
         raw_settings = dict(params.auto_search_settings or {})
-        merged_settings = dict(default_settings)
-        merged_settings.update(raw_settings)
-        merged_settings["enabled"] = bool(merged_settings.get("enabled", False))
-        merged_settings["schedule_time"] = str(merged_settings.get("schedule_time") or "18:00")
+        # Merge settings fields into the params file
+        current_params = load_json_config(GP_AUTO_SEARCH_PARAMS_FILE, {})
+        if not isinstance(current_params, dict):
+            current_params = {}
+        current_params["enabled"] = bool(raw_settings.get("enabled", False))
+        current_params["schedule_time"] = str(raw_settings.get("schedule_time") or "18:00")
         try:
-            task_count = int(merged_settings.get("task_count", 1))
+            task_count = int(raw_settings.get("task_count", 1))
         except (TypeError, ValueError):
             task_count = 1
-        merged_settings["task_count"] = max(1, task_count)
-        save_json_config(GP_AUTO_SEARCH_SETTINGS_FILE, merged_settings)
+        current_params["task_count"] = max(1, task_count)
+        save_json_config(GP_AUTO_SEARCH_PARAMS_FILE, current_params)
 
     if params.auto_search_params is not None:
         save_json_config(GP_AUTO_SEARCH_PARAMS_FILE, dict(params.auto_search_params or {}))
 
     return {"message": "挖掘配置已写入本地json", "success": True}
+
+
+# ── Generic Page Config API ───────────────────────────────────────────
+
+_PAGE_CONFIG_MAP = {
+    "gp_mining": (GP_AUTO_SEARCH_PARAMS_FILE, GP_AUTO_SEARCH_PARAMS_DEFAULT_FILE),
+    "llm_mining": (LLM_MINING_PARAMS_FILE, LLM_MINING_PARAMS_DEFAULT_FILE),
+    "fusion": (FUSION_PARAMS_FILE, FUSION_PARAMS_DEFAULT_FILE),
+    "backtest": (BACKTEST_PARAMS_FILE, BACKTEST_PARAMS_DEFAULT_FILE),
+    "strategy": (STRATEGY_PARAMS_FILE, STRATEGY_PARAMS_DEFAULT_FILE),
+    "strategy_monitor": (STRATEGY_MONITOR_PARAMS_FILE, STRATEGY_MONITOR_PARAMS_DEFAULT_FILE),
+}
+
+
+@app.get('/api/page-config/{page_name}')
+async def get_page_config(page_name: str):
+    """Get saved page config and default config for a page."""
+    if page_name not in _PAGE_CONFIG_MAP:
+        raise HTTPException(status_code=404, detail=f"Unknown page: {page_name}")
+    params_file, default_file = _PAGE_CONFIG_MAP[page_name]
+    default_data = load_json_config(default_file, {})
+    saved_data = load_json_config(params_file, {})
+    return {"saved": saved_data, "defaults": default_data}
+
+
+@app.post('/api/page-config/{page_name}')
+async def save_page_config(page_name: str, data: Dict[str, Any]):
+    """Save page config."""
+    if page_name not in _PAGE_CONFIG_MAP:
+        raise HTTPException(status_code=404, detail=f"Unknown page: {page_name}")
+    params_file, _ = _PAGE_CONFIG_MAP[page_name]
+    save_json_config(params_file, data)
+    return {"message": f"{page_name} 配置已保存", "success": True}
+
+
+@app.post('/api/page-config/{page_name}/reset')
+async def reset_page_config(page_name: str):
+    """Reset page config to defaults."""
+    if page_name not in _PAGE_CONFIG_MAP:
+        raise HTTPException(status_code=404, detail=f"Unknown page: {page_name}")
+    params_file, default_file = _PAGE_CONFIG_MAP[page_name]
+    default_data = load_json_config(default_file, {})
+    save_json_config(params_file, default_data)
+    return {"message": f"{page_name} 配置已恢复默认", "success": True, "data": default_data}
 
 
 def _set_auto_mining_status(**kwargs):
@@ -1593,7 +1643,7 @@ def _auto_mining_scheduler_tick_once() -> int:
         "schedule_time": "18:00",
         "task_count": 1,
     }
-    settings = load_json_config(GP_AUTO_SEARCH_SETTINGS_FILE, settings_default)
+    settings = load_json_config(GP_AUTO_SEARCH_PARAMS_FILE, settings_default)
     params_raw = load_json_config(GP_AUTO_SEARCH_PARAMS_FILE, {})
     if not isinstance(settings, dict):
         settings = dict(settings_default)
@@ -2454,24 +2504,215 @@ async def run_strategy_monitor_update_price(params: StrategyMonitorParams):
 
 @app.post("/api/strategy/monitor/generate")
 async def run_strategy_monitor_generate(params: StrategyMonitorParams):
-    """Generate T+1 strategy suggestion based on latest market data."""
+    """Generate latest strategy suggestion based on available market data in DB."""
     try:
         freshness = _check_monitor_price_freshness(params.instrument_id)
-        if not freshness.get("is_latest", False):
-            latest_db_day = freshness.get("latest_db_day") or "无"
-            expected_day = freshness.get("expected_latest_trading_day") or "未知"
-            raise HTTPException(
-                status_code=409,
-                detail=f"最新交易日价格数据尚未更新（当前DB: {latest_db_day}, 预期至少: {expected_day}），请先点击“更新行情数据”。",
-            )
+        latest_db_day = freshness.get("latest_db_day") or "无数据"
 
         loop = asyncio.get_event_loop()
         result = await loop.run_in_executor(None, _run_strategy_monitor_generate, params)
+        result["data_info"] = f"基于数据库最新数据日期: {latest_db_day}"
         return {"status": "ok", "result": result}
     except HTTPException:
         raise
     except Exception:
         raise HTTPException(status_code=500, detail=traceback.format_exc())
+
+
+# ── Strategy Monitor Auto Scheduling ──────────────────────────────────
+
+_strategy_monitor_thread: Optional[threading.Thread] = None
+_strategy_monitor_tasks: Dict[str, Dict[str, Any]] = {}
+
+
+def _run_strategy_monitor_auto():
+    """Run auto strategy monitor: check freshness, update price if needed, then generate."""
+    from utils.logging import log as lionet_logger
+    task_id = f"sm_{uuid.uuid4().hex[:8]}"
+    started_at = datetime.now().isoformat()
+    _strategy_monitor_tasks[task_id] = {
+        "type": "strategy-monitor-auto",
+        "status": "running",
+        "started_at": started_at,
+        "logs": [],
+    }
+    try:
+        update_one_data(
+            database="task",
+            collection=STRATEGY_MONITOR_TASK_COLLECTION,
+            mongo_operator={"task_id": task_id},
+            data={"task_id": task_id, "type": "strategy-monitor-auto", "status": "running", "started_at": started_at, "logs": []},
+            upsert=True,
+        )
+    except Exception:
+        pass
+
+    def _log(msg):
+        line = f'{datetime.now().strftime("%Y-%m-%d %H:%M:%S")} - INFO - {msg}'
+        _strategy_monitor_tasks[task_id].setdefault("logs", []).append(line)
+        lionet_logger.info(f"[StrategyMonitorAuto] {msg}")
+
+    try:
+        cfg = load_json_config(STRATEGY_MONITOR_PARAMS_FILE, {})
+        instrument_id = cfg.get("instrument_id", "C0")
+
+        freshness = _check_monitor_price_freshness(instrument_id)
+        latest_db_day = freshness.get("latest_db_day")
+        expected_day = freshness.get("expected_latest_trading_day")
+        _log(f"数据库最新日期: {latest_db_day}, 预期最新交易日: {expected_day}")
+
+        if not freshness.get("is_latest", False):
+            _log(f"数据库数据不是最新，尝试更新行情...")
+            trading_start_day = _normalize_trading_start_day(cfg.get("trading_start_time"))
+            market_cfg = _reload_market_schedule_config_from_file()
+            update_futures_continuous_contract_price(
+                instrument_id=[instrument_id],
+                start_date=trading_start_day,
+                load_prev_weighted_factor=bool(market_cfg.get("load_prev_weighted_factor", True)),
+                wait_time=float(market_cfg.get("wait_time", 2.0)),
+                method=str(market_cfg.get("method") or "bulk_write_update"),
+                only_update_new=bool(market_cfg.get("only_update_new", True)),
+            )
+            freshness = _check_monitor_price_freshness(instrument_id)
+            latest_db_day = freshness.get("latest_db_day")
+            if not freshness.get("is_latest", False):
+                _log(f"行情更新后仍不是最新(DB: {latest_db_day}, 预期: {expected_day})，跳过生成策略")
+                _strategy_monitor_tasks[task_id]["status"] = "completed"
+                _strategy_monitor_tasks[task_id]["finished_at"] = datetime.now().isoformat()
+                _save_strategy_monitor_task(task_id)
+                return
+            _log(f"行情已更新到: {latest_db_day}")
+
+        version = cfg.get("version", "")
+        factor_name = cfg.get("factor_name", "")
+        if not version or not factor_name:
+            _log("未配置 version 或 factor_name，无法生成策略")
+            _strategy_monitor_tasks[task_id]["status"] = "failed"
+            _strategy_monitor_tasks[task_id]["error"] = "未配置 version 或 factor_name"
+            _strategy_monitor_tasks[task_id]["finished_at"] = datetime.now().isoformat()
+            _save_strategy_monitor_task(task_id)
+            return
+
+        monitor_params = StrategyMonitorParams(
+            version=version,
+            factor_name=factor_name,
+            instrument_id=instrument_id,
+            trading_start_time=cfg.get("trading_start_time", "20200101"),
+            database=cfg.get("database", "factors"),
+            collection=cfg.get("collection", "genetic_programming"),
+            initial_capital=float(cfg.get("initial_capital", 1000000)),
+            margin_rate=float(cfg.get("margin_rate", 0.1)),
+            fee_per_lot=float(cfg.get("fee_per_lot", 2.0)),
+            slippage=float(cfg.get("slippage", 1.0)),
+            apply_rolling_norm=bool(cfg.get("apply_rolling_norm", True)),
+            rolling_norm_window=int(cfg.get("rolling_norm_window", 30)),
+            rolling_norm_min_periods=int(cfg.get("rolling_norm_min_periods", 20)),
+            rolling_norm_eps=float(cfg.get("rolling_norm_eps", 1e-8)),
+            rolling_norm_clip=float(cfg.get("rolling_norm_clip", 5.0)),
+            signal_delay_days=int(cfg.get("signal_delay_days", 1)),
+            min_open_ratio=float(cfg.get("min_open_ratio", 1.0)),
+        )
+        _log(f"开始生成策略: version={version}, factor={factor_name}")
+        result = _run_strategy_monitor_generate(monitor_params)
+        action_text = result.get("action", {}).get("action_text", "")
+        _log(f"策略生成完成, 建议操作: {action_text}")
+        _strategy_monitor_tasks[task_id]["status"] = "completed"
+        _strategy_monitor_tasks[task_id]["result"] = result
+        _strategy_monitor_tasks[task_id]["finished_at"] = datetime.now().isoformat()
+    except Exception as e:
+        _log(f"自动监控失败: {e}")
+        _strategy_monitor_tasks[task_id]["status"] = "failed"
+        _strategy_monitor_tasks[task_id]["error"] = str(e)
+        _strategy_monitor_tasks[task_id]["finished_at"] = datetime.now().isoformat()
+
+    _save_strategy_monitor_task(task_id)
+
+
+def _save_strategy_monitor_task(task_id: str):
+    info = _strategy_monitor_tasks.get(task_id, {})
+    try:
+        update_one_data(
+            database="task",
+            collection=STRATEGY_MONITOR_TASK_COLLECTION,
+            mongo_operator={"task_id": task_id},
+            data={
+                "task_id": task_id,
+                "type": "strategy-monitor-auto",
+                "status": info.get("status", "unknown"),
+                "started_at": info.get("started_at", ""),
+                "finished_at": info.get("finished_at", ""),
+                "logs": info.get("logs", []),
+                "error": info.get("error", ""),
+            },
+            upsert=True,
+        )
+    except Exception:
+        pass
+
+
+def _strategy_monitor_scheduler_loop():
+    import time as _time
+    from datetime import timedelta
+
+    while True:
+        cfg = load_json_config(STRATEGY_MONITOR_PARAMS_FILE, {})
+        if not bool(cfg.get("auto_monitor_enabled", False)):
+            _time.sleep(5)
+            continue
+        now = datetime.now()
+        schedule_time = str(cfg.get("auto_monitor_time") or "20:15")
+        try:
+            target_hour, target_minute = [int(x) for x in schedule_time.split(":", 1)]
+        except Exception:
+            target_hour, target_minute = 20, 15
+        target = now.replace(hour=target_hour, minute=target_minute, second=0, microsecond=0)
+        if now >= target:
+            target += timedelta(days=1)
+        wait_seconds = (target - now).total_seconds()
+        while wait_seconds > 0:
+            cfg = load_json_config(STRATEGY_MONITOR_PARAMS_FILE, {})
+            if not bool(cfg.get("auto_monitor_enabled", False)):
+                break
+            sleep_s = min(wait_seconds, 30)
+            _time.sleep(sleep_s)
+            wait_seconds -= sleep_s
+        cfg = load_json_config(STRATEGY_MONITOR_PARAMS_FILE, {})
+        if bool(cfg.get("auto_monitor_enabled", False)):
+            try:
+                _run_strategy_monitor_auto()
+            except Exception:
+                pass
+
+
+@app.on_event("startup")
+async def _start_strategy_monitor_scheduler():
+    global _strategy_monitor_thread
+    _strategy_monitor_thread = threading.Thread(target=_strategy_monitor_scheduler_loop, daemon=True)
+    _strategy_monitor_thread.start()
+
+
+@app.get("/api/strategy/monitor/auto-config")
+async def get_strategy_monitor_auto_config():
+    cfg = load_json_config(STRATEGY_MONITOR_PARAMS_FILE, {})
+    return {
+        "auto_monitor_enabled": bool(cfg.get("auto_monitor_enabled", False)),
+        "auto_monitor_time": str(cfg.get("auto_monitor_time") or "20:15"),
+    }
+
+
+@app.post("/api/strategy/monitor/auto-config")
+async def update_strategy_monitor_auto_config(data: Dict[str, Any]):
+    global _strategy_monitor_thread
+    cfg = load_json_config(STRATEGY_MONITOR_PARAMS_FILE, {})
+    if "auto_monitor_enabled" in data:
+        cfg["auto_monitor_enabled"] = bool(data["auto_monitor_enabled"])
+    if "auto_monitor_time" in data:
+        cfg["auto_monitor_time"] = str(data["auto_monitor_time"])
+    save_json_config(STRATEGY_MONITOR_PARAMS_FILE, cfg)
+    if cfg.get("auto_monitor_enabled") and (_strategy_monitor_thread is None or not _strategy_monitor_thread.is_alive()):
+        _strategy_monitor_thread = threading.Thread(target=_strategy_monitor_scheduler_loop, daemon=True)
+        _strategy_monitor_thread.start()
+    return {"message": "策略监控自动配置已保存", "success": True}
 
 
 # ── Task list + DB-persisted detail ───────────────────────────────────
@@ -2620,6 +2861,32 @@ async def list_tasks(start_date: Optional[str] = None, end_date: Optional[str] =
                     "task_type": _task_type_label(TASK_TYPE_MARKET_DATA),
                     "task_type_code": TASK_TYPE_MARKET_DATA,
                     "task_sub_type": str(_sanitize_nan(row.get("task_type"), "") or ""),
+                    "status": status_val,
+                    "progress": progress_val,
+                    "started_at": _sanitize_nan(row.get("started_at"), ""),
+                    "finished_at": _sanitize_nan(row.get("finished_at"), ""),
+                    "version": "",
+                    "gp_progress": None,
+                })
+    except Exception:
+        pass
+
+    # Strategy monitor tasks
+    try:
+        db_sm = get_data(database="task", collection=STRATEGY_MONITOR_TASK_COLLECTION, mongo_operator={})
+        if isinstance(db_sm, pd.DataFrame) and not db_sm.empty:
+            for _, row in db_sm.iterrows():
+                tid = str(_sanitize_nan(row.get("task_id"), "") or "")
+                if not tid or tid in task_map:
+                    continue
+                logs_val = _sanitize_nan(row.get("logs"), [])
+                status_val = str(_sanitize_nan(row.get("status"), "unknown") or "unknown")
+                progress_val = str(logs_val[-1]) if isinstance(logs_val, list) and logs_val else status_val
+                _upsert_task_row({
+                    "task_id": tid,
+                    "task_type": "策略监控",
+                    "task_type_code": "strategy_monitor",
+                    "task_sub_type": str(_sanitize_nan(row.get("type"), "") or ""),
                     "status": status_val,
                     "progress": progress_val,
                     "started_at": _sanitize_nan(row.get("started_at"), ""),

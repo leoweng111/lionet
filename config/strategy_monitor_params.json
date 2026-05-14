@@ -1,0 +1,21 @@
+{
+  "apply_rolling_norm": true,
+  "auto_monitor_enabled": true,
+  "auto_monitor_time": "20:15",
+  "collection": "factor_fusion",
+  "database": "factors",
+  "factor_name": "fusion_avg_weight_4",
+  "fee_per_lot": 2,
+  "initial_capital": 50000,
+  "instrument_id": "C0",
+  "margin_rate": 0.1,
+  "min_open_ratio": 1,
+  "rolling_norm_clip": 5,
+  "rolling_norm_eps": 1e-08,
+  "rolling_norm_min_periods": 20,
+  "rolling_norm_window": 30,
+  "signal_delay_days": 1,
+  "slippage": 1,
+  "trading_start_time": "20250101",
+  "version": "20260417_factor_fusion_test"
+}

@@ -6,6 +6,7 @@
   "check_relative": true,
   "consistency_penalty_coef": 1,
   "consistency_penalty_enabled": true,
+  "enabled": false,
   "end_time": "20241231",
   "fc_freq": "1d",
   "filter_indicator_dict": {
@@ -148,7 +149,7 @@
   "gp_elite_relative_threshold": 0.65,
   "gp_elite_size": 50,
   "gp_elite_stagnation_generation_count": 4,
-  "gp_generations": 20,
+  "gp_generations": 30,
   "gp_leaf_prob": 0.2,
   "gp_log_interval": 1,
   "gp_max_depth": 6,
@@ -181,6 +182,8 @@
   "rolling_norm_eps": 1e-08,
   "rolling_norm_min_periods": 20,
   "rolling_norm_window": 30,
+  "schedule_time": "11:00",
   "start_time": "20200101",
+  "task_count": 1,
   "version": "20260505_gp_test"
 }

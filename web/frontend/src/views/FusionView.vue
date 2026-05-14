@@ -159,7 +159,7 @@
 <script setup>
 import { computed, reactive, ref, onMounted, onUnmounted, watch } from 'vue'
 import { ElMessage } from 'element-plus'
-import { getVersions, startFusion, getFusionStatus, getFusionIndicatorOptions, updateFusionIndicatorOptions } from '../api'
+import { getVersions, startFusion, getFusionStatus, getFusionIndicatorOptions, updateFusionIndicatorOptions, resetPageConfig } from '../api'
 import NavChart from '../components/NavChart.vue'
 
 const today = () => new Date().toISOString().slice(0, 10).replace(/-/g, '')
@@ -222,10 +222,23 @@ let saveFusionDictTimer = null
 
 const selectedFactors = computed(() => result.value?.selected_factors_detail || [])
 
-const resetParams = () => {
-  Object.assign(p, defaults())
-  _selectedCollections.value = ['genetic_programming']
-  _selectedVersions.value = []
+const resetParams = async () => {
+  try {
+    const { data } = await resetPageConfig('fusion')
+    const serverDefaults = data?.data || {}
+    const merged = { ...defaults(), ...serverDefaults }
+    merged.fusion_indicator_dict = {
+      ..._buildDefaultFusionIndicatorDict(supportedIndicators.value),
+      ...(serverDefaults.fusion_indicator_dict || {}),
+    }
+    Object.assign(p, merged)
+    _selectedCollections.value = serverDefaults.selected_collections || ['genetic_programming']
+    _selectedVersions.value = serverDefaults.selected_versions || []
+  } catch {
+    Object.assign(p, defaults())
+    _selectedCollections.value = ['genetic_programming']
+    _selectedVersions.value = []
+  }
 }
 
 const formatMetrics = (m) => {

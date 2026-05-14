@@ -1,5 +1,5 @@
 {
-  "enabled": true,
-  "schedule_time": "11:00",
+  "enabled": false,
+  "schedule_time": "18:00",
   "task_count": 1
 }

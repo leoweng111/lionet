@@ -2,7 +2,7 @@
   <div>
     <div class="page-header">
       <h2><el-icon><Monitor /></el-icon> 策略监控</h2>
-      <p>基于最新行情更新后，生成下一交易日（T+1 开盘）的交易建议与账户指标。</p>
+      <p>基于最新行情数据，生成最新的交易建议与账户指标。</p>
     </div>
 
     <el-row :gutter="20" class="responsive-row">
@@ -51,9 +51,27 @@
                 </el-button>
                 <el-button type="success" @click="handleGenerateStrategy" :loading="generatingStrategy" style="width:100%;">
                   <el-icon v-if="!generatingStrategy"><Operation /></el-icon>
-                  {{ generatingStrategy ? '生成中...' : '生成T+1交易策略' }}
+                  {{ generatingStrategy ? '生成中...' : '生成最新交易策略' }}
                 </el-button>
               </el-form-item>
+
+              <div class="param-section"><el-divider content-position="left">自动监控</el-divider>
+                <el-row :gutter="12">
+                  <el-col :span="12">
+                    <el-form-item label="自动监控">
+                      <el-switch v-model="autoMonitorEnabled" @change="handleAutoMonitorChange" />
+                    </el-form-item>
+                  </el-col>
+                  <el-col :span="12">
+                    <el-form-item label="更新时间">
+                      <el-time-picker v-model="autoMonitorTime" value-format="HH:mm" format="HH:mm" :disabled="!autoMonitorEnabled" style="width:100%;" @change="handleAutoMonitorChange" />
+                    </el-form-item>
+                  </el-col>
+                </el-row>
+                <div style="font-size:12px;color:#909399;line-height:1.5;">
+                  开启后每天在设定时间自动检查行情数据并生成最新交易策略。
+                </div>
+              </div>
             </el-form>
           </div>
         </el-card>
@@ -119,7 +137,7 @@
           </el-table>
         </el-card>
 
-        <el-card v-if="!monitor" shadow="hover"><el-empty description="先更新行情数据，再生成T+1交易策略" /></el-card>
+        <el-card v-if="!monitor" shadow="hover"><el-empty description="先更新行情数据，再生成最新交易策略" /></el-card>
       </el-col>
     </el-row>
   </div>
@@ -128,7 +146,7 @@
 <script setup>
 import { ref, reactive, computed, onMounted, watch } from 'vue'
 import { ElMessage } from 'element-plus'
-import { getVersions, getFactors, updateStrategyMonitorPrice, generateStrategyMonitor } from '../api'
+import { getVersions, getFactors, updateStrategyMonitorPrice, generateStrategyMonitor, getStrategyMonitorAutoConfig, updateStrategyMonitorAutoConfig, savePageConfig, getPageConfig, resetPageConfig } from '../api'
 
 const SK = 'lionet_strategy_monitor'
 
@@ -143,6 +161,8 @@ const summaryRows = ref([])
 const summaryColumns = ref([])
 const latestTrades = ref([])
 const tradeDateRange = ref([])
+const autoMonitorEnabled = ref(false)
+const autoMonitorTime = ref('20:15')
 
 const sp = reactive({
   version: '', factor_name: '', instrument_id: 'C0',
@@ -274,27 +294,51 @@ const fmtSelectedRangeCumulative = computed(() => {
   return `${fmtMoney(selectedRangePnl.value)} (${fmtPct(selectedRangeCumulativeReturn.value)})`
 })
 
-const resetParams = () => {
+const resetParams = async () => {
   const keep = { version: sp.version, factor_name: sp.factor_name, collection: sp.collection }
-  Object.assign(sp, {
-    version: keep.version,
-    factor_name: keep.factor_name,
-    instrument_id: 'C0',
-    trading_start_time: '20200101',
-    database: 'factors',
-    collection: keep.collection,
-    initial_capital: 1000000,
-    margin_rate: 0.1,
-    fee_per_lot: 2.0,
-    slippage: 1.0,
-    apply_rolling_norm: true,
-    rolling_norm_window: 30,
-    rolling_norm_min_periods: 20,
-    rolling_norm_eps: 1e-8,
-    rolling_norm_clip: 5.0,
-    signal_delay_days: 1,
-    min_open_ratio: 1.0,
-  })
+  try {
+    const { data } = await resetPageConfig('strategy_monitor')
+    const serverDefaults = data?.data || {}
+    Object.assign(sp, {
+      version: keep.version,
+      factor_name: keep.factor_name,
+      collection: keep.collection,
+      instrument_id: serverDefaults.instrument_id || 'C0',
+      trading_start_time: serverDefaults.trading_start_time || '20200101',
+      database: serverDefaults.database || 'factors',
+      initial_capital: serverDefaults.initial_capital || 1000000,
+      margin_rate: serverDefaults.margin_rate || 0.1,
+      fee_per_lot: serverDefaults.fee_per_lot ?? 2.0,
+      slippage: serverDefaults.slippage ?? 1.0,
+      apply_rolling_norm: serverDefaults.apply_rolling_norm ?? true,
+      rolling_norm_window: serverDefaults.rolling_norm_window || 30,
+      rolling_norm_min_periods: serverDefaults.rolling_norm_min_periods || 20,
+      rolling_norm_eps: serverDefaults.rolling_norm_eps ?? 1e-8,
+      rolling_norm_clip: serverDefaults.rolling_norm_clip ?? 5.0,
+      signal_delay_days: serverDefaults.signal_delay_days ?? 1,
+      min_open_ratio: serverDefaults.min_open_ratio ?? 1.0,
+    })
+  } catch {
+    Object.assign(sp, {
+      version: keep.version,
+      factor_name: keep.factor_name,
+      instrument_id: 'C0',
+      trading_start_time: '20200101',
+      database: 'factors',
+      collection: keep.collection,
+      initial_capital: 1000000,
+      margin_rate: 0.1,
+      fee_per_lot: 2.0,
+      slippage: 1.0,
+      apply_rolling_norm: true,
+      rolling_norm_window: 30,
+      rolling_norm_min_periods: 20,
+      rolling_norm_eps: 1e-8,
+      rolling_norm_clip: 5.0,
+      signal_delay_days: 1,
+      min_open_ratio: 1.0,
+    })
+  }
   monitor.value = null
   summaryRows.value = []
   summaryColumns.value = []
@@ -394,21 +438,80 @@ const handleGenerateStrategy = async () => {
   try {
     const { data } = await generateStrategyMonitor(_buildPayload())
     _consumeMonitorResult(data.result)
-    ElMessage.success('T+1交易策略已生成')
+    const dataInfo = data.result?.data_info || ''
+    ElMessage.success(`最新交易策略已生成${dataInfo ? ' (' + dataInfo + ')' : ''}`)
   } catch (e) {
-    if (e.response?.status === 409) {
-      ElMessage.warning(e.response?.data?.detail || '最新交易日数据未更新，请先更新行情数据')
-    } else {
-      ElMessage.error('策略生成失败: ' + (e.response?.data?.detail || e.message))
-    }
+    ElMessage.error('策略生成失败: ' + (e.response?.data?.detail || e.message))
   } finally {
     generatingStrategy.value = false
   }
 }
 
-onMounted(() => {
+const handleAutoMonitorChange = async () => {
+  try {
+    await updateStrategyMonitorAutoConfig({
+      auto_monitor_enabled: autoMonitorEnabled.value,
+      auto_monitor_time: autoMonitorTime.value,
+    })
+    ElMessage.success('自动监控配置已保存')
+  } catch (e) {
+    ElMessage.error('保存失败: ' + (e.response?.data?.detail || e.message))
+  }
+}
+
+const _loadAutoMonitorConfig = async () => {
+  try {
+    const { data } = await getStrategyMonitorAutoConfig()
+    autoMonitorEnabled.value = !!data.auto_monitor_enabled
+    autoMonitorTime.value = data.auto_monitor_time || '20:15'
+  } catch {
+    // ignore
+  }
+}
+
+let _saveConfigTimer = null
+const _queueSaveConfig = () => {
+  if (_saveConfigTimer) clearTimeout(_saveConfigTimer)
+  _saveConfigTimer = setTimeout(async () => {
+    try {
+      await savePageConfig('strategy_monitor', {
+        ...sp,
+        auto_monitor_enabled: autoMonitorEnabled.value,
+        auto_monitor_time: autoMonitorTime.value,
+      })
+    } catch { /* silent */ }
+  }, 500)
+}
+
+const _loadSavedConfig = async () => {
+  try {
+    const { data } = await getPageConfig('strategy_monitor')
+    const saved = data?.saved || {}
+    if (saved.instrument_id) sp.instrument_id = saved.instrument_id
+    if (saved.trading_start_time) sp.trading_start_time = saved.trading_start_time
+    if (saved.database) sp.database = saved.database
+    if (saved.collection) sp.collection = saved.collection
+    if (saved.initial_capital) sp.initial_capital = saved.initial_capital
+    if (saved.margin_rate) sp.margin_rate = saved.margin_rate
+    if (saved.fee_per_lot != null) sp.fee_per_lot = saved.fee_per_lot
+    if (saved.slippage != null) sp.slippage = saved.slippage
+    if (saved.apply_rolling_norm != null) sp.apply_rolling_norm = saved.apply_rolling_norm
+    if (saved.rolling_norm_window) sp.rolling_norm_window = saved.rolling_norm_window
+    if (saved.rolling_norm_min_periods) sp.rolling_norm_min_periods = saved.rolling_norm_min_periods
+    if (saved.rolling_norm_eps != null) sp.rolling_norm_eps = saved.rolling_norm_eps
+    if (saved.rolling_norm_clip != null) sp.rolling_norm_clip = saved.rolling_norm_clip
+    if (saved.signal_delay_days != null) sp.signal_delay_days = saved.signal_delay_days
+    if (saved.min_open_ratio != null) sp.min_open_ratio = saved.min_open_ratio
+    if (saved.version) sp.version = saved.version
+    if (saved.factor_name) sp.factor_name = saved.factor_name
+  } catch { /* ignore */ }
+}
+
+onMounted(async () => {
   _restorePersistState()
+  await _loadSavedConfig()
   fetchVersions()
+  _loadAutoMonitorConfig()
   if (sp.version) {
     onVerChange(true)
   }
@@ -425,6 +528,7 @@ watch(
     } catch {
       // ignore storage quota / serialization issue
     }
+    _queueSaveConfig()
   },
   { deep: true }
 )

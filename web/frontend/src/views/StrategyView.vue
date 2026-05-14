@@ -96,7 +96,7 @@
 <script setup>
 import { ref, reactive, computed, onMounted, watch } from 'vue'
 import { ElMessage } from 'element-plus'
-import { getVersions, getFactors, runStrategy } from '../api'
+import { getVersions, getFactors, runStrategy, resetPageConfig } from '../api'
 import NavChart from '../components/NavChart.vue'
 
 const SK = 'lionet_strat'
@@ -160,23 +160,51 @@ const filteredVersions = computed(() =>
     : allVersions.value
 )
 
-const resetParams = () => {
+const resetParams = async () => {
   const kv = sp.version, kf = [...sp.factor_name_list], kc = sp.collection
-  Object.assign(sp, {
-    version: kv, factor_name_list: kf, instrument_id: 'C0',
-    start_time: '20200101', end_time: '20241231',
-    database: 'factors', collection: kc,
-    initial_capital: 1000000, margin_rate: 0.1, fee_per_lot: 2.0,
-    slippage: 1.0, apply_rolling_norm: true,
-    rolling_norm_window: 30, rolling_norm_min_periods: 20,
-    rolling_norm_eps: 1e-8, rolling_norm_clip: 5.0,
-    signal_delay_days: 1, min_open_ratio: 1.0,
-  })
-  oosStart.value = '20250101'
-  oosEnd.value = '20251231'
-  enableRealOos.value = false
-  realOosStart.value = '20260101'
-  realOosEnd.value = '20260330'
+  try {
+    const { data } = await resetPageConfig('strategy')
+    const serverDefaults = data?.data || {}
+    Object.assign(sp, {
+      version: kv, factor_name_list: kf, collection: kc,
+      instrument_id: serverDefaults.instrument_id || 'C0',
+      start_time: serverDefaults.start_time || '20200101',
+      end_time: serverDefaults.end_time || '20241231',
+      database: serverDefaults.database || 'factors',
+      initial_capital: serverDefaults.initial_capital || 1000000,
+      margin_rate: serverDefaults.margin_rate || 0.1,
+      fee_per_lot: serverDefaults.fee_per_lot ?? 2.0,
+      slippage: serverDefaults.slippage ?? 1.0,
+      apply_rolling_norm: serverDefaults.apply_rolling_norm ?? true,
+      rolling_norm_window: serverDefaults.rolling_norm_window || 30,
+      rolling_norm_min_periods: serverDefaults.rolling_norm_min_periods || 20,
+      rolling_norm_eps: serverDefaults.rolling_norm_eps ?? 1e-8,
+      rolling_norm_clip: serverDefaults.rolling_norm_clip ?? 5.0,
+      signal_delay_days: serverDefaults.signal_delay_days ?? 1,
+      min_open_ratio: serverDefaults.min_open_ratio ?? 1.0,
+    })
+    oosStart.value = serverDefaults.oos_start || '20250101'
+    oosEnd.value = serverDefaults.oos_end || '20251231'
+    enableRealOos.value = !!serverDefaults.enable_real_oos
+    realOosStart.value = serverDefaults.real_oos_start || '20260101'
+    realOosEnd.value = serverDefaults.real_oos_end || '20260330'
+  } catch {
+    Object.assign(sp, {
+      version: kv, factor_name_list: kf, instrument_id: 'C0',
+      start_time: '20200101', end_time: '20241231',
+      database: 'factors', collection: kc,
+      initial_capital: 1000000, margin_rate: 0.1, fee_per_lot: 2.0,
+      slippage: 1.0, apply_rolling_norm: true,
+      rolling_norm_window: 30, rolling_norm_min_periods: 20,
+      rolling_norm_eps: 1e-8, rolling_norm_clip: 5.0,
+      signal_delay_days: 1, min_open_ratio: 1.0,
+    })
+    oosStart.value = '20250101'
+    oosEnd.value = '20251231'
+    enableRealOos.value = false
+    realOosStart.value = '20260101'
+    realOosEnd.value = '20260330'
+  }
 }
 
 const fetchVersions = async () => {

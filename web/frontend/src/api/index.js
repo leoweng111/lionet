@@ -49,6 +49,13 @@ export const updateFusionIndicatorOptions = (data) => api.post('/api/fusion/indi
 export const runStrategy = (data) => api.post('/api/strategy', data)
 export const updateStrategyMonitorPrice = (data) => api.post('/api/strategy/monitor/update-price', data)
 export const generateStrategyMonitor = (data) => api.post('/api/strategy/monitor/generate', data)
+export const getStrategyMonitorAutoConfig = () => api.get('/api/strategy/monitor/auto-config')
+export const updateStrategyMonitorAutoConfig = (data) => api.post('/api/strategy/monitor/auto-config', data)
+
+// ── Page Config ───────────────────────────────────────
+export const getPageConfig = (pageName) => api.get(`/api/page-config/${pageName}`)
+export const savePageConfig = (pageName, data) => api.post(`/api/page-config/${pageName}`, data)
+export const resetPageConfig = (pageName) => api.post(`/api/page-config/${pageName}/reset`)
 
 // ── Tasks ─────────────────────────────────────────────
 export const getTasks = (params) => api.get('/api/tasks', { params })

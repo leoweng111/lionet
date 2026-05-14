@@ -1,0 +1,20 @@
+{
+  "instrument_id": "C0",
+  "trading_start_time": "20250101",
+  "database": "factors",
+  "collection": "genetic_programming",
+  "initial_capital": 50000,
+  "margin_rate": 0.1,
+  "fee_per_lot": 2.0,
+  "slippage": 1.0,
+  "apply_rolling_norm": true,
+  "rolling_norm_window": 30,
+  "rolling_norm_min_periods": 20,
+  "rolling_norm_eps": 1e-08,
+  "rolling_norm_clip": 5.0,
+  "signal_delay_days": 1,
+  "min_open_ratio": 1.0,
+  "auto_monitor_enabled": true,
+  "auto_monitor_time": "20:15"
+}
+

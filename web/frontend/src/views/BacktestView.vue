@@ -82,7 +82,7 @@
 <script setup>
 import { ref, reactive, computed, watch, onMounted } from 'vue'
 import { ElMessage } from 'element-plus'
-import { getVersions, getFactors, runBacktest } from '../api'
+import { getVersions, getFactors, runBacktest, resetPageConfig } from '../api'
 import NavChart from '../components/NavChart.vue'
 
 const SK = 'lionet_backtest'
@@ -143,17 +143,29 @@ const _restorePersistState = () => {
 
 const filteredVersions = computed(() => p.collection && versionMap.value[p.collection] ? versionMap.value[p.collection] : allVersions.value)
 
-const resetParams = () => {
-  Object.assign(p, {
+const resetParams = async () => {
+  const localDefaults = {
     version: '', fc_name_list: [], collection: 'genetic_programming', instrument_type: 'futures_continuous_contract',
     instrument_id_list: 'C0', fc_freq: '1d', start_time: '20200101', end_time: '20241231', portfolio_adjust_method: '1D',
     interest_method: 'simple', risk_free_rate: false, calculate_baseline: true, apply_weighted_price: true, n_jobs: 5,
-  })
-  oosStart.value = '20250101'
-  oosEnd.value = '20251231'
-  enableRealOos.value = false
-  realOosStart.value = '20260101'
-  realOosEnd.value = '20260330'
+  }
+  try {
+    const { data } = await resetPageConfig('backtest')
+    const serverDefaults = data?.data || {}
+    Object.assign(p, { ...localDefaults, ...serverDefaults, version: '', fc_name_list: [] })
+    oosStart.value = serverDefaults.oos_start || '20250101'
+    oosEnd.value = serverDefaults.oos_end || '20251231'
+    enableRealOos.value = !!serverDefaults.enable_real_oos
+    realOosStart.value = serverDefaults.real_oos_start || '20260101'
+    realOosEnd.value = serverDefaults.real_oos_end || '20260330'
+  } catch {
+    Object.assign(p, localDefaults)
+    oosStart.value = '20250101'
+    oosEnd.value = '20251231'
+    enableRealOos.value = false
+    realOosStart.value = '20260101'
+    realOosEnd.value = '20260330'
+  }
   formulaInput.value = ''
   resultMap.value = null
 }
