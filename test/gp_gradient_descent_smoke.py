@@ -158,6 +158,91 @@ def test_auto_device_does_not_select_mps() -> None:
         assert device.type == 'cpu', f'Auto GP+GD device should avoid MPS because unfold_backward is unsupported, got {device}'
 
 
+def test_nan_window_params_do_not_break_materialize() -> None:
+    from factors.factor_ops import DataNode, OpTsMean
+    from factors.gp_gradient_descent import GradientDescentConfig, _ParametricTorchEvaluator
+
+    data = pd.DataFrame({
+        'time': pd.date_range('2020-01-01', periods=60, freq='D'),
+        'instrument_id': 'C0',
+        'open': np.linspace(1.0, 2.0, 60),
+        'high': np.linspace(1.1, 2.1, 60),
+        'low': np.linspace(0.9, 1.9, 60),
+        'close': np.linspace(1.0, 2.0, 60),
+        'volume': np.linspace(1000.0, 2000.0, 60),
+        'position': np.linspace(10000.0, 20000.0, 60),
+        'future_ret': np.linspace(-0.01, 0.01, 60),
+    })
+    cfg = GradientDescentConfig.from_kwargs(
+        enable_gradient_descent=True,
+        gradient_descent_steps=1,
+        min_window=3,
+        max_window=10,
+        window_choices=[3, 5, 10],
+    )
+    model = _ParametricTorchEvaluator(
+        root=OpTsMean(DataNode('close'), 5),
+        df=data,
+        cfg=cfg,
+        apply_rolling_norm=False,
+        rolling_norm_window=5,
+        rolling_norm_min_periods=3,
+        rolling_norm_eps=1e-8,
+        rolling_norm_clip=5.0,
+    )
+    for param in model.window_params.values():
+        param.data.fill_(float('nan'))
+    factor = model.forward()
+    assert np.isfinite(float(factor.detach().cpu().sum().item()))
+    node = model.materialize()
+    assert isinstance(node, OpTsMean)
+    assert 3 <= int(node.window) <= 10
+
+
+def test_gradient_descent_materializes_edge_weights_and_windows() -> None:
+    from factors.factor_ops import ConstNode, DataNode, OpAdd, OpTsMean
+    from factors.gp_gradient_descent import GradientDescentConfig, optimize_tree_with_gradient_descent
+
+    rng = np.random.default_rng(20260519)
+    n = 90
+    close = np.linspace(1.0, 3.0, n) + rng.normal(0.0, 0.03, n)
+    future_ret = np.r_[np.diff(close) / close[:-1], 0.0]
+    data = pd.DataFrame({
+        'time': pd.date_range('2020-01-01', periods=n, freq='D'),
+        'instrument_id': 'C0',
+        'open': close,
+        'high': close + 0.1,
+        'low': close - 0.1,
+        'close': close,
+        'volume': np.linspace(1000.0, 2000.0, n),
+        'position': np.linspace(10000.0, 20000.0, n),
+        'future_ret': future_ret,
+    })
+    tree = OpAdd(OpTsMean(DataNode('close'), 5), ConstNode(0.5))
+    cfg = GradientDescentConfig.from_kwargs(
+        enable_gradient_descent=True,
+        gradient_descent_steps=5,
+        learning_rate=0.05,
+        gradient_descent_optimizer='adam',
+        early_stopping_steps=5,
+        min_window=3,
+        max_window=10,
+        window_choices=[3, 5, 10],
+        window_neighbor_radius=2,
+        window_soft_temperature=4.0,
+    )
+    refined = optimize_tree_with_gradient_descent(
+        tree,
+        data,
+        {'Gross Return': 1.0},
+        cfg,
+        apply_rolling_norm=False,
+    )
+    formula = refined.to_formula()
+    assert formula != tree.to_formula(), f'GD materialization should change formula, got {formula}'
+    assert 'Mul(' in formula, f'Edge/root weights should be materialized as Mul(Const, child), got {formula}'
+
+
 def test_score_surrogate_matches_gp_yearly_metric_score() -> None:
     from factors.factor_ops import DataNode
     from factors.gp_factor_engine import _metric_score
@@ -313,6 +398,8 @@ def main() -> None:
         test_ema_uses_ewm_not_sma_in_torch_evaluator,
         test_rolling_std_matches_pandas_ddof_one,
         test_auto_device_does_not_select_mps,
+        test_nan_window_params_do_not_break_materialize,
+        test_gradient_descent_materializes_edge_weights_and_windows,
         test_score_surrogate_matches_gp_yearly_metric_score,
         test_non_differentiable_fitness_rejected,
     ]

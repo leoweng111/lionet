@@ -1084,6 +1084,8 @@ def run_gp_evolution(
     gradient_descent_early_stopping_steps: int = 5,
     gradient_clip_norm: float = 1.0,
     gradient_soft_temperature: float = 10.0,
+    gradient_window_soft_temperature: float = 4.0,
+    gradient_window_neighbor_radius: int = 2,
 ) -> List[GPCandidate]:
     """运行遗传规划（GP）进行因子挖掘。
     参数说明（中文）：
@@ -1141,6 +1143,8 @@ def run_gp_evolution(
             early_stopping_steps=gradient_descent_early_stopping_steps,
             gradient_clip_norm=gradient_clip_norm,
             soft_temperature=gradient_soft_temperature,
+            window_soft_temperature=gradient_window_soft_temperature,
+            window_neighbor_radius=gradient_window_neighbor_radius,
             min_window=min(window_choices) if window_choices else 1,
             max_window=max(max(window_choices) if window_choices else 60, rolling_norm_window),
             window_choices=list(window_choices),
@@ -1225,8 +1229,11 @@ def run_gp_evolution(
                 f'[GPGD] generation {gen_idx + 1}/{generations}: refining '
                 f'{len(population)} individuals before EliteArchive comparison.'
             )
-            population = [
-                optimize_tree_with_gradient_descent(
+            refined_population: List[FactorNode] = []
+            changed_count = 0
+            for tree in population:
+                before_formula = tree.to_formula()
+                refined_tree = optimize_tree_with_gradient_descent(
                     tree=tree,
                     df=df,
                     fitness_indicator_dict=normalized_fitness_indicator_dict,
@@ -1237,8 +1244,16 @@ def run_gp_evolution(
                     rolling_norm_eps=rolling_norm_eps,
                     rolling_norm_clip=rolling_norm_clip,
                 )
-                for tree in population
-            ]
+                if refined_tree.to_formula() != before_formula:
+                    changed_count += 1
+                refined_population.append(refined_tree)
+            population = refined_population
+            log.info(
+                f'[GPGD] generation {gen_idx + 1}/{generations}: refinement finished, '
+                f'formula_changed={changed_count}/{len(population)}. '
+                f'Unchanged formulas usually mean the selected fitness is scale-invariant '
+                f'(for example TS IC/TS ICIR/Sharpe under rolling normalization) or GD found no better state.'
+            )
 
         scored_pop: List[Tuple[FactorNode, float]] = []
         penalized_fitness_values: List[float] = []

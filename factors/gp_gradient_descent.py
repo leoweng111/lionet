@@ -14,6 +14,7 @@ as integer window arguments. No soft operator name is persisted.
 from __future__ import annotations
 
 import copy
+import itertools
 import math
 from dataclasses import dataclass, fields
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple, Type, cast
@@ -105,6 +106,7 @@ _TorchModuleBase = torch.nn.Module if torch is not None else object
 _UNARY_TS_OPS_TUPLE: Tuple[Type[Any], ...] = tuple(UNARY_TS_OPS)
 _BINARY_TS_OPS_TUPLE: Tuple[Type[Any], ...] = tuple(BINARY_TS_OPS)
 _TERNARY_CHILD_OPS_TUPLE: Tuple[Type[Any], ...] = tuple(TERNARY_CHILD_OPS)
+_GD_RUN_COUNTER = itertools.count(1)
 
 
 @dataclass
@@ -136,6 +138,15 @@ class GradientDescentConfig:
         Optional max gradient norm for numerical stability.
     soft_temperature:
         Temperature for soft max/min/rank and soft window blending.
+    window_soft_temperature:
+        Independent temperature for differentiable window blending. It is kept
+        lower than operator softmax temperature by default so window parameters
+        can receive usable gradients instead of being locked at the initial
+        discrete choice.
+    window_neighbor_radius:
+        Add integer windows around the original window to the candidate set.
+        This makes windows such as 19/21 reachable even when GP initialization
+        only samples coarse choices like 10/20/30.
     min_window / max_window / window_choices:
         Bounds/candidates used when optimizing discrete time-series windows.
     device:
@@ -143,6 +154,14 @@ class GradientDescentConfig:
         MPS is not selected automatically because rolling-window backward relies
         on operators such as ``aten::unfold_backward`` that are not implemented
         on MPS in current PyTorch releases.
+    log_progress:
+        Whether to emit sampled progress logs for GD refinement. Logs are
+        sampled by run id to avoid flooding when alternated mode refines
+        hundreds of individuals each generation.
+    progress_log_first_n_runs / progress_log_run_interval:
+        Always log the first N GD calls, then log every M-th call.
+    progress_log_step_interval:
+        Within a logged GD call, print step metrics every N optimizer steps.
     """
 
     enable_gradient_descent: bool = False
@@ -155,10 +174,16 @@ class GradientDescentConfig:
     early_stopping_steps: int = 5
     gradient_clip_norm: float = 1.0
     soft_temperature: float = 10.0
+    window_soft_temperature: float = 4.0
+    window_neighbor_radius: int = 2
     min_window: int = 2
     max_window: int = 60
     window_choices: Optional[Sequence[int]] = None
     device: Optional[str] = None
+    log_progress: bool = True
+    progress_log_first_n_runs: int = 3
+    progress_log_run_interval: int = 50
+    progress_log_step_interval: int = 5
 
     @classmethod
     def from_kwargs(cls, **kwargs: Any) -> 'GradientDescentConfig':
@@ -177,8 +202,14 @@ class GradientDescentConfig:
         cfg.learning_rate = float(cfg.learning_rate)
         cfg.gradient_clip_norm = float(cfg.gradient_clip_norm)
         cfg.soft_temperature = max(0.1, float(cfg.soft_temperature))
+        cfg.window_soft_temperature = max(0.1, float(cfg.window_soft_temperature))
+        cfg.window_neighbor_radius = max(0, int(cfg.window_neighbor_radius))
         cfg.min_window = max(1, int(cfg.min_window))
         cfg.max_window = max(cfg.min_window, int(cfg.max_window))
+        cfg.log_progress = bool(cfg.log_progress)
+        cfg.progress_log_first_n_runs = max(0, int(cfg.progress_log_first_n_runs))
+        cfg.progress_log_run_interval = max(1, int(cfg.progress_log_run_interval))
+        cfg.progress_log_step_interval = max(1, int(cfg.progress_log_step_interval))
         return cfg
 
 
@@ -204,6 +235,42 @@ def _is_mps_backward_unsupported_error(exc: Exception) -> bool:
     )
 
 
+def _all_gradients_finite(params: Iterable[Any]) -> bool:
+    for param in params:
+        grad = getattr(param, 'grad', None)
+        if grad is not None and not bool(torch.isfinite(grad).all().detach().cpu().item()):
+            return False
+    return True
+
+
+def _gradient_norm_and_status(params: Iterable[Any]) -> Tuple[float, int, bool]:
+    """Return global L2 grad norm, number of tensors with grad, and finite flag."""
+    total_sq = 0.0
+    grad_tensor_count = 0
+    finite = True
+    for param in params:
+        grad = getattr(param, 'grad', None)
+        if grad is None:
+            continue
+        grad_tensor_count += 1
+        if not bool(torch.isfinite(grad).all().detach().cpu().item()):
+            finite = False
+            continue
+        total_sq += float((grad.detach() * grad.detach()).sum().cpu().item())
+    return math.sqrt(max(total_sq, 0.0)), grad_tensor_count, finite
+
+
+def _max_parameter_delta(model: Any, initial_params: Dict[str, Any]) -> float:
+    max_delta = 0.0
+    with torch.no_grad():
+        for name, param in model.named_parameters():
+            if name not in initial_params:
+                continue
+            delta = torch.max(torch.abs(param.detach() - initial_params[name])).detach().cpu().item()
+            max_delta = max(max_delta, float(delta))
+    return max_delta
+
+
 def _safe_tensor(x):
     return torch.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0)
 
@@ -214,6 +281,14 @@ def _soft_abs(x, k: float):
 
 def _safe_div(a, b, eps: float = 1e-6):
     return a / torch.where(torch.abs(b) < eps, torch.full_like(b, eps), b)
+
+
+def _finite_float(value: Any, fallback: float = 0.0) -> float:
+    try:
+        out = float(value)
+    except Exception:
+        return float(fallback)
+    return out if math.isfinite(out) else float(fallback)
 
 
 def _pearson_corr(x, y, eps: float = 1e-6):
@@ -592,7 +667,8 @@ class _ParametricTorchEvaluator(_TorchModuleBase):  # type: ignore[misc]
     def _get_or_create_param(self, container, raw_key: str, init_value: float) -> str:
         name = self._safe_param_name(raw_key)
         if name not in container:
-            container[name] = torch.nn.Parameter(torch.tensor(float(init_value), dtype=self.dtype, device=self.device))
+            safe_init = _finite_float(init_value, 1.0)
+            container[name] = torch.nn.Parameter(torch.tensor(safe_init, dtype=self.dtype, device=self.device))
         """
         self._material_param_names：参数名映射表
         container._get_name()：参数所在的容器名称，可能是edge_params、const_params或window_params
@@ -725,15 +801,63 @@ class _ParametricTorchEvaluator(_TorchModuleBase):  # type: ignore[misc]
         """
         首先会生成所有可能的窗口候选值，默认包含：
             原始窗口大小：20
+            原始窗口附近的整数窗口：18, 19, 20, 21, 22（半径由 window_neighbor_radius 控制）
             配置的最小 / 最大窗口：2~60
             配置的窗口候选列表（如果有的话）
-        最终会去重并排序，得到比如：[20, 21, 22]
+        最终会去重并排序，得到比如：[3, 5, 18, 19, 20, 21, 22, 30]
+
+        这样做的原因：GP 生成树时通常只从粗粒度 window_choices（如 3/5/10/20/30）
+        里采样；如果 GD 阶段也只在这些粗粒度窗口之间做 soft blend，窗口参数在 20
+        附近很难学到 19/21 这类局部改进，看起来就像窗口完全没有优化。
         """
         base = list(self.cfg.window_choices or [])
-        base.append(int(round(float(init_window))))
+        init = int(round(float(init_window)))
+        base.append(init)
+        radius = int(getattr(self.cfg, 'window_neighbor_radius', 0))
+        if radius > 0:
+            base.extend(range(init - radius, init + radius + 1))
         base.extend([self.cfg.min_window, self.cfg.max_window])
         out = sorted({int(x) for x in base if self.cfg.min_window <= int(x) <= self.cfg.max_window})
         return out or [max(1, int(init_window))]
+
+    def _soft_window_weights(self, window_param, candidates: Sequence[int]):
+        """Return smooth weights for discrete window candidates.
+
+        Window optimization uses a separate, moderate temperature and squared
+        distance. Compared with ``-soft_temperature * abs(wp - w)``, this keeps
+        the initial hard-window approximation close to the GP tree while still
+        providing non-negligible gradients to neighbouring windows.
+        """
+        logits = []
+        temp = float(getattr(self.cfg, 'window_soft_temperature', self.soft_temperature))
+        for w in candidates:
+            dist = window_param - float(w)
+            logits.append(-temp * dist * dist)
+        return torch.softmax(torch.stack(logits), dim=0)
+
+    def _safe_window_int(self, node: FactorNode, path: str, window_name: str = 'window', fallback: Optional[int] = None) -> int:
+        if fallback is None:
+            fallback = int(getattr(cast(Any, node), window_name, self.cfg.min_window))
+        fallback = int(min(self.cfg.max_window, max(self.cfg.min_window, int(fallback))))
+        try:
+            param = self._window_param(node, path, window_name)
+            raw = float(param.detach().cpu().item())
+        except Exception:
+            raw = float(fallback)
+        if not math.isfinite(raw):
+            raw = float(fallback)
+        return int(min(self.cfg.max_window, max(self.cfg.min_window, round(raw))))
+
+    def _sanitize_parameters_(self) -> None:
+        """Keep learnable parameters finite after optimizer steps."""
+        with torch.no_grad():
+            for param in self.parameters():
+                param.data = torch.nan_to_num(param.data, nan=0.0, posinf=1e6, neginf=-1e6)
+                param.data.clamp_(-1e6, 1e6)
+            for param in self.window_params.values():
+                fallback = float((self.cfg.min_window + self.cfg.max_window) / 2.0)
+                param.data = torch.nan_to_num(param.data, nan=fallback, posinf=float(self.cfg.max_window), neginf=float(self.cfg.min_window))
+                param.data.clamp_(float(self.cfg.min_window), float(self.cfg.max_window))
 
     def _soft_window_unary(self, node: FactorNode, path: str, x, op_fn, init_window: int):
         """
@@ -753,7 +877,6 @@ class _ParametricTorchEvaluator(_TorchModuleBase):  # type: ignore[misc]
         wp = self._window_param(node, path, 'window')
         candidates = self._window_candidates(init_window)
         outs = []
-        weights_raw = []
         # 计算每个候选窗口的硬输出
         # 这一步会用原始的硬窗口算子计算每个候选窗口的输出
         # 所有计算都用标准时序算子，没有任何近似
@@ -764,21 +887,13 @@ class _ParametricTorchEvaluator(_TorchModuleBase):  # type: ignore[misc]
             # 列表中的每个元素，都是单个候选窗口对应的完整时序计算结果
             # 每个元素都是一个一维 PyTorch 张量，长度 = 你的 DataFrame 总行数（时间步数 T）
             outs.append(op_fn(x, int(w)))
-            # 计算每个窗口的原始权重
-            # 权重公式：原始权重 = -k × |当前窗口参数 - 候选窗口大小|
-            # 离当前参数wp越近的窗口，原始权重越大（负数越小）
-            # e.g. 对于wp=21.3：
-                # 窗口 20 的原始权重 = -10 × |21.3-20| = -13
-                # 窗口 21 的原始权重 = -10 × |21.3-21| = -3
-                # 窗口 22 的原始权重 = -10 × |21.3-22| = -7
-            weights_raw.append(-self.soft_temperature * torch.abs(wp - float(w)))
         # softmax 归一化权重
         # softmax 会把所有原始权重转换成 0~1 之间的数，且总和为 1
         # 对于上面的例子：
             # 窗口 20 的权重 ≈ 0.000045（几乎为 0）
             # 窗口 21 的权重 ≈ 0.982（占 98.2%）
             # 窗口 22 的权重 ≈ 0.018（占 1.8%）
-        weights = torch.softmax(torch.stack(weights_raw), dim=0)
+        weights = self._soft_window_weights(wp, candidates)
         # 加权平均得到最终输出
         # 最终输出 = 0.000045×ts_mean (20) + 0.982×ts_mean (21) + 0.018×ts_mean (22)
         # 其中ts_mean (21)、ts_mean (20)、ts_mean (22)都是一个数组
@@ -847,11 +962,9 @@ class _ParametricTorchEvaluator(_TorchModuleBase):  # type: ignore[misc]
         wp = self._window_param(node, path, 'window')
         candidates = self._window_candidates(init_window)
         outs = []
-        weights_raw = []
         for w in candidates:
             outs.append(op_fn(x, y, int(w)))
-            weights_raw.append(-self.soft_temperature * torch.abs(wp - float(w)))
-        weights = torch.softmax(torch.stack(weights_raw), dim=0)
+        weights = self._soft_window_weights(wp, candidates)
         stacked = torch.stack([torch.nan_to_num(o, nan=0.0, posinf=0.0, neginf=0.0) for o in outs], dim=0)
         return (weights.view(-1, 1) * stacked).sum(dim=0)
 
@@ -1008,9 +1121,9 @@ class _ParametricTorchEvaluator(_TorchModuleBase):  # type: ignore[misc]
 
         if isinstance(node, OpMaRibbon):
             x = self._child(node, path, 'child')
-            w1 = int(torch.clamp(torch.round(self._window_param(node, path, 'window1')).detach(), self.cfg.min_window, self.cfg.max_window).item())
-            w2 = int(torch.clamp(torch.round(self._window_param(node, path, 'window2')).detach(), self.cfg.min_window, self.cfg.max_window).item())
-            w3 = int(torch.clamp(torch.round(self._window_param(node, path, 'window3')).detach(), self.cfg.min_window, self.cfg.max_window).item())
+            w1 = self._safe_window_int(node, path, 'window1', int(node.window1))
+            w2 = self._safe_window_int(node, path, 'window2', int(node.window2))
+            w3 = self._safe_window_int(node, path, 'window3', int(node.window3))
             ma1 = _rolling_mean(x, self.slices, w1)
             ma2 = _rolling_mean(x, self.slices, w2)
             ma3 = _rolling_mean(x, self.slices, w3)
@@ -1149,7 +1262,7 @@ class _ParametricTorchEvaluator(_TorchModuleBase):  # type: ignore[misc]
         将最终经过梯度下降优化后的参数值应用到原始因子树上，生成一个新的、具体的因子树。
         """
         root = self._materialize_node(self.root, 'root')
-        scale = float(self.root_scale.detach().cpu().item())
+        scale = _finite_float(self.root_scale.detach().cpu().item(), 1.0)
         if abs(scale - 1.0) > 1e-8:
             root = OpMul(ConstNode(scale), root)
         try:
@@ -1161,20 +1274,19 @@ class _ParametricTorchEvaluator(_TorchModuleBase):  # type: ignore[misc]
     def _materialized_child(self, node: FactorNode, path: str, child_name: str) -> FactorNode:
         child = getattr(cast(Any, node), child_name)
         out = self._materialize_node(child, f'{path}.{child_name}')
-        weight = float(self._edge_param(node, path, child_name).detach().cpu().item())
+        weight = _finite_float(self._edge_param(node, path, child_name).detach().cpu().item(), 1.0)
         if abs(weight - 1.0) <= 1e-8:
             return out
         return OpMul(ConstNode(weight), out)
 
     def _rounded_window(self, node: FactorNode, path: str, window_name: str = 'window') -> int:
-        val = float(self._window_param(node, path, window_name).detach().cpu().item())
-        return int(min(self.cfg.max_window, max(self.cfg.min_window, round(val))))
+        return self._safe_window_int(node, path, window_name)
 
     def _materialize_node(self, node: FactorNode, path: str) -> FactorNode:
         if isinstance(node, DataNode):
             return copy.deepcopy(node)
         if isinstance(node, ConstNode):
-            return ConstNode(float(self._const_param(path).detach().cpu().item()))
+            return ConstNode(_finite_float(self._const_param(path).detach().cpu().item(), float(node.value)))
         if isinstance(node, OpNanMean):
             return OpNanMean(*[self._materialized_child(node, path, f'child{i}') for i in range(len(node.children))])
         if isinstance(node, OpRollNorm):
@@ -1250,7 +1362,30 @@ def optimize_tree_with_gradient_descent(
     if torch is None:
         raise ImportError('enable_gradient_descent=True requires PyTorch.')
 
+    run_id = next(_GD_RUN_COUNTER)
+    original_formula = tree.to_formula()
+    requested_indicators = {
+        str(k): float(v)
+        for k, v in dict(fitness_indicator_dict or {}).items()
+        if abs(float(v)) > 1e-12
+    }
+
+    def _should_log_run(run_config: GradientDescentConfig) -> bool:
+        return bool(
+            run_config.log_progress
+            and (
+                run_id <= run_config.progress_log_first_n_runs
+                or run_id % run_config.progress_log_run_interval == 0
+            )
+        )
+
+    def _format_float(value: float) -> str:
+        if not math.isfinite(float(value)):
+            return str(value)
+        return f'{float(value):.6g}'
+
     def _run_once(run_config: GradientDescentConfig) -> FactorNode:
+        should_log = _should_log_run(run_config)
         model = _ParametricTorchEvaluator(
             root=tree,
             df=df,
@@ -1263,9 +1398,30 @@ def optimize_tree_with_gradient_descent(
             target_col=target_col,
         )
         optimizer = _make_optimizer(run_config.gradient_descent_optimizer, model.parameters(), run_config.learning_rate)
+        trainable_param_count = sum(p.numel() for p in model.parameters() if p.requires_grad)
+        initial_params = {name: p.detach().clone() for name, p in model.named_parameters()}
         best_score = -float('inf')
+        initial_score = None
+        final_score = None
+        last_score_pos = None
+        last_score_neg = None
+        last_loss = None
+        last_grad_norm = 0.0
+        last_grad_tensor_count = 0
+        last_grad_finite = True
+        last_stop_reason = 'completed_all_steps'
+        actual_steps = 0
         best_state = copy.deepcopy(model.state_dict())
         no_improve = 0
+
+        if should_log:
+            log.info(
+                f'[GPGD][run={run_id}] start: device={model.device}, optimizer={run_config.gradient_descent_optimizer}, '
+                f'lr={run_config.learning_rate}, steps={run_config.gradient_descent_steps}, '
+                f'params={trainable_param_count}, method={run_config.parametric_method}, '
+                f'indicators={requested_indicators}, apply_rolling_norm={apply_rolling_norm}, '
+                f'formula={original_formula}'
+            )
 
         for step in range(run_config.gradient_descent_steps):
             # 把所有可学习参数的梯度值重置为 None，避免上一步的梯度累加到当前步
@@ -1279,24 +1435,111 @@ def optimize_tree_with_gradient_descent(
             score = torch.maximum(score_pos, score_neg)
             loss = -score
             if not torch.isfinite(loss):
+                last_stop_reason = f'non_finite_loss_at_step_{step + 1}'
+                if should_log:
+                    log.warning(
+                        f'[GPGD][run={run_id}] step={step + 1}: non-finite loss encountered; '
+                        f'score_pos={score_pos.detach().cpu().item()}, score_neg={score_neg.detach().cpu().item()}'
+                    )
                 break
-            loss.backward()
-            if run_config.gradient_clip_norm > 0:
-                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=run_config.gradient_clip_norm)
-            optimizer.step()
 
             score_value = float(score.detach().cpu().item())
+            last_score_pos = float(score_pos.detach().cpu().item())
+            last_score_neg = float(score_neg.detach().cpu().item())
+            last_loss = float(loss.detach().cpu().item())
+            final_score = score_value
+            if initial_score is None:
+                initial_score = score_value
             if score_value > best_score + 1e-10:
                 best_score = score_value
+                # The score above was computed from the current parameters, so
+                # save state before optimizer.step(). Saving after step can
+                # accidentally persist NaN/inf parameters produced by an
+                # unstable update while attributing them to the pre-step score.
                 best_state = copy.deepcopy(model.state_dict())
                 no_improve = 0
             else:
                 no_improve += 1
+
+            loss.backward()
+            if run_config.gradient_clip_norm > 0:
+                total_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=run_config.gradient_clip_norm)
+                last_grad_norm, last_grad_tensor_count, last_grad_finite = _gradient_norm_and_status(model.parameters())
+                if not bool(torch.isfinite(total_norm).detach().cpu().item()):
+                    optimizer.zero_grad(set_to_none=True)
+                    last_stop_reason = f'non_finite_gradient_at_step_{step + 1}'
+                    if should_log:
+                        log.warning(f'[GPGD][run={run_id}] step={step + 1}: non-finite gradient norm before clipping.')
+                    break
+            elif not _all_gradients_finite(model.parameters()):
+                optimizer.zero_grad(set_to_none=True)
+                last_grad_norm, last_grad_tensor_count, last_grad_finite = _gradient_norm_and_status(model.parameters())
+                last_stop_reason = f'non_finite_gradient_at_step_{step + 1}'
+                if should_log:
+                    log.warning(f'[GPGD][run={run_id}] step={step + 1}: non-finite gradient detected.')
+                break
+            else:
+                last_grad_norm, last_grad_tensor_count, last_grad_finite = _gradient_norm_and_status(model.parameters())
+
+            actual_steps = step + 1
+            if should_log and (step == 0 or (step + 1) % run_config.progress_log_step_interval == 0 or step + 1 == run_config.gradient_descent_steps):
+                log.info(
+                    f'[GPGD][run={run_id}] step={step + 1}/{run_config.gradient_descent_steps}: '
+                    f'loss={_format_float(last_loss)}, score={_format_float(score_value)}, '
+                    f'score_pos={_format_float(last_score_pos)}, score_neg={_format_float(last_score_neg)}, '
+                    f'best_score={_format_float(best_score)}, grad_norm={_format_float(last_grad_norm)}, '
+                    f'grad_tensors={last_grad_tensor_count}, grad_finite={last_grad_finite}, '
+                    f'no_improve={no_improve}'
+                )
+
+            optimizer.step()
+            model._sanitize_parameters_()
+
             if run_config.early_stopping_steps > 0 and no_improve >= run_config.early_stopping_steps:
+                last_stop_reason = f'early_stopping_no_improve_{no_improve}_steps'
                 break
 
         model.load_state_dict(best_state)
-        return model.materialize()
+        param_delta = _max_parameter_delta(model, initial_params)
+        refined_tree = model.materialize()
+        refined_formula = refined_tree.to_formula()
+        formula_changed = refined_formula != original_formula
+
+        if should_log:
+            if formula_changed:
+                unchanged_reason = 'formula_changed'
+            elif actual_steps <= 0:
+                unchanged_reason = last_stop_reason
+            elif not math.isfinite(best_score) or best_score <= (initial_score if initial_score is not None else best_score) + 1e-10:
+                unchanged_reason = 'no_surrogate_score_improvement_saved_initial_state'
+            elif param_delta <= 1e-8:
+                unchanged_reason = 'optimized_parameters_almost_equal_initial'
+            elif last_grad_tensor_count == 0:
+                unchanged_reason = 'no_parameter_received_gradient'
+            elif last_grad_norm <= 1e-12:
+                unchanged_reason = 'gradient_norm_near_zero_scale_invariant_or_flat_fitness'
+            else:
+                unchanged_reason = 'parameters_changed_but_materialized_formula_same_rounding_or_tiny_weights'
+
+            log.info(
+                f'[GPGD][run={run_id}] summary: steps={actual_steps}/{run_config.gradient_descent_steps}, '
+                f'stop_reason={last_stop_reason}, initial_score={_format_float(initial_score if initial_score is not None else float("nan"))}, '
+                f'final_score={_format_float(final_score if final_score is not None else float("nan"))}, '
+                f'best_score={_format_float(best_score)}, last_loss={_format_float(last_loss if last_loss is not None else float("nan"))}, '
+                f'last_grad_norm={_format_float(last_grad_norm)}, grad_tensors={last_grad_tensor_count}, '
+                f'grad_finite={last_grad_finite}, max_param_delta={_format_float(param_delta)}, '
+                f'formula_changed={formula_changed}, unchanged_reason={unchanged_reason}'
+            )
+            if not formula_changed:
+                log.info(
+                    f'[GPGD][run={run_id}] unchanged_formula_detail: '
+                    f'fitness like TS IC/TS ICIR/Sharpe can be scale-invariant, rolling_norm can absorb edge/root scales, '
+                    f'and windows are rounded back to integers during materialization. original_formula={original_formula}'
+                )
+            else:
+                log.info(f'[GPGD][run={run_id}] refined_formula={refined_formula}')
+
+        return refined_tree
 
     try:
         return _run_once(config)
