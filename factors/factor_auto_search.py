@@ -1526,6 +1526,16 @@ class GeneticFactorGenerator(FactorGenerator):
                  gp_max_shock_generation: int = 3,
                  consistency_penalty_enabled: bool = False,
                  consistency_penalty_coef: float = 1.0,
+                 enable_gradient_descent: bool = False,
+                 gradient_descent_method: str = 'alternated',
+                 generation_per_gradient_descent: int = 1,
+                 gradient_descent_steps: int = 20,
+                 parametric_method: str = 'opgd',
+                 gradient_descent_optimizer: str = 'adam',
+                 learning_rate: float = 0.01,
+                 gradient_descent_early_stopping_steps: int = 5,
+                 gradient_clip_norm: float = 1.0,
+                 gradient_soft_temperature: float = 10.0,
                  outsample_ratio: float = 0.0,
                  outsample_start_time: Optional[str] = None,
                  outsample_end_time: Optional[str] = None):
@@ -1579,6 +1589,16 @@ class GeneticFactorGenerator(FactorGenerator):
         - gp_assumed_initial_capital: 小因子惩罚的资金假设。
         - gp_elite_stagnation_generation_count: 精英库连续停滞触发 Shock 的代数。
         - gp_max_shock_generation: Shock 模式最长持续代数。
+        - enable_gradient_descent: 是否启用 GP+梯度下降参数优化；默认 False，保持原 GP 逻辑完全不变。
+        - gradient_descent_method: alternated 表示每隔若干代在入精英库前优化；consecutive 表示 GP 结束后只优化最终精英库。
+        - generation_per_gradient_descent: alternated 模式下每隔多少代执行一次梯度下降。
+        - gradient_descent_steps: 每次梯度下降最大 step 数。
+        - parametric_method: gpgd 为同类算子共享边权/窗口参数，opgd 为每个算子实例独立参数。
+        - gradient_descent_optimizer: PyTorch 优化器，支持 adam/adamw/sgd/rmsprop/adagrad。
+        - learning_rate: 梯度下降学习率。
+        - gradient_descent_early_stopping_steps: GD 连续多少 step surrogate fitness 无提升则早停。
+        - gradient_clip_norm: 梯度裁剪阈值，<=0 表示不裁剪。
+        - gradient_soft_temperature: 不可微算子平滑替身和窗口 soft blend 的温度参数。
         """
         super().__init__(
             instrument_type=instrument_type,
@@ -1645,6 +1665,20 @@ class GeneticFactorGenerator(FactorGenerator):
             self.fitness_indicator_dict[str(indicator)] = w
         if not self.fitness_indicator_dict:
             self.fitness_indicator_dict = dict(GP_DEFAULT_FITNESS_INDICATOR_WEIGHT)
+
+        self.enable_gradient_descent = bool(enable_gradient_descent)
+        self.gradient_descent_method = str(gradient_descent_method or 'alternated').lower()
+        self.generation_per_gradient_descent = max(1, int(generation_per_gradient_descent))
+        self.gradient_descent_steps = max(0, int(gradient_descent_steps))
+        self.parametric_method = str(parametric_method or 'opgd').lower()
+        self.gradient_descent_optimizer = str(gradient_descent_optimizer or 'adam').lower()
+        self.learning_rate = float(learning_rate)
+        self.gradient_descent_early_stopping_steps = max(0, int(gradient_descent_early_stopping_steps))
+        self.gradient_clip_norm = float(gradient_clip_norm)
+        self.gradient_soft_temperature = float(gradient_soft_temperature)
+        if self.enable_gradient_descent:
+            from .gp_gradient_descent_config import validate_gradient_descent_fitness_indicators
+            validate_gradient_descent_fitness_indicators(self.fitness_indicator_dict)
 
         self.random_seed = random_seed
         self.gp_early_stopping_generation_count = int(gp_early_stopping_generation_count)
@@ -1780,6 +1814,16 @@ class GeneticFactorGenerator(FactorGenerator):
             cancel_event=self.cancel_event,
             consistency_penalty_enabled=self.consistency_penalty_enabled,
             consistency_penalty_coef=self.consistency_penalty_coef,
+            enable_gradient_descent=self.enable_gradient_descent,
+            gradient_descent_method=self.gradient_descent_method,
+            generation_per_gradient_descent=self.generation_per_gradient_descent,
+            gradient_descent_steps=self.gradient_descent_steps,
+            parametric_method=self.parametric_method,
+            gradient_descent_optimizer=self.gradient_descent_optimizer,
+            learning_rate=self.learning_rate,
+            gradient_descent_early_stopping_steps=self.gradient_descent_early_stopping_steps,
+            gradient_clip_norm=self.gradient_clip_norm,
+            gradient_soft_temperature=self.gradient_soft_temperature,
         )
 
         if not candidates:

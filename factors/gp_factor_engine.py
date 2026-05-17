@@ -1074,6 +1074,16 @@ def run_gp_evolution(
     cancel_event: Optional[threading.Event] = None,
     consistency_penalty_enabled: bool = False,
     consistency_penalty_coef: float = 1.0,
+    enable_gradient_descent: bool = False,
+    gradient_descent_method: str = 'alternated',
+    generation_per_gradient_descent: int = 1,
+    gradient_descent_steps: int = 20,
+    parametric_method: str = 'opgd',
+    gradient_descent_optimizer: str = 'adam',
+    learning_rate: float = 0.01,
+    gradient_descent_early_stopping_steps: int = 5,
+    gradient_clip_norm: float = 1.0,
+    gradient_soft_temperature: float = 10.0,
 ) -> List[GPCandidate]:
     """运行遗传规划（GP）进行因子挖掘。
     参数说明（中文）：
@@ -1116,6 +1126,26 @@ def run_gp_evolution(
 
     early_stopping_generation_count = int(early_stopping_generation_count)
     normalized_fitness_indicator_dict = _normalize_fitness_indicator_dict(fitness_indicator_dict)
+    gd_config = None
+    optimize_tree_with_gradient_descent = None
+    if enable_gradient_descent:
+        from .gp_gradient_descent import GradientDescentConfig, optimize_tree_with_gradient_descent as _optimize_tree_with_gradient_descent
+        gd_config = GradientDescentConfig.from_kwargs(
+            enable_gradient_descent=enable_gradient_descent,
+            gradient_descent_method=gradient_descent_method,
+            generation_per_gradient_descent=generation_per_gradient_descent,
+            gradient_descent_steps=gradient_descent_steps,
+            parametric_method=parametric_method,
+            gradient_descent_optimizer=gradient_descent_optimizer,
+            learning_rate=learning_rate,
+            early_stopping_steps=gradient_descent_early_stopping_steps,
+            gradient_clip_norm=gradient_clip_norm,
+            soft_temperature=gradient_soft_temperature,
+            min_window=min(window_choices) if window_choices else 1,
+            max_window=max(max(window_choices) if window_choices else 60, rolling_norm_window),
+            window_choices=list(window_choices),
+        )
+        optimize_tree_with_gradient_descent = _optimize_tree_with_gradient_descent
 
     log.info(
         'GP start: '
@@ -1132,7 +1162,14 @@ def run_gp_evolution(
         f'depth_penalty_quadratic_coef={depth_penalty_quadratic_coef}, '
         f'apply_rolling_norm={apply_rolling_norm}, '
         f'small_factor_penalty_coef={small_factor_penalty_coef}, '
-        f'assumed_initial_capital={assumed_initial_capital}'
+        f'assumed_initial_capital={assumed_initial_capital}, '
+        f'enable_gradient_descent={bool(enable_gradient_descent)}, '
+        f'gradient_descent_method={gradient_descent_method}, '
+        f'generation_per_gradient_descent={generation_per_gradient_descent}, '
+        f'gradient_descent_steps={gradient_descent_steps}, '
+        f'parametric_method={parametric_method}, '
+        f'gradient_descent_optimizer={gradient_descent_optimizer}, '
+        f'learning_rate={learning_rate}'
     )
 
     # ------------------------------------------------------------------
@@ -1176,6 +1213,33 @@ def run_gp_evolution(
             break
 
         log.info(f'GP generation {gen_idx + 1}/{generations} scoring started.')
+
+        if (
+            gd_config is not None
+            and optimize_tree_with_gradient_descent is not None
+            and gd_config.gradient_descent_method == 'alternated'
+            and gd_config.gradient_descent_steps > 0
+            and ((gen_idx + 1) % gd_config.generation_per_gradient_descent == 0)
+        ):
+            log.info(
+                f'[GPGD] generation {gen_idx + 1}/{generations}: refining '
+                f'{len(population)} individuals before EliteArchive comparison.'
+            )
+            population = [
+                optimize_tree_with_gradient_descent(
+                    tree=tree,
+                    df=df,
+                    fitness_indicator_dict=normalized_fitness_indicator_dict,
+                    config=gd_config,
+                    apply_rolling_norm=apply_rolling_norm,
+                    rolling_norm_window=rolling_norm_window,
+                    rolling_norm_min_periods=rolling_norm_min_periods,
+                    rolling_norm_eps=rolling_norm_eps,
+                    rolling_norm_clip=rolling_norm_clip,
+                )
+                for tree in population
+            ]
+
         scored_pop: List[Tuple[FactorNode, float]] = []
         penalized_fitness_values: List[float] = []
         original_fitness_values: List[float] = []
@@ -1480,6 +1544,55 @@ def run_gp_evolution(
         population = next_gen[:population_size]
 
     elite_candidates = elite_archive.get_elite_candidates_sorted()
+
+    if (
+        gd_config is not None
+        and optimize_tree_with_gradient_descent is not None
+        and gd_config.gradient_descent_method == 'consecutive'
+        and gd_config.gradient_descent_steps > 0
+        and elite_candidates
+    ):
+        log.info(f'[GPGD] consecutive mode: refining {len(elite_candidates)} final elite candidates.')
+        refined_candidates: List[GPCandidate] = []
+        for cand in elite_candidates:
+            refined_node = optimize_tree_with_gradient_descent(
+                tree=cand.node,
+                df=df,
+                fitness_indicator_dict=normalized_fitness_indicator_dict,
+                config=gd_config,
+                apply_rolling_norm=apply_rolling_norm,
+                rolling_norm_window=rolling_norm_window,
+                rolling_norm_min_periods=rolling_norm_min_periods,
+                rolling_norm_eps=rolling_norm_eps,
+                rolling_norm_clip=rolling_norm_clip,
+            )
+            penalized_fitness, original_fitness, sign = calc_fitness_and_sign(
+                refined_node,
+                df,
+                fitness_indicator_dict=normalized_fitness_indicator_dict,
+                depth_penalty_coef=depth_penalty_coef,
+                depth_penalty_start_depth=depth_penalty_start_depth,
+                depth_penalty_linear_coef=depth_penalty_linear_coef,
+                depth_penalty_quadratic_coef=depth_penalty_quadratic_coef,
+                apply_rolling_norm=apply_rolling_norm,
+                rolling_norm_window=rolling_norm_window,
+                rolling_norm_min_periods=rolling_norm_min_periods,
+                rolling_norm_eps=rolling_norm_eps,
+                rolling_norm_clip=rolling_norm_clip,
+                small_factor_penalty_coef=small_factor_penalty_coef,
+                assumed_initial_capital=assumed_initial_capital,
+                consistency_penalty_enabled=consistency_penalty_enabled,
+                consistency_penalty_coef=consistency_penalty_coef,
+            )
+            oriented_node = refined_node if sign > 0 else OpNeg(refined_node)
+            refined_candidates.append(GPCandidate(
+                node=oriented_node,
+                formula=oriented_node.to_formula(),
+                fitness=penalized_fitness,
+                original_fitness=original_fitness,
+                penalized_fitness=penalized_fitness,
+            ))
+        elite_candidates = sorted(refined_candidates, key=lambda x: x.penalized_fitness, reverse=True)
 
     # ------------------------------------------------------------------
     # 精英库中存储的是原始 tree（不含 OpRollNorm），以避免逐代嵌套。

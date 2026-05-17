@@ -337,6 +337,26 @@ class GPMiningParams(BaseModel):
     gp_assumed_initial_capital: float = 100000
     gp_elite_stagnation_generation_count: int = 4
     gp_max_shock_generation: int = 3
+    # GP+梯度下降：默认关闭，关闭时后端和核心 GP 逻辑保持原行为。
+    enable_gradient_descent: bool = False
+    # alternated: 每隔若干代在进入精英库前优化所有个体；consecutive: GP 全部结束后仅优化最终精英库。
+    gradient_descent_method: str = "alternated"
+    # alternated 模式下每隔多少 generation 执行一次梯度下降。
+    generation_per_gradient_descent: int = 1
+    # 每次梯度下降最大优化 step 数。
+    gradient_descent_steps: int = 20
+    # gpgd: 同一算子类型共享边权/窗口参数；opgd: 每个算子实例参数独立。
+    parametric_method: str = "opgd"
+    # PyTorch 优化器名称，支持 adam/adamw/sgd/rmsprop/adagrad。
+    gradient_descent_optimizer: str = "adam"
+    # 梯度下降学习率。
+    learning_rate: float = 0.01
+    # 连续多少个 step surrogate fitness 无提升则提前停止本次 GD。
+    gradient_descent_early_stopping_steps: int = 5
+    # 梯度裁剪阈值，提升数值稳定性；<=0 表示不裁剪。
+    gradient_clip_norm: float = 1.0
+    # 不可微算子平滑替身和窗口 soft blend 的温度参数。
+    gradient_soft_temperature: float = 10.0
     filter_net_return_mean: float = 0.05
     filter_net_return_yearly: float = 0.03
     filter_net_sharpe_mean: float = 0.5
@@ -1553,6 +1573,13 @@ def _normalize_auto_search_payload(raw_params: Dict[str, Any], version: str) -> 
 
 
 def _launch_mining_task(params: GPMiningParams, source: str = "manual") -> str:
+    if params.enable_gradient_descent:
+        from factors.gp_gradient_descent_config import validate_gradient_descent_fitness_indicators, NON_DIFFERENTIABLE_GP_FITNESS_HINT
+        try:
+            validate_gradient_descent_fitness_indicators(_normalize_fitness_indicator_dict(params))
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=f"{exc} {NON_DIFFERENTIABLE_GP_FITNESS_HINT}") from exc
+
     req_version = str(params.version).strip()
     if req_version:
         duplicated_running = [
@@ -1835,6 +1862,16 @@ def _execute_mining(params: GPMiningParams, task_id: str, cancel_event: threadin
             gp_small_factor_penalty_coef=params.gp_small_factor_penalty_coef,
             gp_elite_stagnation_generation_count=params.gp_elite_stagnation_generation_count,
             gp_max_shock_generation=params.gp_max_shock_generation,
+            enable_gradient_descent=params.enable_gradient_descent,
+            gradient_descent_method=params.gradient_descent_method,
+            generation_per_gradient_descent=params.generation_per_gradient_descent,
+            gradient_descent_steps=params.gradient_descent_steps,
+            parametric_method=params.parametric_method,
+            gradient_descent_optimizer=params.gradient_descent_optimizer,
+            learning_rate=params.learning_rate,
+            gradient_descent_early_stopping_steps=params.gradient_descent_early_stopping_steps,
+            gradient_clip_norm=params.gradient_clip_norm,
+            gradient_soft_temperature=params.gradient_soft_temperature,
             consistency_penalty_enabled=params.consistency_penalty_enabled,
             consistency_penalty_coef=params.consistency_penalty_coef,
             outsample_ratio=params.outsample_ratio,

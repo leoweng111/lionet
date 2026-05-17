@@ -223,6 +223,39 @@
               </el-col>
 
               <el-col :xs="24" :sm="24" :md="12" :lg="12" :xl="12">
+            <div class="param-section gd-section"><el-divider content-position="center">GP + 梯度下降</el-divider>
+              <el-alert
+                title="启用后会为 GP 树边权、常量和时序窗口加入可学习参数；默认关闭时保持传统 GP 流程。"
+                type="info"
+                :closable="false"
+                show-icon
+                class="gd-tip"
+              />
+              <el-row :gutter="12">
+                <el-col :span="8"><el-form-item label="启用"><el-switch v-model="params.enable_gradient_descent" /></el-form-item></el-col>
+                <el-col :span="8"><el-form-item label="执行方式"><el-select v-model="params.gradient_descent_method" :disabled="!params.enable_gradient_descent" style="width:100%"><el-option label="alternated" value="alternated" /><el-option label="consecutive" value="consecutive" /></el-select></el-form-item></el-col>
+                <el-col :span="8"><el-form-item label="参数化"><el-select v-model="params.parametric_method" :disabled="!params.enable_gradient_descent" style="width:100%"><el-option label="OPGD（实例独立）" value="opgd" /><el-option label="GPGD（同类共享）" value="gpgd" /></el-select></el-form-item></el-col>
+              </el-row>
+              <el-row :gutter="12">
+                <el-col :span="8"><el-form-item label="间隔代数"><el-input-number v-model="params.generation_per_gradient_descent" :min="1" :max="100" :disabled="!params.enable_gradient_descent || params.gradient_descent_method !== 'alternated'" style="width:100%" /></el-form-item></el-col>
+                <el-col :span="8"><el-form-item label="GD Steps"><el-input-number v-model="params.gradient_descent_steps" :min="1" :max="500" :disabled="!params.enable_gradient_descent" style="width:100%" /></el-form-item></el-col>
+                <el-col :span="8"><el-form-item label="早停Steps"><el-input-number v-model="params.gradient_descent_early_stopping_steps" :min="0" :max="100" :disabled="!params.enable_gradient_descent" style="width:100%" /></el-form-item></el-col>
+              </el-row>
+              <el-row :gutter="12">
+                <el-col :span="8"><el-form-item label="优化器"><el-select v-model="params.gradient_descent_optimizer" :disabled="!params.enable_gradient_descent" style="width:100%"><el-option label="Adam" value="adam" /><el-option label="AdamW" value="adamw" /><el-option label="SGD" value="sgd" /><el-option label="RMSprop" value="rmsprop" /><el-option label="Adagrad" value="adagrad" /></el-select></el-form-item></el-col>
+                <el-col :span="8"><el-form-item label="学习率"><el-input-number v-model="params.learning_rate" :min="0.000001" :max="1" :step="0.001" :precision="6" :disabled="!params.enable_gradient_descent" style="width:100%" /></el-form-item></el-col>
+                <el-col :span="8"><el-form-item label="梯度裁剪"><el-input-number v-model="params.gradient_clip_norm" :min="0" :max="100" :step="0.1" :precision="2" :disabled="!params.enable_gradient_descent" style="width:100%" /></el-form-item></el-col>
+              </el-row>
+              <el-form-item label="平滑温度">
+                <el-input-number v-model="params.gradient_soft_temperature" :min="0.1" :max="50" :step="0.5" :precision="2" :disabled="!params.enable_gradient_descent" style="width:100%" />
+              </el-form-item>
+              <div class="gd-warning" v-if="params.enable_gradient_descent && nonDifferentiableFitnessIndicators.length">
+                当前选择了不可微 fitness：{{ nonDifferentiableFitnessIndicators.join(', ') }}。请将这些权重设为 0 后再启动。
+              </div>
+            </div>
+              </el-col>
+
+              <el-col :xs="24" :sm="24" :md="12" :lg="12" :xl="12">
             <div class="param-section"><el-divider content-position="center">筛选阈值</el-divider>
               <div v-for="indicator in supportedIndicators" :key="`filter-${indicator}`" class="filter-row">
                 <div class="filter-row-title">{{ indicator }}（方向: {{ (indicatorDirection[indicator] || 1) === 1 ? '越大越好' : '越小越好' }}）</div>
@@ -303,6 +336,7 @@ const MINING_TAB_KEY = 'GP_MINING_ACTIVE_TAB'
 
 const supportedIndicators = ref(['Net Return', 'Net Sharpe', 'TS IC'])
 const indicatorDirection = ref({ 'Net Return': 1, 'Net Sharpe': 1, 'TS IC': 1 })
+const differentiableFitnessIndicators = new Set(['TS IC', 'Gross Return', 'Net Return', 'Gross Sharpe', 'Net Sharpe', 'Gross Volatility', 'Net Volatility', 'Turnover'])
 const serverDefaultFitnessWeight = ref({})
 const serverDefaultFilterIndicatorDict = ref({})
 
@@ -360,6 +394,16 @@ const defaultParams = () => ({
   gp_depth_penalty_quadratic_coef: 0.0, gp_log_interval: 1,
   gp_small_factor_penalty_coef: 0.0, gp_assumed_initial_capital: 100000,
   gp_elite_stagnation_generation_count: 4, gp_max_shock_generation: 3,
+  enable_gradient_descent: false,
+  gradient_descent_method: 'alternated',
+  generation_per_gradient_descent: 1,
+  gradient_descent_steps: 20,
+  parametric_method: 'opgd',
+  gradient_descent_optimizer: 'adam',
+  learning_rate: 0.01,
+  gradient_descent_early_stopping_steps: 5,
+  gradient_clip_norm: 1.0,
+  gradient_soft_temperature: 10.0,
   consistency_penalty_enabled: false, consistency_penalty_coef: 1.0,
   outsample_ratio: 0.0, outsample_start_time: '20250101', outsample_end_time: '20251231',
   filter_indicator_dict: Object.keys(serverDefaultFilterIndicatorDict.value || {}).length
@@ -560,6 +604,10 @@ watch(() => autoMiningSettings, () => {
 const mining = ref(false), taskId = ref(''), taskStatus = ref(''), taskProgress = ref(''), taskError = ref('')
 const miningResult = ref(null), navCurves = ref({}), perfSummary = ref([]), perfColumns = ref([])
 const statusTag = computed(() => taskStatus.value==='completed'?'success':taskStatus.value==='failed'?'danger':'warning')
+const nonDifferentiableFitnessIndicators = computed(() => supportedIndicators.value.filter((indicator) => {
+  const weight = _toNullableNumber(params.fitness_indicator_dict?.[indicator]) || 0
+  return Math.abs(weight) > 1e-12 && !differentiableFitnessIndicators.has(indicator)
+}))
 let pollTimer = null
 
 const _toNullableNumber = (raw) => {
@@ -649,6 +697,10 @@ const handleStartMining = async () => {
     : [manualVersion]
   if (!versionList[0]) {
     ElMessage.warning('版本号不能为空')
+    return
+  }
+  if (params.enable_gradient_descent && nonDifferentiableFitnessIndicators.value.length) {
+    ElMessage.warning(`GP+梯度下降仅支持可微 fitness。请将以下指标权重设为0：${nonDifferentiableFitnessIndicators.value.join(', ')}`)
     return
   }
 

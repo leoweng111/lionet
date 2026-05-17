@@ -56,6 +56,16 @@ It includes 3 sub-tests:
 2. **Simulate Backend Mining** — Mirrors `main.py` `_execute_mining` parameter construction (all params, normalize logic), catches param-passing mismatches between backend and core.
 3. **Simulate Backend Fusion** — Mirrors `main.py` `_execute_fusion` parameter construction for `FactorFusioner`, verifies `fusion_indicator_dict` and outsample params (`outsample_ratio`, `outsample_start_time`, `outsample_end_time`) are correctly passed through.
 
+### GP + Gradient Descent Smoke Test
+```bash
+# Run GP+GD mining smoke test: alternated full mining flow, consecutive elite refinement, non-differentiable fitness rejection
+python -u test/gp_gradient_descent_smoke.py
+```
+This test verifies the optional GP+gradient-descent pipeline runs without changing the legacy GP path when disabled:
+- Runs `GeneticFactorGenerator.auto_mine_select_and_save_fc()` on synthetic C0 data with `enable_gradient_descent=True`, `gradient_descent_method='alternated'`, small population/generation count, and extreme filter thresholds so no factor is saved to DB.
+- Runs `run_gp_evolution()` with `gradient_descent_method='consecutive'` to verify final elite refinement.
+- Asserts non-differentiable fitness metrics such as `TS RankIC` are rejected before mining starts.
+
 ### Fusion Smoke Test
 ```bash
 # Run factor fusion smoke test: full fusion pipeline with real DB factors
