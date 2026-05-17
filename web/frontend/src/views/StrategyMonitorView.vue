@@ -295,14 +295,13 @@ const fmtSelectedRangeCumulative = computed(() => {
 })
 
 const resetParams = async () => {
-  const keep = { version: sp.version, factor_name: sp.factor_name, collection: sp.collection }
   try {
     const { data } = await resetPageConfig('strategy_monitor')
     const serverDefaults = data?.data || {}
     Object.assign(sp, {
-      version: keep.version,
-      factor_name: keep.factor_name,
-      collection: keep.collection,
+      version: serverDefaults.version || '',
+      factor_name: serverDefaults.factor_name || '',
+      collection: serverDefaults.collection || 'genetic_programming',
       instrument_id: serverDefaults.instrument_id || 'C0',
       trading_start_time: serverDefaults.trading_start_time || '20200101',
       database: serverDefaults.database || 'factors',
@@ -318,14 +317,16 @@ const resetParams = async () => {
       signal_delay_days: serverDefaults.signal_delay_days ?? 1,
       min_open_ratio: serverDefaults.min_open_ratio ?? 1.0,
     })
+    autoMonitorEnabled.value = serverDefaults.auto_monitor_enabled ?? false
+    autoMonitorTime.value = serverDefaults.auto_monitor_time || '20:15'
   } catch {
     Object.assign(sp, {
-      version: keep.version,
-      factor_name: keep.factor_name,
+      version: '',
+      factor_name: '',
       instrument_id: 'C0',
       trading_start_time: '20200101',
       database: 'factors',
-      collection: keep.collection,
+      collection: 'genetic_programming',
       initial_capital: 1000000,
       margin_rate: 0.1,
       fee_per_lot: 2.0,
@@ -338,6 +339,8 @@ const resetParams = async () => {
       signal_delay_days: 1,
       min_open_ratio: 1.0,
     })
+    autoMonitorEnabled.value = false
+    autoMonitorTime.value = '20:15'
   }
   monitor.value = null
   summaryRows.value = []

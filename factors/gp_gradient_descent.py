@@ -993,7 +993,6 @@ class _ParametricTorchEvaluator(_TorchModuleBase):  # type: ignore[misc]
     def materialize(self) -> FactorNode:
         """
         将最终经过梯度下降优化后的参数值应用到原始因子树上，生成一个新的、具体的因子树。
-
         """
         root = self._materialize_node(self.root, 'root')
         scale = float(self.root_scale.detach().cpu().item())

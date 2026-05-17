@@ -159,7 +159,7 @@
 <script setup>
 import { computed, reactive, ref, onMounted, onUnmounted, watch } from 'vue'
 import { ElMessage } from 'element-plus'
-import { getVersions, startFusion, getFusionStatus, getFusionIndicatorOptions, updateFusionIndicatorOptions, resetPageConfig } from '../api'
+import { getVersions, startFusion, getFusionStatus, getFusionIndicatorOptions, updateFusionIndicatorOptions, getPageConfig, savePageConfig, resetPageConfig } from '../api'
 import NavChart from '../components/NavChart.vue'
 
 const today = () => new Date().toISOString().slice(0, 10).replace(/-/g, '')
@@ -219,6 +219,7 @@ const collections = ref([])
 const allVersions = ref([])
 let pollTimer = null
 let saveFusionDictTimer = null
+let saveConfigTimer = null
 
 const selectedFactors = computed(() => result.value?.selected_factors_detail || [])
 
@@ -239,6 +240,37 @@ const resetParams = async () => {
     _selectedCollections.value = ['genetic_programming']
     _selectedVersions.value = []
   }
+}
+
+const _applySavedConfig = (saved = {}) => {
+  const merged = { ...defaults(), ...(saved || {}) }
+  merged.fusion_indicator_dict = {
+    ..._buildDefaultFusionIndicatorDict(supportedIndicators.value),
+    ...(merged.fusion_indicator_dict || {}),
+  }
+  Object.assign(p, merged)
+  _selectedCollections.value = saved.selected_collections || ['genetic_programming']
+  _selectedVersions.value = saved.selected_versions || []
+}
+
+const _loadSavedConfig = async () => {
+  try {
+    const { data } = await getPageConfig('fusion')
+    _applySavedConfig(data?.saved || {})
+  } catch { /* ignore */ }
+}
+
+const _buildConfigState = () => ({
+  ...p,
+  selected_collections: _selectedCollections.value,
+  selected_versions: _selectedVersions.value,
+})
+
+const _queueSaveConfig = () => {
+  if (saveConfigTimer) clearTimeout(saveConfigTimer)
+  saveConfigTimer = setTimeout(async () => {
+    try { await savePageConfig('fusion', _buildConfigState()) } catch { /* silent */ }
+  }, 500)
 }
 
 const formatMetrics = (m) => {
@@ -280,6 +312,10 @@ const _queueSaveFusionDict = () => {
 
 watch(() => p.fusion_indicator_dict, () => {
   _queueSaveFusionDict()
+}, { deep: true })
+
+watch(() => _buildConfigState(), () => {
+  _queueSaveConfig()
 }, { deep: true })
 
 const loadMeta = async () => {
@@ -368,10 +404,14 @@ const run = async () => {
   }
 }
 
-onMounted(loadMeta)
+onMounted(async () => {
+  await loadMeta()
+  await _loadSavedConfig()
+})
 onUnmounted(() => {
   if (pollTimer) clearInterval(pollTimer)
   if (saveFusionDictTimer) clearTimeout(saveFusionDictTimer)
+  if (saveConfigTimer) clearTimeout(saveConfigTimer)
 })
 </script>
 

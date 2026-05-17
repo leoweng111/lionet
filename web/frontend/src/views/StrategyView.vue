@@ -96,13 +96,14 @@
 <script setup>
 import { ref, reactive, computed, onMounted, watch } from 'vue'
 import { ElMessage } from 'element-plus'
-import { getVersions, getFactors, runStrategy, resetPageConfig } from '../api'
+import { getVersions, getFactors, runStrategy, getPageConfig, savePageConfig, resetPageConfig } from '../api'
 import NavChart from '../components/NavChart.vue'
 
 const SK = 'lionet_strat'
 const collections = ref([]), versionMap = ref({}), allVersions = ref([]), availableFactors = ref([])
 const running = ref(false), results = ref([])
 const factorFormulaMap = ref({})
+let configSaveTimer = null
 
 // IS / OOS / Real-OOS range params
 const oosStart = ref('20250101')
@@ -130,6 +131,15 @@ const _buildPersistState = () => ({
   realOosStart: realOosStart.value,
   realOosEnd: realOosEnd.value,
   results: results.value,
+})
+
+const _buildConfigState = () => ({
+  ...sp,
+  oos_start: oosStart.value,
+  oos_end: oosEnd.value,
+  enable_real_oos: enableRealOos.value,
+  real_oos_start: realOosStart.value,
+  real_oos_end: realOosEnd.value,
 })
 
 const _restorePersistState = () => {
@@ -205,6 +215,48 @@ const resetParams = async () => {
     realOosStart.value = '20260101'
     realOosEnd.value = '20260330'
   }
+}
+
+const _applySavedConfig = (saved = {}) => {
+  Object.assign(sp, {
+    version: saved.version || '',
+    factor_name_list: Array.isArray(saved.factor_name_list) ? saved.factor_name_list : [],
+    instrument_id: saved.instrument_id || 'C0',
+    start_time: saved.start_time || '20200101',
+    end_time: saved.end_time || '20241231',
+    database: saved.database || 'factors',
+    collection: saved.collection || 'genetic_programming',
+    initial_capital: saved.initial_capital || 1000000,
+    margin_rate: saved.margin_rate || 0.1,
+    fee_per_lot: saved.fee_per_lot ?? 2.0,
+    slippage: saved.slippage ?? 1.0,
+    apply_rolling_norm: saved.apply_rolling_norm ?? true,
+    rolling_norm_window: saved.rolling_norm_window || 30,
+    rolling_norm_min_periods: saved.rolling_norm_min_periods || 20,
+    rolling_norm_eps: saved.rolling_norm_eps ?? 1e-8,
+    rolling_norm_clip: saved.rolling_norm_clip ?? 5.0,
+    signal_delay_days: saved.signal_delay_days ?? 1,
+    min_open_ratio: saved.min_open_ratio ?? 1.0,
+  })
+  oosStart.value = saved.oos_start || '20250101'
+  oosEnd.value = saved.oos_end || '20251231'
+  enableRealOos.value = !!saved.enable_real_oos
+  realOosStart.value = saved.real_oos_start || '20260101'
+  realOosEnd.value = saved.real_oos_end || '20260330'
+}
+
+const _loadSavedConfig = async () => {
+  try {
+    const { data } = await getPageConfig('strategy')
+    _applySavedConfig(data?.saved || {})
+  } catch { /* ignore */ }
+}
+
+const _queueSaveConfig = () => {
+  if (configSaveTimer) clearTimeout(configSaveTimer)
+  configSaveTimer = setTimeout(async () => {
+    try { await savePageConfig('strategy', _buildConfigState()) } catch { /* silent */ }
+  }, 500)
 }
 
 const fetchVersions = async () => {
@@ -336,9 +388,11 @@ const handleRun = async () => {
 const clearResults = () => { results.value = [] }
 watch(() => _buildPersistState(), (state) => {
   try { sessionStorage.setItem(SK, JSON.stringify(state)) } catch { /* */ }
+  _queueSaveConfig()
 }, { deep: true })
-onMounted(() => {
+onMounted(async () => {
   _restorePersistState()
+  await _loadSavedConfig()
   fetchVersions()
   if (sp.version) {
     onVerChange(true)

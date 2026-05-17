@@ -82,7 +82,7 @@
 <script setup>
 import { ref, reactive, computed, watch, onMounted } from 'vue'
 import { ElMessage } from 'element-plus'
-import { getVersions, getFactors, runBacktest, resetPageConfig } from '../api'
+import { getVersions, getFactors, runBacktest, getPageConfig, savePageConfig, resetPageConfig } from '../api'
 import NavChart from '../components/NavChart.vue'
 
 const SK = 'lionet_backtest'
@@ -98,6 +98,7 @@ const enableRealOos = ref(false)
 const realOosStart = ref('20260101')
 const realOosEnd = ref('20260330')
 const resultMap = ref(null)
+let configSaveTimer = null
 
 const p = reactive({
   version: '', fc_name_list: [], collection: 'genetic_programming', instrument_type: 'futures_continuous_contract',
@@ -115,6 +116,17 @@ const _buildPersistState = () => ({
   realOosStart: realOosStart.value,
   realOosEnd: realOosEnd.value,
   resultMap: resultMap.value,
+})
+
+const _buildConfigState = () => ({
+  ...p,
+  inputMode: inputMode.value,
+  formulaInput: formulaInput.value,
+  oos_start: oosStart.value,
+  oos_end: oosEnd.value,
+  enable_real_oos: enableRealOos.value,
+  real_oos_start: realOosStart.value,
+  real_oos_end: realOosEnd.value,
 })
 
 const _restorePersistState = () => {
@@ -168,6 +180,36 @@ const resetParams = async () => {
   }
   formulaInput.value = ''
   resultMap.value = null
+}
+
+const _applySavedConfig = (saved = {}) => {
+  const localDefaults = {
+    version: '', fc_name_list: [], collection: 'genetic_programming', instrument_type: 'futures_continuous_contract',
+    instrument_id_list: 'C0', fc_freq: '1d', start_time: '20200101', end_time: '20241231', portfolio_adjust_method: '1D',
+    interest_method: 'simple', risk_free_rate: false, calculate_baseline: true, apply_weighted_price: true, n_jobs: 5,
+  }
+  Object.assign(p, { ...localDefaults, ...saved, version: saved.version || '', fc_name_list: saved.fc_name_list || [] })
+  inputMode.value = saved.inputMode || saved.input_mode || 'db'
+  formulaInput.value = saved.formulaInput || saved.formula_input || ''
+  oosStart.value = saved.oos_start || '20250101'
+  oosEnd.value = saved.oos_end || '20251231'
+  enableRealOos.value = !!saved.enable_real_oos
+  realOosStart.value = saved.real_oos_start || '20260101'
+  realOosEnd.value = saved.real_oos_end || '20260330'
+}
+
+const _loadSavedConfig = async () => {
+  try {
+    const { data } = await getPageConfig('backtest')
+    _applySavedConfig(data?.saved || {})
+  } catch { /* ignore */ }
+}
+
+const _queueSaveConfig = () => {
+  if (configSaveTimer) clearTimeout(configSaveTimer)
+  configSaveTimer = setTimeout(async () => {
+    try { await savePageConfig('backtest', _buildConfigState()) } catch { /* silent */ }
+  }, 500)
 }
 
 const fetchVersions = async () => {
@@ -355,10 +397,12 @@ watch(() => _buildPersistState(), (state) => {
   } catch {
     // noop
   }
+  _queueSaveConfig()
 }, { deep: true })
 
-onMounted(() => {
+onMounted(async () => {
   _restorePersistState()
+  await _loadSavedConfig()
   fetchVersions()
   if (p.version) {
     onVerChange(true)

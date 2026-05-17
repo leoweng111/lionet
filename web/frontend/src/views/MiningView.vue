@@ -109,17 +109,19 @@
                 <el-col :span="8"><el-form-item label="复权"><el-switch v-model="params.apply_weighted_price" /></el-form-item></el-col>
               </el-row>
               <el-row :gutter="12">
-                <el-col :span="8">
+                <el-col :span="24">
                   <el-form-item label="样本外比例">
                     <el-input-number v-model="params.outsample_ratio" :min="0" :max="1" :step="0.05" :precision="2" style="width:100%" />
                   </el-form-item>
                 </el-col>
-                <el-col :span="8">
+              </el-row>
+              <el-row :gutter="12">
+                <el-col :span="12">
                   <el-form-item label="样本外开始">
                     <el-input v-model="params.outsample_start_time" placeholder="20250101" :disabled="!params.outsample_ratio" />
                   </el-form-item>
                 </el-col>
-                <el-col :span="8">
+                <el-col :span="12">
                   <el-form-item label="样本外结束">
                     <el-input v-model="params.outsample_end_time" placeholder="20251231" :disabled="!params.outsample_ratio" />
                   </el-form-item>
@@ -423,6 +425,7 @@ const autoMiningSettings = reactive({
   taskCount: 1,
 })
 const autoConfigReady = ref(false)
+const manualConfigReady = ref(false)
 let autoConfigSaveTimer = null
 let manualConfigSaveTimer = null
 let schedulerStatusTimer = null
@@ -487,6 +490,20 @@ const _loadAutoParams = (savedParams = {}, savedWeight = {}) => {
   Object.assign(params, next)
 }
 
+const _loadManualParams = (savedParams = {}) => {
+  const next = { ...defaultParams(), ...(savedParams || {}) }
+  next.fitness_indicator_dict = {
+    ..._buildDefaultFitnessIndicatorWeight(supportedIndicators.value),
+    ...(next.fitness_indicator_dict || {}),
+  }
+  next.filter_indicator_dict = {
+    ...(defaultParams().filter_indicator_dict || {}),
+    ...(next.filter_indicator_dict || {}),
+  }
+  Object.assign(params, next)
+  manualParamsSnapshot.value = _clone(params)
+}
+
 const _applyAutoSettings = (saved = {}) => {
   autoMiningSettings.enabled = !!saved.enabled
   autoMiningSettings.scheduleTime = saved.schedule_time || saved.scheduleTime || '18:00'
@@ -518,9 +535,25 @@ const _queueSaveAutoConfig = () => {
   }, 300)
 }
 
+const _saveManualConfig = async () => {
+  if (!manualConfigReady.value || activeMiningTab.value !== 'start') return
+  try {
+    await savePageConfig('gp_mining_start', _clone(params))
+    manualParamsSnapshot.value = _clone(params)
+  } catch {
+    // silent; backend may be temporarily unavailable while editing
+  }
+}
+
+const _queueSaveManualConfig = () => {
+  if (manualConfigSaveTimer) clearTimeout(manualConfigSaveTimer)
+  manualConfigSaveTimer = setTimeout(_saveManualConfig, 300)
+}
+
 const resetParams = async () => {
   try {
-    const { data } = await resetPageConfig('gp_mining')
+    const pageName = activeMiningTab.value === 'auto' ? 'gp_mining_auto' : 'gp_mining_start'
+    const { data } = await resetPageConfig(pageName)
     const serverDefaults = data?.data || {}
     const merged = { ...defaultParams(), ...serverDefaults }
     // Ensure filter/fitness dicts have all indicators
@@ -533,6 +566,7 @@ const resetParams = async () => {
       ...(serverDefaults.filter_indicator_dict || {}),
     }
     Object.assign(params, merged)
+    if (activeMiningTab.value === 'auto') _applyAutoSettings(serverDefaults)
   } catch {
     Object.assign(params, defaultParams())
   }
@@ -550,26 +584,28 @@ onMounted(async () => {
     _loadSchedulerStatus()
   }, 5000)
   try {
-    const [{ data: indicatorData }, { data: autoConfig }] = await Promise.all([
+    const [{ data: indicatorData }, { data: autoConfig }, { data: manualConfig }] = await Promise.all([
       getMiningIndicatorOptions(),
       getMiningAutoConfig(),
+      getPageConfig('gp_mining_start'),
     ])
     supportedIndicators.value = indicatorData.supported_indicator || supportedIndicators.value
     indicatorDirection.value = indicatorData.indicator_direction || indicatorDirection.value
     serverDefaultFitnessWeight.value = indicatorData.default_fitness_indicator_weight || {}
     serverDefaultFilterIndicatorDict.value = indicatorData.default_filter_indicator_dict || {}
 
-    Object.assign(params, defaultParams())
-    manualParamsSnapshot.value = _clone(params)
+    _loadManualParams(manualConfig?.saved || {})
 
     _applyAutoSettings(autoConfig.auto_search_settings || {})
     const savedWeight = autoConfig.default_fitness_indicator_weight || {}
     if (activeMiningTab.value === 'auto') {
       _loadAutoParams(autoConfig.auto_search_params || {}, savedWeight)
     }
+    manualConfigReady.value = true
     autoConfigReady.value = true
   } catch {
     // fallback to local defaults when backend config endpoint is unavailable
+    manualConfigReady.value = true
     autoConfigReady.value = true
   }
 })
@@ -580,6 +616,7 @@ watch(activeMiningTab, (next, prev) => {
     manualParamsSnapshot.value = _clone(params)
   }
   if (next === 'auto') {
+    _saveManualConfig()
     getMiningAutoConfig()
       .then(({ data }) => {
         _applyAutoSettings(data.auto_search_settings || {})
@@ -589,12 +626,15 @@ watch(activeMiningTab, (next, prev) => {
         _loadAutoParams({}, {})
       })
   } else {
-    Object.assign(params, _clone(manualParamsSnapshot.value || defaultParams()))
+    getPageConfig('gp_mining_start')
+      .then(({ data }) => _loadManualParams(data?.saved || manualParamsSnapshot.value || {}))
+      .catch(() => Object.assign(params, _clone(manualParamsSnapshot.value || defaultParams())))
   }
 })
 
 watch(() => params, () => {
   if (activeMiningTab.value === 'auto') _queueSaveAutoConfig()
+  else _queueSaveManualConfig()
 }, { deep: true })
 
 watch(() => autoMiningSettings, () => {
@@ -744,6 +784,7 @@ onUnmounted(() => {
     _saveAutoConfig()
     if (pollTimer) clearInterval(pollTimer)
     if (autoConfigSaveTimer) clearTimeout(autoConfigSaveTimer)
+    if (manualConfigSaveTimer) clearTimeout(manualConfigSaveTimer)
     if (schedulerStatusTimer) clearInterval(schedulerStatusTimer)
     console.log('MiningView onUnmounted finished');
   } catch (e) {

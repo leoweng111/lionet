@@ -72,17 +72,19 @@
                 <el-col :span="8"><el-form-item label="复权"><el-switch v-model="params.apply_weighted_price" /></el-form-item></el-col>
               </el-row>
               <el-row :gutter="12">
-                <el-col :span="8">
+                <el-col :span="24">
                   <el-form-item label="样本外比例">
                     <el-input-number v-model="params.outsample_ratio" :min="0" :max="1" :step="0.05" :precision="2" style="width:100%" />
                   </el-form-item>
                 </el-col>
-                <el-col :span="8">
+              </el-row>
+              <el-row :gutter="12">
+                <el-col :span="12">
                   <el-form-item label="样本外开始">
                     <el-input v-model="params.outsample_start_time" placeholder="20250101" :disabled="!params.outsample_ratio" />
                   </el-form-item>
                 </el-col>
-                <el-col :span="8">
+                <el-col :span="12">
                   <el-form-item label="样本外结束">
                     <el-input v-model="params.outsample_end_time" placeholder="20251231" :disabled="!params.outsample_ratio" />
                   </el-form-item>
@@ -207,14 +209,15 @@
 </template>
 
 <script setup>
-import { ref, reactive, computed, onMounted, onUnmounted } from 'vue'
+import { ref, reactive, computed, onMounted, onUnmounted, watch } from 'vue'
 import { ElMessage } from 'element-plus'
-import { getLLMProfiles, startLLMMining, getLLMMiningStatus, terminateLLMMining, getMiningIndicatorOptions, resetPageConfig } from '../api'
+import { getLLMProfiles, startLLMMining, getLLMMiningStatus, terminateLLMMining, getMiningIndicatorOptions, getPageConfig, savePageConfig, resetPageConfig } from '../api'
 import NavChart from '../components/NavChart.vue'
 
 const supportedIndicators = ref(['Net Return', 'Net Sharpe', 'TS IC'])
 const indicatorDirection = ref({ 'Net Return': 1, 'Net Sharpe': 1, 'TS IC': 1 })
 const llmProfiles = ref([])
+const _clone = (obj) => JSON.parse(JSON.stringify(obj))
 
 const _buildDefaultFilterIndicatorDict = (indicators, directionMap) => {
   const out = {}
@@ -261,13 +264,16 @@ const defaultParams = () => ({
   filter_indicator_dict: _buildDefaultFilterIndicatorDict(supportedIndicators.value, indicatorDirection.value),
 })
 
-const activeMiningTab = ref('start')
+const LLM_MINING_TAB_KEY = 'LLM_MINING_ACTIVE_TAB'
+const activeMiningTab = ref(localStorage.getItem(LLM_MINING_TAB_KEY) || 'start')
 const params = reactive(defaultParams())
 const autoMiningSettings = reactive({
   enabled: false,
   scheduleTime: '18:00',
   taskCount: 1,
 })
+const configReady = ref(false)
+let configSaveTimer = null
 
 const autoVersionPreview = computed(() => {
   const datePart = _localDateText()
@@ -278,7 +284,8 @@ const autoVersionPreview = computed(() => {
 
 const resetParams = async () => {
   try {
-    const { data } = await resetPageConfig('llm_mining')
+    const pageName = activeMiningTab.value === 'auto' ? 'llm_mining_auto' : 'llm_mining_start'
+    const { data } = await resetPageConfig(pageName)
     const serverDefaults = data?.data || {}
     const merged = { ...defaultParams(), ...serverDefaults }
     merged.filter_indicator_dict = {
@@ -286,8 +293,54 @@ const resetParams = async () => {
       ...(serverDefaults.filter_indicator_dict || {}),
     }
     Object.assign(params, merged)
+    if (activeMiningTab.value === 'auto') {
+      autoMiningSettings.enabled = !!serverDefaults.enabled
+      autoMiningSettings.scheduleTime = serverDefaults.schedule_time || serverDefaults.scheduleTime || '18:00'
+      autoMiningSettings.taskCount = Number(serverDefaults.task_count ?? serverDefaults.taskCount) > 0 ? Number(serverDefaults.task_count ?? serverDefaults.taskCount) : 1
+    }
   } catch {
     Object.assign(params, defaultParams())
+  }
+}
+
+const _applyPageConfig = (saved = {}) => {
+  const merged = { ...defaultParams(), ...(saved || {}) }
+  merged.filter_indicator_dict = {
+    ..._buildDefaultFilterIndicatorDict(supportedIndicators.value, indicatorDirection.value),
+    ...(merged.filter_indicator_dict || {}),
+  }
+  Object.assign(params, merged)
+  if (activeMiningTab.value === 'auto') {
+    autoMiningSettings.enabled = !!saved.enabled
+    autoMiningSettings.scheduleTime = saved.schedule_time || saved.scheduleTime || '18:00'
+    autoMiningSettings.taskCount = Number(saved.task_count ?? saved.taskCount) > 0 ? Number(saved.task_count ?? saved.taskCount) : 1
+  }
+}
+
+const _savePageConfig = async () => {
+  if (!configReady.value) return
+  const pageName = activeMiningTab.value === 'auto' ? 'llm_mining_auto' : 'llm_mining_start'
+  const payload = _clone(params)
+  if (activeMiningTab.value === 'auto') {
+    payload.enabled = autoMiningSettings.enabled
+    payload.schedule_time = autoMiningSettings.scheduleTime
+    payload.task_count = autoMiningSettings.taskCount
+  }
+  try { await savePageConfig(pageName, payload) } catch { /* silent */ }
+}
+
+const _queueSavePageConfig = () => {
+  if (configSaveTimer) clearTimeout(configSaveTimer)
+  configSaveTimer = setTimeout(_savePageConfig, 300)
+}
+
+const _loadPageConfig = async () => {
+  const pageName = activeMiningTab.value === 'auto' ? 'llm_mining_auto' : 'llm_mining_start'
+  try {
+    const { data } = await getPageConfig(pageName)
+    _applyPageConfig(data?.saved || {})
+  } catch {
+    _applyPageConfig({})
   }
 }
 
@@ -384,15 +437,24 @@ onMounted(async () => {
     if (llmProfiles.value.length && !llmProfiles.value.find(p => p.name === params.llm_profile_name)) {
       params.llm_profile_name = llmProfiles.value[0].name
     }
-    // Rebuild filter dict with correct indicators
-    params.filter_indicator_dict = _buildDefaultFilterIndicatorDict(supportedIndicators.value, indicatorDirection.value)
+    await _loadPageConfig()
+    configReady.value = true
   } catch {
-    // fallback
+    configReady.value = true
   }
 })
 
+watch(activeMiningTab, async (next) => {
+  localStorage.setItem(LLM_MINING_TAB_KEY, next)
+  await _loadPageConfig()
+})
+
+watch(() => params, () => _queueSavePageConfig(), { deep: true })
+watch(() => autoMiningSettings, () => _queueSavePageConfig(), { deep: true })
+
 onUnmounted(() => {
   if (pollTimer) clearInterval(pollTimer)
+  if (configSaveTimer) clearTimeout(configSaveTimer)
 })
 </script>
 

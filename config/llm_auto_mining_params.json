@@ -27,5 +27,8 @@
   "outsample_ratio": 0.0,
   "outsample_start_time": "20250101",
   "outsample_end_time": "20251231",
-  "filter_indicator_dict": {}
+  "filter_indicator_dict": {},
+  "enabled": false,
+  "schedule_time": "18:00",
+  "task_count": 1
 }

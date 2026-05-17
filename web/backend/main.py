@@ -80,10 +80,14 @@ GP_SUPPORTED_INDICATOR_FILE = "gp_supported_indicator.json"
 GP_INDICATOR_DIRECTION_FILE = "gp_indicator_direction.json"
 GP_DEFAULT_FITNESS_WEIGHT_FILE = "gp_default_fitness_indicator_weight.json"
 GP_DEFAULT_FILTER_DICT_FILE = "gp_default_filter_indicator_dict.json"
+GP_MINING_PARAMS_FILE = "gp_mining_params.json"
+GP_MINING_PARAMS_DEFAULT_FILE = "gp_mining_params_default.json"
 GP_AUTO_SEARCH_PARAMS_FILE = "gp_auto_search_params.json"
 GP_AUTO_SEARCH_PARAMS_DEFAULT_FILE = "gp_auto_search_params_default.json"
 LLM_MINING_PARAMS_FILE = "llm_mining_params.json"
 LLM_MINING_PARAMS_DEFAULT_FILE = "llm_mining_params_default.json"
+LLM_AUTO_MINING_PARAMS_FILE = "llm_auto_mining_params.json"
+LLM_AUTO_MINING_PARAMS_DEFAULT_FILE = "llm_auto_mining_params_default.json"
 FUSION_PARAMS_FILE = "fusion_params.json"
 FUSION_PARAMS_DEFAULT_FILE = "fusion_params_default.json"
 BACKTEST_PARAMS_FILE = "backtest_params.json"
@@ -1473,8 +1477,12 @@ async def update_mining_auto_config(params: MiningConfigUpdateParams):
 # ── Generic Page Config API ───────────────────────────────────────────
 
 _PAGE_CONFIG_MAP = {
-    "gp_mining": (GP_AUTO_SEARCH_PARAMS_FILE, GP_AUTO_SEARCH_PARAMS_DEFAULT_FILE),
+    "gp_mining": (GP_MINING_PARAMS_FILE, GP_MINING_PARAMS_DEFAULT_FILE),
+    "gp_mining_start": (GP_MINING_PARAMS_FILE, GP_MINING_PARAMS_DEFAULT_FILE),
+    "gp_mining_auto": (GP_AUTO_SEARCH_PARAMS_FILE, GP_AUTO_SEARCH_PARAMS_DEFAULT_FILE),
     "llm_mining": (LLM_MINING_PARAMS_FILE, LLM_MINING_PARAMS_DEFAULT_FILE),
+    "llm_mining_start": (LLM_MINING_PARAMS_FILE, LLM_MINING_PARAMS_DEFAULT_FILE),
+    "llm_mining_auto": (LLM_AUTO_MINING_PARAMS_FILE, LLM_AUTO_MINING_PARAMS_DEFAULT_FILE),
     "fusion": (FUSION_PARAMS_FILE, FUSION_PARAMS_DEFAULT_FILE),
     "backtest": (BACKTEST_PARAMS_FILE, BACKTEST_PARAMS_DEFAULT_FILE),
     "strategy": (STRATEGY_PARAMS_FILE, STRATEGY_PARAMS_DEFAULT_FILE),
