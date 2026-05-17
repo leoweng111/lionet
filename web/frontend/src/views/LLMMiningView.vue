@@ -239,6 +239,24 @@ const _buildDefaultFilterIndicatorDict = (indicators, directionMap) => {
   return out
 }
 
+const _normalizeFilterIndicatorDict = (rawConfig = {}) => {
+  const defaults = _buildDefaultFilterIndicatorDict(supportedIndicators.value, indicatorDirection.value)
+  const source = rawConfig && typeof rawConfig === 'object' && !Array.isArray(rawConfig) ? rawConfig : {}
+  const out = {}
+  supportedIndicators.value.forEach((indicator) => {
+    const rawItem = source[indicator]
+    const item = rawItem && typeof rawItem === 'object' && !Array.isArray(rawItem) ? rawItem : {}
+    out[indicator] = {
+      ...defaults[indicator],
+      ...item,
+      direction: Number(item.direction ?? indicatorDirection.value?.[indicator] ?? defaults[indicator]?.direction ?? 1),
+    }
+    if (out[indicator].mean_threshold === undefined) out[indicator].mean_threshold = null
+    if (out[indicator].yearly_threshold === undefined) out[indicator].yearly_threshold = null
+  })
+  return out
+}
+
 const _localDateText = () => {
   const d = new Date()
   const y = d.getFullYear()
@@ -288,10 +306,7 @@ const resetParams = async () => {
     const { data } = await resetPageConfig(pageName)
     const serverDefaults = data?.data || {}
     const merged = { ...defaultParams(), ...serverDefaults }
-    merged.filter_indicator_dict = {
-      ..._buildDefaultFilterIndicatorDict(supportedIndicators.value, indicatorDirection.value),
-      ...(serverDefaults.filter_indicator_dict || {}),
-    }
+    merged.filter_indicator_dict = _normalizeFilterIndicatorDict(serverDefaults.filter_indicator_dict)
     Object.assign(params, merged)
     if (activeMiningTab.value === 'auto') {
       autoMiningSettings.enabled = !!serverDefaults.enabled
@@ -305,10 +320,7 @@ const resetParams = async () => {
 
 const _applyPageConfig = (saved = {}) => {
   const merged = { ...defaultParams(), ...(saved || {}) }
-  merged.filter_indicator_dict = {
-    ..._buildDefaultFilterIndicatorDict(supportedIndicators.value, indicatorDirection.value),
-    ...(merged.filter_indicator_dict || {}),
-  }
+  merged.filter_indicator_dict = _normalizeFilterIndicatorDict(merged.filter_indicator_dict)
   Object.assign(params, merged)
   if (activeMiningTab.value === 'auto') {
     autoMiningSettings.enabled = !!saved.enabled
@@ -431,8 +443,9 @@ onMounted(async () => {
       getMiningIndicatorOptions(),
       getLLMProfiles(),
     ])
-    supportedIndicators.value = indData.supported_indicator || supportedIndicators.value
     indicatorDirection.value = indData.indicator_direction || indicatorDirection.value
+    supportedIndicators.value = indData.supported_indicator || supportedIndicators.value
+    params.filter_indicator_dict = _normalizeFilterIndicatorDict(params.filter_indicator_dict)
     llmProfiles.value = profileData.profiles || []
     if (llmProfiles.value.length && !llmProfiles.value.find(p => p.name === params.llm_profile_name)) {
       params.llm_profile_name = llmProfiles.value[0].name

@@ -141,12 +141,90 @@ def test_consecutive_engine_flow() -> None:
 
 
 def test_non_differentiable_fitness_rejected() -> None:
+    validate_gradient_descent_fitness_indicators({'TS ICIR': 1.0})
     try:
         validate_gradient_descent_fitness_indicators({'TS RankIC': 1.0})
     except ValueError as exc:
         assert '不可微' in str(exc) or 'non' in str(exc).lower()
         return
     raise AssertionError('TS RankIC should be rejected when GP+GD is enabled.')
+
+
+def test_auto_device_does_not_select_mps() -> None:
+    from factors.gp_gradient_descent import _torch_device
+
+    device = _torch_device(None)
+    if device.type != 'cuda':
+        assert device.type == 'cpu', f'Auto GP+GD device should avoid MPS because unfold_backward is unsupported, got {device}'
+
+
+def test_score_surrogate_matches_gp_yearly_metric_score() -> None:
+    from factors.factor_ops import DataNode
+    from factors.gp_factor_engine import _metric_score
+    from factors.gp_gradient_descent import GradientDescentConfig, _ParametricTorchEvaluator
+
+    rng = np.random.default_rng(20260518)
+    chunks = []
+    for instrument_id, instrument_shift in [('C0', 0.0), ('FG0', 0.35)]:
+        for year, rho in [(2020, 0.8), (2021, -0.2), (2022, 0.4)]:
+            n = 55
+            raw = rng.normal(0.0, 1.0, size=n).cumsum()
+            close = np.tanh(raw / 4.0 + instrument_shift)
+            standardized_close = (close - close.mean()) / (close.std() + 1e-12)
+            noise = rng.normal(0.0, 0.5, size=n)
+            future_ret = 0.01 * (rho * standardized_close + (1.0 - abs(rho)) * noise)
+            chunks.append(pd.DataFrame({
+                'time': pd.date_range(f'{year}-01-01', periods=n, freq='D'),
+                'instrument_id': instrument_id,
+                'open': close + 10.0,
+                'high': close + 11.0,
+                'low': close + 9.0,
+                'close': close,
+                'volume': rng.uniform(1000, 5000, size=n),
+                'position': rng.uniform(10000, 30000, size=n),
+                'future_ret': future_ret,
+            }))
+    data = pd.concat(chunks, ignore_index=True)
+    fitness_indicator_dict = {
+        'TS IC': 0.2,
+        'TS ICIR': 0.3,
+        'Gross Return': 0.1,
+        'Net Return': 0.1,
+        'Gross Volatility': -0.05,
+        'Net Volatility': -0.05,
+        'Gross Sharpe': 0.2,
+        'Net Sharpe': 0.2,
+        'Turnover': -0.1,
+    }
+    cfg = GradientDescentConfig.from_kwargs(
+        enable_gradient_descent=True,
+        gradient_descent_steps=1,
+    )
+    model = _ParametricTorchEvaluator(
+        root=DataNode('close'),
+        df=data,
+        cfg=cfg,
+        apply_rolling_norm=False,
+        rolling_norm_window=5,
+        rolling_norm_min_periods=3,
+        rolling_norm_eps=1e-8,
+        rolling_norm_clip=5.0,
+    )
+    factor = model.forward()
+    actual = model.score(factor, fitness_indicator_dict)
+    sorted_data = data.sort_values(['instrument_id', 'time']).reset_index(drop=True)
+    eval_df = pd.DataFrame({
+        'time': pd.to_datetime(sorted_data['time'], errors='coerce'),
+        'instrument_id': sorted_data['instrument_id'],
+        'future_ret': pd.to_numeric(sorted_data['future_ret'], errors='coerce'),
+        'factor': factor.detach().cpu().tolist(),
+    })
+    expected = _metric_score(eval_df, fitness_indicator_dict)
+    assert np.isfinite(float(actual.detach().cpu().item()))
+    assert np.allclose(float(actual.detach().cpu().item()), expected, atol=1e-4), f'score mismatch: {actual} vs {expected}'
+    (-actual).backward()
+    grads = [p.grad for p in model.parameters() if p.grad is not None]
+    assert grads, 'Yearly metric surrogate should participate in autograd.'
 
 
 def test_ema_uses_ewm_not_sma_in_torch_evaluator() -> None:
@@ -234,6 +312,8 @@ def main() -> None:
         test_consecutive_engine_flow,
         test_ema_uses_ewm_not_sma_in_torch_evaluator,
         test_rolling_std_matches_pandas_ddof_one,
+        test_auto_device_does_not_select_mps,
+        test_score_surrogate_matches_gp_yearly_metric_score,
         test_non_differentiable_fitness_rejected,
     ]
     ok = True

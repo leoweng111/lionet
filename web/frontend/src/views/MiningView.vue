@@ -338,7 +338,7 @@ const MINING_TAB_KEY = 'GP_MINING_ACTIVE_TAB'
 
 const supportedIndicators = ref(['Net Return', 'Net Sharpe', 'TS IC'])
 const indicatorDirection = ref({ 'Net Return': 1, 'Net Sharpe': 1, 'TS IC': 1 })
-const differentiableFitnessIndicators = new Set(['TS IC', 'Gross Return', 'Net Return', 'Gross Sharpe', 'Net Sharpe', 'Gross Volatility', 'Net Volatility', 'Turnover'])
+const differentiableFitnessIndicators = new Set(['TS IC', 'TS ICIR', 'Gross Return', 'Net Return', 'Gross Sharpe', 'Net Sharpe', 'Gross Volatility', 'Net Volatility', 'Turnover'])
 const serverDefaultFitnessWeight = ref({})
 const serverDefaultFilterIndicatorDict = ref({})
 

@@ -139,7 +139,10 @@ class GradientDescentConfig:
     min_window / max_window / window_choices:
         Bounds/candidates used when optimizing discrete time-series windows.
     device:
-        Torch device. ``None`` selects cuda/mps when available, otherwise cpu.
+        Torch device. ``None`` selects cuda when available, otherwise cpu.
+        MPS is not selected automatically because rolling-window backward relies
+        on operators such as ``aten::unfold_backward`` that are not implemented
+        on MPS in current PyTorch releases.
     """
 
     enable_gradient_descent: bool = False
@@ -186,9 +189,19 @@ def _torch_device(device: Optional[str]):
         return torch.device(device)
     if torch.cuda.is_available():
         return torch.device('cuda')
-    if hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
-        return torch.device('mps')
     return torch.device('cpu')
+
+
+def _is_mps_backward_unsupported_error(exc: Exception) -> bool:
+    msg = str(exc).lower()
+    return (
+        'mps' in msg
+        and (
+            'unfold_backward' in msg
+            or 'not currently implemented for the mps device' in msg
+            or 'not implemented for the mps device' in msg
+        )
+    )
 
 
 def _safe_tensor(x):
@@ -205,7 +218,7 @@ def _safe_div(a, b, eps: float = 1e-6):
 
 def _pearson_corr(x, y, eps: float = 1e-6):
     mask = torch.isfinite(x) & torch.isfinite(y)
-    if int(mask.detach().sum().item()) < 3:
+    if int(mask.detach().sum().item()) < 2:
         return x.sum() * 0.0
     xv = x[mask]
     yv = y[mask]
@@ -314,6 +327,15 @@ def _sample_std_last_dim(u):
         return torch.full(u.shape[:-1], float('nan'), dtype=u.dtype, device=u.device)
     centered = u - u.mean(dim=-1, keepdim=True)
     return torch.sqrt((centered * centered).sum(dim=-1) / float(n - 1))
+
+
+def _sample_std_1d(x, eps_inside_sqrt: float = 1e-12):
+    """Sample std with ddof=1 for a 1-D tensor, matching pandas std() on non-degenerate data."""
+    n = int(x.shape[0])
+    if n <= 1:
+        return x.sum() * 0.0
+    centered = x - x.mean()
+    return torch.sqrt((centered * centered).sum() / float(n - 1) + eps_inside_sqrt)
 
 
 def _rolling_std(x, slices, window: int):
@@ -457,6 +479,11 @@ class _ParametricTorchEvaluator(_TorchModuleBase):  # type: ignore[misc]
         else:
             self.instrument_ids = ['UNKNOWN'] * len(sorted_df)
         self.slices = self._build_slices(self.instrument_ids)
+        if 'time' in sorted_df.columns:
+            years = pd.to_datetime(sorted_df['time'], errors='coerce').dt.year.fillna(-1).astype(int).tolist()
+        else:
+            years = [0] * len(sorted_df)
+        self.year_slices = self._build_year_slices(self.slices, years)
         fee_values = [float(FEE.get(ins, 0.0)) for ins in self.instrument_ids]
         self.register_buffer('fee', torch.tensor(fee_values, dtype=self.dtype, device=self.device))
 
@@ -502,6 +529,46 @@ class _ParametricTorchEvaluator(_TorchModuleBase):  # type: ignore[misc]
                 prev = val
         slices.append(slice(start, len(ids)))
         return slices
+
+    @staticmethod
+    def _build_year_slices(instrument_slices: Sequence[slice], years: Sequence[int]) -> List[List[slice]]:
+        """Split each instrument slice into contiguous calendar-year slices."""
+        out: List[List[slice]] = []
+        for ins_sl in instrument_slices:
+            start = int(ins_sl.start or 0)
+            end = int(ins_sl.stop or start)
+            if end <= start:
+                out.append([])
+                continue
+            local: List[slice] = []
+            year_start = start
+            prev_year = int(years[start]) if start < len(years) else 0
+            for idx in range(start + 1, end):
+                year = int(years[idx]) if idx < len(years) else prev_year
+                if year != prev_year:
+                    local.append(slice(year_start, idx))
+                    year_start = idx
+                    prev_year = year
+            local.append(slice(year_start, end))
+            out.append(local)
+        return out
+
+    def _ts_icir(self, factor, future_ret, year_slices: Sequence[slice]):
+        """Differentiable TS ICIR: mean(yearly TS IC) / (std(yearly TS IC) + eps)."""
+        ic_values = []
+        for year_sl in year_slices:
+            if int((year_sl.stop or 0) - (year_sl.start or 0)) < 2:
+                continue
+            ic_values.append(_pearson_corr(factor[year_sl], future_ret[year_sl]))
+        if len(ic_values) < 2:
+            return factor.sum() * 0.0
+        ic_tensor = torch.stack(ic_values)
+        centered = ic_tensor - ic_tensor.mean()
+        # pandas Series.std() uses ddof=1. Add a tiny value inside sqrt to keep
+        # gradients finite when yearly IC values are identical, then add the
+        # public 1e-6 denominator epsilon used by factor_indicators.py.
+        ic_std = torch.sqrt((centered * centered).sum() / float(len(ic_values) - 1) + 1e-12)
+        return ic_tensor.mean() / (ic_std + 1e-6)
 
     def _edge_key(self, node: FactorNode, path: str, child_name: str) -> str:
         if self.parametric_method == 'gpgd':
@@ -961,34 +1028,121 @@ class _ParametricTorchEvaluator(_TorchModuleBase):  # type: ignore[misc]
         return torch.nan_to_num(out, nan=0.0, posinf=0.0, neginf=0.0)
 
     def score(self, factor, fitness_indicator_dict: Dict[str, float]):
-        scores = []
+        """
+        计算口径和GP因子挖掘过程中的_metric_score()的
+        metric_value = float(np.mean(vals))
+        score += float(weight) * metric_value 逻辑保持一致：
+
+        for each instrument:
+            if instrument length < 50:
+                skip
+
+            先对 factor / future_ret 做和 GP 一致的清洗:
+                factor: nan/inf -> 0, clip(-20, 20)
+                future_ret: nan/inf -> 0, clip(-1, 1)
+
+            按年份切片:
+                TS IC: 每年一个值
+                TS ICIR: 每个品种一个值 = mean(yearly IC) / (std(yearly IC) + 1e-6)
+                Gross Return: 每年一个值 = yearly mean(gross) * 252
+                Net Return: 每年一个值 = yearly mean(net) * 252
+                Gross Volatility: 每年一个值 = yearly sample std(gross) * sqrt(252)
+                Net Volatility: 每年一个值 = yearly sample std(net) * sqrt(252)
+                Gross Sharpe: 每年一个值 = annual_ret / annual_vol
+                Net Sharpe: 每年一个值 = annual_ret / annual_vol
+                Turnover: 每年一个值 = yearly mean(turnover)，不再乘 252
+
+        最后:
+            每个 indicator 自己跨所有品种/年份取 mean
+            再按 fitness_indicator_dict 加权求和
+        """
+        requested = {
+            str(indicator): float(weight)
+            for indicator, weight in dict(fitness_indicator_dict or {}).items()
+            if abs(float(weight)) > 1e-12
+        }
+        if not requested:
+            return factor.sum() * 0.0
+
+        indicator_values: Dict[str, List[Any]] = {indicator: [] for indicator in requested}
         annual = 252.0
-        for sl in self.slices:
-            f = factor[sl]
-            r = self.future_ret[sl]
-            fee = self.fee[sl]
+        sqrt_annual = math.sqrt(annual)
+        factor_safe = torch.clamp(torch.nan_to_num(factor, nan=0.0, posinf=0.0, neginf=0.0), -20.0, 20.0)
+        ret_safe = torch.clamp(torch.nan_to_num(self.future_ret, nan=0.0, posinf=0.0, neginf=0.0), -1.0, 1.0)
+
+        for instrument_idx, sl in enumerate(self.slices):
+            ins_start = int(sl.start or 0)
+            ins_stop = int(sl.stop or ins_start)
+            if ins_stop - ins_start < 50:
+                continue
+
+            f = factor_safe[sl]
+            r = ret_safe[sl]
+            fee = self.fee[ins_start] if ins_start < int(self.fee.shape[0]) else self.fee.mean()
             gross = f * r
             diff = f - _shift_by_group(f, [slice(0, len(f))], 1)
-            turnover = torch.nan_to_num(_soft_abs(diff, self.soft_temperature), nan=0.0)
+            turnover = torch.nan_to_num(torch.abs(diff), nan=0.0)
+            if int(turnover.shape[0]) > 0:
+                turnover = turnover.clone()
+                turnover[0] = torch.abs(f[0])
             net = gross - turnover * fee
-            local: Dict[str, Any] = {
-                'TS IC': _pearson_corr(f, r),
-                'Gross Return': gross.mean() * annual,
-                'Net Return': net.mean() * annual,
-                'Gross Volatility': gross.std(unbiased=False) * math.sqrt(annual),
-                'Net Volatility': net.std(unbiased=False) * math.sqrt(annual),
-                'Gross Sharpe': gross.mean() / (gross.std(unbiased=False) + 1e-6) * math.sqrt(annual),
-                'Net Sharpe': net.mean() / (net.std(unbiased=False) + 1e-6) * math.sqrt(annual),
-                'Turnover': turnover.mean() * annual,
-            }
-            score = f.sum() * 0.0
-            for indicator, weight in fitness_indicator_dict.items():
-                if indicator in local and abs(float(weight)) > 1e-12:
-                    score = score + float(weight) * local[indicator]
-            scores.append(score)
-        if not scores:
+
+            absolute_year_slices = self.year_slices[instrument_idx] if instrument_idx < len(self.year_slices) else []
+            year_slices = [
+                slice(int(ys.start or ins_start) - ins_start, int(ys.stop or ins_start) - ins_start)
+                for ys in absolute_year_slices
+                if int(ys.stop or ins_start) > int(ys.start or ins_start)
+            ]
+
+            if 'TS ICIR' in requested:
+                indicator_values['TS ICIR'].append(self._ts_icir(f, r, year_slices))
+
+            for year_sl in year_slices:
+                if int((year_sl.stop or 0) - (year_sl.start or 0)) <= 0:
+                    continue
+                yf = f[year_sl]
+                yr = r[year_sl]
+                ygross = gross[year_sl]
+                ynet = net[year_sl]
+                yturnover = turnover[year_sl]
+
+                if 'TS IC' in requested:
+                    indicator_values['TS IC'].append(_pearson_corr(yf, yr))
+                if 'Gross Return' in requested:
+                    indicator_values['Gross Return'].append(ygross.mean() * annual)
+                if 'Net Return' in requested:
+                    indicator_values['Net Return'].append(ynet.mean() * annual)
+                if 'Gross Volatility' in requested or 'Gross Sharpe' in requested:
+                    gross_vol = _sample_std_1d(ygross) * sqrt_annual
+                    if 'Gross Volatility' in requested:
+                        indicator_values['Gross Volatility'].append(gross_vol)
+                    if 'Gross Sharpe' in requested:
+                        gross_ret = ygross.mean() * annual
+                        indicator_values['Gross Sharpe'].append(gross_ret / gross_vol)
+                if 'Net Volatility' in requested or 'Net Sharpe' in requested:
+                    net_vol = _sample_std_1d(ynet) * sqrt_annual
+                    if 'Net Volatility' in requested:
+                        indicator_values['Net Volatility'].append(net_vol)
+                    if 'Net Sharpe' in requested:
+                        net_ret = ynet.mean() * annual
+                        indicator_values['Net Sharpe'].append(net_ret / net_vol)
+                if 'Turnover' in requested:
+                    # Align with get_annualized_turnover(): annual value is the
+                    # yearly mean turnover, without multiplying by 252.
+                    indicator_values['Turnover'].append(yturnover.mean())
+
+        score = factor.sum() * 0.0
+        has_valid_metric = False
+        for indicator, weight in requested.items():
+            vals = indicator_values.get(indicator, [])
+            if not vals:
+                continue
+            metric_value = torch.nan_to_num(torch.stack(vals).mean(), nan=0.0, posinf=0.0, neginf=0.0)
+            score = score + weight * metric_value
+            has_valid_metric = True
+        if not has_valid_metric:
             return factor.sum() * 0.0
-        return torch.stack(scores).mean()
+        return score
 
     def materialize(self) -> FactorNode:
         """
@@ -1096,11 +1250,11 @@ def optimize_tree_with_gradient_descent(
     if torch is None:
         raise ImportError('enable_gradient_descent=True requires PyTorch.')
 
-    try:
+    def _run_once(run_config: GradientDescentConfig) -> FactorNode:
         model = _ParametricTorchEvaluator(
             root=tree,
             df=df,
-            cfg=config,
+            cfg=run_config,
             apply_rolling_norm=apply_rolling_norm,
             rolling_norm_window=rolling_norm_window,
             rolling_norm_min_periods=rolling_norm_min_periods,
@@ -1108,13 +1262,17 @@ def optimize_tree_with_gradient_descent(
             rolling_norm_clip=rolling_norm_clip,
             target_col=target_col,
         )
-        optimizer = _make_optimizer(config.gradient_descent_optimizer, model.parameters(), config.learning_rate)
+        optimizer = _make_optimizer(run_config.gradient_descent_optimizer, model.parameters(), run_config.learning_rate)
         best_score = -float('inf')
         best_state = copy.deepcopy(model.state_dict())
         no_improve = 0
 
-        for step in range(config.gradient_descent_steps):
+        for step in range(run_config.gradient_descent_steps):
+            # 把所有可学习参数的梯度值重置为 None，避免上一步的梯度累加到当前步
+            # 为什么要做：PyTorch 默认会自动累加梯度，如果不清零，每一步的梯度都会是之前所有步的和，导致参数更新错误
+            # set_to_none=True的好处：比设置为 0 更节省内存，会直接释放梯度张量的内存空间
             optimizer.zero_grad(set_to_none=True)
+            # factor: 整个时间序列的因子值。torch.Tensor，形状 =(T,)（一维张量，长度等于时间步数）
             factor = model.forward()
             score_pos = model.score(factor, fitness_indicator_dict)
             score_neg = model.score(-factor, fitness_indicator_dict)
@@ -1123,8 +1281,8 @@ def optimize_tree_with_gradient_descent(
             if not torch.isfinite(loss):
                 break
             loss.backward()
-            if config.gradient_clip_norm > 0:
-                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=config.gradient_clip_norm)
+            if run_config.gradient_clip_norm > 0:
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=run_config.gradient_clip_norm)
             optimizer.step()
 
             score_value = float(score.detach().cpu().item())
@@ -1134,12 +1292,24 @@ def optimize_tree_with_gradient_descent(
                 no_improve = 0
             else:
                 no_improve += 1
-            if config.early_stopping_steps > 0 and no_improve >= config.early_stopping_steps:
+            if run_config.early_stopping_steps > 0 and no_improve >= run_config.early_stopping_steps:
                 break
 
         model.load_state_dict(best_state)
         return model.materialize()
+
+    try:
+        return _run_once(config)
     except Exception as exc:
+        if str(config.device or '').lower().startswith('mps') and _is_mps_backward_unsupported_error(exc):
+            log.warning(f'[GPGD] MPS gradient descent refinement failed due to unsupported backward op: {exc}. Retry on CPU.')
+            try:
+                cpu_config = copy.copy(config)
+                cpu_config.device = 'cpu'
+                return _run_once(cpu_config)
+            except Exception as cpu_exc:
+                log.warning(f'[GPGD] CPU retry after MPS failure also failed: {cpu_exc}. Fallback to original tree.')
+                return copy.deepcopy(tree)
         log.warning(f'[GPGD] gradient descent refinement failed: {exc}. Fallback to original tree.')
         return copy.deepcopy(tree)
 

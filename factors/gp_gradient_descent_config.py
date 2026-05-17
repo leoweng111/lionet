@@ -9,6 +9,7 @@ from typing import Dict
 
 DIFFERENTIABLE_GP_FITNESS_INDICATORS = {
     'TS IC',
+    'TS ICIR',
     'Gross Return',
     'Net Return',
     'Gross Sharpe',
@@ -21,7 +22,7 @@ DIFFERENTIABLE_GP_FITNESS_INDICATORS = {
 NON_DIFFERENTIABLE_GP_FITNESS_HINT = (
     'GP+梯度下降当前支持的可微 fitness 指标为: '
     + ', '.join(sorted(DIFFERENTIABLE_GP_FITNESS_INDICATORS))
-    + '。TS RankIC/RankICIR、MaxDD、Calmar、Sortino、Win Rate、ICIR 等指标包含排序、极值、分段或年度比值，'
+    + '。TS RankIC/RankICIR、MaxDD、Calmar、Sortino、Win Rate 等指标包含排序、极值或分段逻辑，'
       '暂不允许作为梯度下降损失。'
 )
 
