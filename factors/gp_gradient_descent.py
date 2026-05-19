@@ -16,6 +16,7 @@ from __future__ import annotations
 import copy
 import itertools
 import math
+import traceback
 from dataclasses import dataclass, fields
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple, Type, cast
 
@@ -241,8 +242,6 @@ def _all_gradients_finite(params: Iterable[Any]) -> bool:
         if grad is not None and not bool(torch.isfinite(grad).all().detach().cpu().item()):
             return False
     return True
-
-
 def _gradient_norm_and_status(params: Iterable[Any]) -> Tuple[float, int, bool]:
     """Return global L2 grad norm, number of tensors with grad, and finite flag."""
     total_sq = 0.0
@@ -280,7 +279,12 @@ def _soft_abs(x, k: float):
 
 
 def _safe_div(a, b, eps: float = 1e-6):
-    return a / torch.where(torch.abs(b) < eps, torch.full_like(b, eps), b)
+    a = _safe_tensor(a)
+    b = _safe_tensor(b)
+    eps_tensor = torch.full_like(b, float(eps))
+    signed_eps = torch.where(b < 0, -eps_tensor, eps_tensor)
+    safe_b = torch.where(torch.abs(b) < float(eps), signed_eps, b)
+    return a / safe_b
 
 
 def _finite_float(value: Any, fallback: float = 0.0) -> float:
@@ -299,7 +303,13 @@ def _pearson_corr(x, y, eps: float = 1e-6):
     yv = y[mask]
     xv = xv - xv.mean()
     yv = yv - yv.mean()
-    return (xv * yv).mean() / (xv.std(unbiased=False) * yv.std(unbiased=False) + eps)
+    # Do not use torch.std() here: its backward can be non-finite when the
+    # variance is zero.  The explicit variance + eps-inside-sqrt form keeps both
+    # forward and backward finite for constant/near-constant factor slices.
+    cov = (xv * yv).mean()
+    x_std = torch.sqrt((xv * xv).mean() + 1e-12)
+    y_std = torch.sqrt((yv * yv).mean() + 1e-12)
+    return cov / (x_std * y_std + float(eps))
 
 
 def _rolling_apply_unary(x, slices: Sequence[slice], window: int, fn, fill: float = float('nan')):
@@ -395,13 +405,16 @@ def _rolling_sum(x, slices, window: int):
     return _rolling_apply_unary(x, slices, window, lambda u: u.sum(dim=-1))
 
 
-def _sample_std_last_dim(u):
+def _sample_std_last_dim(u, eps_inside_sqrt: float = 1e-12):
     """Sample std with ddof=1, matching pandas rolling().std() for full finite windows."""
     n = int(u.shape[-1])
     if n <= 1:
         return torch.full(u.shape[:-1], float('nan'), dtype=u.dtype, device=u.device)
+    u = torch.nan_to_num(u, nan=0.0, posinf=0.0, neginf=0.0)
     centered = u - u.mean(dim=-1, keepdim=True)
-    return torch.sqrt((centered * centered).sum(dim=-1) / float(n - 1))
+    # Add epsilon inside sqrt.  Without this, windows with exactly zero variance
+    # have finite forward value but infinite/NaN backward through sqrt(0).
+    return torch.sqrt((centered * centered).sum(dim=-1) / float(n - 1) + float(eps_inside_sqrt))
 
 
 def _sample_std_1d(x, eps_inside_sqrt: float = 1e-12):
@@ -409,6 +422,7 @@ def _sample_std_1d(x, eps_inside_sqrt: float = 1e-12):
     n = int(x.shape[0])
     if n <= 1:
         return x.sum() * 0.0
+    x = torch.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0)
     centered = x - x.mean()
     return torch.sqrt((centered * centered).sum() / float(n - 1) + eps_inside_sqrt)
 
@@ -485,12 +499,13 @@ def _rolling_time_weighted_mean(x, slices, window: int):
 def _rolling_norm(x, slices, window: int, min_periods: int, eps: float, clip: float):
     # For differentiable refinement, use full-window historical z-score. min_periods is
     # approximated by max(1, min(min_periods, window)) to preserve leakage-free shift.
-    hist = _shift_by_group(x, slices, 1)
+    x = torch.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0)
+    hist = torch.nan_to_num(_shift_by_group(x, slices, 1), nan=0.0, posinf=0.0, neginf=0.0)
     w = max(1, int(window))
-    mean = _rolling_mean(hist, slices, w)
-    std = _rolling_std(hist, slices, w)
-    z = (x - mean) / (std + float(eps))
-    return torch.clamp(z, -float(clip), float(clip))
+    mean = torch.nan_to_num(_rolling_mean(hist, slices, w), nan=0.0, posinf=0.0, neginf=0.0)
+    std = torch.nan_to_num(_rolling_std(hist, slices, w), nan=0.0, posinf=0.0, neginf=0.0)
+    z = _safe_div(x - mean, std + float(eps), eps=max(float(eps), 1e-6))
+    return torch.clamp(torch.nan_to_num(z, nan=0.0, posinf=0.0, neginf=0.0), -float(clip), float(clip))
 
 
 class _ParametricTorchEvaluator(_TorchModuleBase):  # type: ignore[misc]
@@ -1553,7 +1568,7 @@ def optimize_tree_with_gradient_descent(
             except Exception as cpu_exc:
                 log.warning(f'[GPGD] CPU retry after MPS failure also failed: {cpu_exc}. Fallback to original tree.')
                 return copy.deepcopy(tree)
-        log.warning(f'[GPGD] gradient descent refinement failed: {exc}. Fallback to original tree.')
+        log.warning(f'[GPGD] gradient descent refinement failed: {exc}. Fallback to original tree. Traceback:\n{traceback.format_exc()}')
         return copy.deepcopy(tree)
 
 

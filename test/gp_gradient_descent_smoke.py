@@ -243,6 +243,56 @@ def test_gradient_descent_materializes_edge_weights_and_windows() -> None:
     assert 'Mul(' in formula, f'Edge/root weights should be materialized as Mul(Const, child), got {formula}'
 
 
+def test_ts_ic_icir_with_rolling_norm_has_finite_gradients() -> None:
+    from factors.factor_ops import DataNode
+    from factors.gp_gradient_descent import GradientDescentConfig, _ParametricTorchEvaluator, _gradient_norm_and_status
+
+    rng = np.random.default_rng(20260520)
+    n = 260
+    close = 100.0 * np.cumprod(1.0 + rng.normal(0.0, 0.01, n))
+    volume = rng.normal(1000.0, 100.0, n)
+    future_ret = np.r_[np.diff(close) / close[:-1], 0.0]
+    data = pd.DataFrame({
+        'time': pd.date_range('2020-01-01', periods=n, freq='D'),
+        'instrument_id': 'C0',
+        'open': close,
+        'high': close * 1.01,
+        'low': close * 0.99,
+        'close': close,
+        'volume': volume,
+        'position': np.linspace(10000.0, 20000.0, n),
+        'future_ret': future_ret,
+    })
+    cfg = GradientDescentConfig.from_kwargs(
+        enable_gradient_descent=True,
+        gradient_descent_steps=1,
+        min_window=3,
+        max_window=30,
+        window_choices=[3, 5, 10, 20, 30],
+    )
+    for field in ['close', 'volume']:
+        model = _ParametricTorchEvaluator(
+            root=DataNode(field),
+            df=data,
+            cfg=cfg,
+            apply_rolling_norm=True,
+            rolling_norm_window=30,
+            rolling_norm_min_periods=20,
+            rolling_norm_eps=1e-8,
+            rolling_norm_clip=5.0,
+        )
+        factor = model.forward()
+        score_pos = model.score(factor, {'TS IC': 0.3, 'TS ICIR': 0.7})
+        score_neg = model.score(-factor, {'TS IC': 0.3, 'TS ICIR': 0.7})
+        loss = -(score_pos if float(score_pos.detach().cpu().item()) >= float(score_neg.detach().cpu().item()) else score_neg)
+        assert np.isfinite(float(loss.detach().cpu().item()))
+        loss.backward()
+        grad_norm, grad_count, grad_finite = _gradient_norm_and_status(model.parameters())
+        assert grad_count > 0
+        assert grad_finite, f'{field} produced non-finite gradients with rolling_norm + TS IC/ICIR'
+        assert np.isfinite(grad_norm)
+
+
 def test_score_surrogate_matches_gp_yearly_metric_score() -> None:
     from factors.factor_ops import DataNode
     from factors.gp_factor_engine import _metric_score
@@ -400,6 +450,7 @@ def main() -> None:
         test_auto_device_does_not_select_mps,
         test_nan_window_params_do_not_break_materialize,
         test_gradient_descent_materializes_edge_weights_and_windows,
+        test_ts_ic_icir_with_rolling_norm_has_finite_gradients,
         test_score_surrogate_matches_gp_yearly_metric_score,
         test_non_differentiable_fitness_rejected,
     ]
