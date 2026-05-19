@@ -4,6 +4,7 @@
   "calculate_baseline": true,
   "check_leakage_count": 20,
   "check_relative": true,
+  "enabled": false,
   "end_time": "20241231",
   "fc_freq": "1d",
   "filter_indicator_dict": {
@@ -128,6 +129,8 @@
   "rolling_norm_eps": 1e-08,
   "rolling_norm_min_periods": 20,
   "rolling_norm_window": 30,
+  "schedule_time": "18:00",
   "start_time": "20200101",
+  "task_count": 1,
   "version": "20260517_llm_test"
 }

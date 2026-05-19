@@ -12,18 +12,18 @@
 
     <el-row v-if="activeMiningTab === 'auto'" :gutter="20" style="margin-bottom:12px;">
       <el-col :xs="24" :sm="24" :md="12" :lg="12" :xl="12">
-        <el-card shadow="hover" class="action-panel-card">
+        <el-card shadow="hover" class="action-panel-card" v-loading="!autoConfigReady">
           <template #header><span style="font-weight:600;">自动挖掘配置</span></template>
           <el-form :model="autoMiningSettings" label-position="top" size="small">
             <el-form-item label="自动挖掘">
-              <el-switch v-model="autoMiningSettings.enabled" />
+              <el-switch v-model="autoMiningSettings.enabled" :disabled="!autoConfigReady" />
             </el-form-item>
             <el-form-item label="自动挖掘时间">
               <el-time-picker
                 v-model="autoMiningSettings.scheduleTime"
                 value-format="HH:mm"
                 format="HH:mm"
-                :disabled="!autoMiningSettings.enabled"
+                :disabled="!autoConfigReady || !autoMiningSettings.enabled"
                 style="width:100%;"
               />
             </el-form-item>
@@ -32,7 +32,7 @@
                 v-model="autoMiningSettings.taskCount"
                 :min="1"
                 :max="20"
-                :disabled="!autoMiningSettings.enabled"
+                :disabled="!autoConfigReady || !autoMiningSettings.enabled"
                 style="width:100%;"
               />
             </el-form-item>
@@ -331,10 +331,11 @@
 <script setup>
 import { ref, reactive, computed, onMounted, onUnmounted, watch } from 'vue'
 import { ElMessage } from 'element-plus'
-import { startMining, getMiningStatus, getTasks, getMiningIndicatorOptions, getMiningAutoConfig, updateMiningAutoConfig, getMiningAutoSchedulerStatus, savePageConfig, getPageConfig, resetPageConfig } from '../api'
+import { startMining, getMiningStatus, getTasks, getMiningIndicatorOptions, getMiningAutoConfig, updateMiningAutoConfig, getMiningAutoSchedulerStatus, runMiningAutoSchedulerTick, savePageConfig, getPageConfig, resetPageConfig } from '../api'
 import NavChart from '../components/NavChart.vue'
 
 const MINING_TAB_KEY = 'GP_MINING_ACTIVE_TAB'
+const AUTO_SETTINGS_CACHE_KEY = 'GP_MINING_AUTO_SETTINGS'
 
 const supportedIndicators = ref(['Net Return', 'Net Sharpe', 'TS IC'])
 const indicatorDirection = ref({ 'Net Return': 1, 'Net Sharpe': 1, 'TS IC': 1 })
@@ -343,6 +344,35 @@ const serverDefaultFitnessWeight = ref({})
 const serverDefaultFilterIndicatorDict = ref({})
 
 const _clone = (obj) => JSON.parse(JSON.stringify(obj))
+
+const _readCachedAutoSettings = () => {
+  try {
+    const raw = localStorage.getItem(AUTO_SETTINGS_CACHE_KEY)
+    if (!raw) return null
+    const parsed = JSON.parse(raw)
+    if (!parsed || typeof parsed !== 'object') return null
+    return {
+      enabled: !!parsed.enabled,
+      schedule_time: parsed.schedule_time || parsed.scheduleTime || '18:00',
+      task_count: Number(parsed.task_count ?? parsed.taskCount) > 0 ? Number(parsed.task_count ?? parsed.taskCount) : 1,
+    }
+  } catch {
+    return null
+  }
+}
+
+const _writeCachedAutoSettings = (settings = {}) => {
+  try {
+    localStorage.setItem(AUTO_SETTINGS_CACHE_KEY, JSON.stringify({
+      enabled: !!settings.enabled,
+      schedule_time: settings.schedule_time || settings.scheduleTime || '18:00',
+      task_count: Math.max(1, Number(settings.task_count ?? settings.taskCount ?? 1)),
+      updated_at: new Date().toISOString(),
+    }))
+  } catch {
+    // localStorage may be unavailable in private mode; backend config remains authoritative.
+  }
+}
 
 const _buildDefaultFitnessIndicatorWeight = (indicators) => {
   const out = {}
@@ -419,10 +449,11 @@ const defaultParams = () => ({
 const activeMiningTab = ref(localStorage.getItem(MINING_TAB_KEY) || 'start')
 const params = reactive(defaultParams())
 const manualParamsSnapshot = ref(_clone(params))
+const cachedAutoSettings = _readCachedAutoSettings()
 const autoMiningSettings = reactive({
-  enabled: false,
-  scheduleTime: '18:00',
-  taskCount: 1,
+  enabled: !!cachedAutoSettings?.enabled,
+  scheduleTime: cachedAutoSettings?.schedule_time || '18:00',
+  taskCount: Number(cachedAutoSettings?.task_count || 1),
 })
 const autoConfigReady = ref(false)
 const manualConfigReady = ref(false)
@@ -430,7 +461,7 @@ let autoConfigSaveTimer = null
 let manualConfigSaveTimer = null
 let schedulerStatusTimer = null
 const schedulerStatus = reactive({
-  enabled: false,
+  enabled: !!cachedAutoSettings?.enabled,
   thread_alive: false,
   last_tick_at: '',
   last_trigger_at: '',
@@ -508,30 +539,54 @@ const _applyAutoSettings = (saved = {}) => {
   autoMiningSettings.enabled = !!saved.enabled
   autoMiningSettings.scheduleTime = saved.schedule_time || saved.scheduleTime || '18:00'
   autoMiningSettings.taskCount = Number(saved.task_count ?? saved.taskCount) > 0 ? Number(saved.task_count ?? saved.taskCount) : 1
+  _writeCachedAutoSettings({
+    enabled: autoMiningSettings.enabled,
+    schedule_time: autoMiningSettings.scheduleTime,
+    task_count: autoMiningSettings.taskCount,
+  })
 }
 
-const _saveAutoConfig = async () => {
-  if (!autoConfigReady.value || activeMiningTab.value !== 'auto') return
+const _autoSettingsPayload = () => ({
+  enabled: !!autoMiningSettings.enabled,
+  schedule_time: autoMiningSettings.scheduleTime || '18:00',
+  task_count: Math.max(1, Number(autoMiningSettings.taskCount || 1)),
+})
+
+const _saveAutoConfig = async ({ includeParams = activeMiningTab.value === 'auto', force = false, triggerScheduler = false } = {}) => {
+  if (!autoConfigReady.value) return
+  if (includeParams && activeMiningTab.value !== 'auto' && !force) return
   try {
-    await updateMiningAutoConfig({
-      auto_search_settings: {
-        enabled: autoMiningSettings.enabled,
-        schedule_time: autoMiningSettings.scheduleTime,
-        task_count: autoMiningSettings.taskCount,
-      },
-      auto_search_params: _clone(params),
-      default_fitness_indicator_weight: _clone(params.fitness_indicator_dict || {}),
-      default_filter_indicator_dict: _clone(params.filter_indicator_dict || {}),
-    })
+    const settings = _autoSettingsPayload()
+    const payload = { auto_search_settings: settings }
+    if (includeParams) {
+      payload.auto_search_params = {
+        ..._clone(params),
+        enabled: settings.enabled,
+        schedule_time: settings.schedule_time,
+        task_count: settings.task_count,
+      }
+      payload.default_fitness_indicator_weight = _clone(params.fitness_indicator_dict || {})
+      payload.default_filter_indicator_dict = _clone(params.filter_indicator_dict || {})
+    }
+    await updateMiningAutoConfig(payload)
+    _writeCachedAutoSettings(settings)
+    if (triggerScheduler && settings.enabled) {
+      try {
+        const { data } = await runMiningAutoSchedulerTick()
+        _applySchedulerStatus(data?.status || {})
+      } catch {
+        await _loadSchedulerStatus()
+      }
+    }
   } catch (e) {
     schedulerStatus.last_error = `自动配置保存失败: ${e?.response?.data?.detail || e?.message || 'unknown error'}`
   }
 }
 
-const _queueSaveAutoConfig = () => {
+const _queueSaveAutoConfig = (options = {}) => {
   if (autoConfigSaveTimer) clearTimeout(autoConfigSaveTimer)
   autoConfigSaveTimer = setTimeout(() => {
-    _saveAutoConfig()
+    _saveAutoConfig(options)
   }, 300)
 }
 
@@ -610,8 +665,15 @@ onMounted(async () => {
   }
 })
 
-watch(activeMiningTab, (next, prev) => {
+watch(activeMiningTab, async (next, prev) => {
   localStorage.setItem(MINING_TAB_KEY, next)
+  if (prev === 'auto' && next !== 'auto') {
+    if (autoConfigSaveTimer) {
+      clearTimeout(autoConfigSaveTimer)
+      autoConfigSaveTimer = null
+    }
+    await _saveAutoConfig({ includeParams: true, force: true })
+  }
   if (prev !== 'auto') {
     manualParamsSnapshot.value = _clone(params)
   }
@@ -633,12 +695,13 @@ watch(activeMiningTab, (next, prev) => {
 })
 
 watch(() => params, () => {
-  if (activeMiningTab.value === 'auto') _queueSaveAutoConfig()
+  if (activeMiningTab.value === 'auto') _queueSaveAutoConfig({ includeParams: true })
   else _queueSaveManualConfig()
 }, { deep: true })
 
 watch(() => autoMiningSettings, () => {
-  _queueSaveAutoConfig()
+  _writeCachedAutoSettings(_autoSettingsPayload())
+  _queueSaveAutoConfig({ includeParams: false, triggerScheduler: true })
 }, { deep: true })
 
 const mining = ref(false), taskId = ref(''), taskStatus = ref(''), taskProgress = ref(''), taskError = ref('')

@@ -28,6 +28,7 @@ export const getMiningIndicatorOptions = () => api.get('/api/mining/indicator-op
 export const getMiningAutoConfig = () => api.get('/api/mining/auto-config')
 export const updateMiningAutoConfig = (data) => api.post('/api/mining/auto-config', data)
 export const getMiningAutoSchedulerStatus = () => api.get('/api/mining/auto-scheduler-status')
+export const runMiningAutoSchedulerTick = () => api.post('/api/mining/auto-scheduler/tick')
 
 // ── LLM Mining ────────────────────────────────────────
 export const getLLMProfiles = () => api.get('/api/llm-mining/profiles')

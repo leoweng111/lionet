@@ -1453,12 +1453,19 @@ async def update_mining_auto_config(params: MiningConfigUpdateParams):
             for k, v in filter_dict.items()
         }
 
+    current_params = load_json_config(GP_AUTO_SEARCH_PARAMS_FILE, {})
+    if not isinstance(current_params, dict):
+        current_params = {}
+
+    # auto_search_settings and auto_search_params are stored in the same JSON
+    # file.  Merge both first and save once, with settings applied last.  This
+    # avoids a subtle overwrite bug where the switch was written correctly and
+    # then immediately overwritten by stale auto_search_params.enabled=false.
+    if params.auto_search_params is not None:
+        current_params.update(dict(params.auto_search_params or {}))
+
     if params.auto_search_settings is not None:
         raw_settings = dict(params.auto_search_settings or {})
-        # Merge settings fields into the params file
-        current_params = load_json_config(GP_AUTO_SEARCH_PARAMS_FILE, {})
-        if not isinstance(current_params, dict):
-            current_params = {}
         current_params["enabled"] = bool(raw_settings.get("enabled", False))
         current_params["schedule_time"] = str(raw_settings.get("schedule_time") or "18:00")
         try:
@@ -1466,10 +1473,19 @@ async def update_mining_auto_config(params: MiningConfigUpdateParams):
         except (TypeError, ValueError):
             task_count = 1
         current_params["task_count"] = max(1, task_count)
-        save_json_config(GP_AUTO_SEARCH_PARAMS_FILE, current_params)
 
-    if params.auto_search_params is not None:
-        save_json_config(GP_AUTO_SEARCH_PARAMS_FILE, dict(params.auto_search_params or {}))
+    if params.auto_search_settings is not None or params.auto_search_params is not None:
+        save_json_config(GP_AUTO_SEARCH_PARAMS_FILE, current_params)
+        try:
+            saved_task_count = max(1, int(current_params.get("task_count", 1) or 1))
+        except (TypeError, ValueError):
+            saved_task_count = 1
+        _set_auto_mining_status(
+            enabled=bool(current_params.get("enabled", False)),
+            schedule_time=str(current_params.get("schedule_time", "18:00")),
+            task_count=saved_task_count,
+            last_skip_reason="自动挖掘配置已更新，等待调度线程下一次检查",
+        )
 
     return {"message": "挖掘配置已写入本地json", "success": True}
 
