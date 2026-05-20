@@ -1244,8 +1244,11 @@ def run_gp_evolution(
                     rolling_norm_eps=rolling_norm_eps,
                     rolling_norm_clip=rolling_norm_clip,
                 )
-                if refined_tree.to_formula() != before_formula:
+                after_formula = refined_tree.to_formula()
+                if after_formula != before_formula:
                     changed_count += 1
+                    log.info(f'[GPGD] formula changed: before={before_formula}')
+                    log.info(f'[GPGD] formula changed:  after={after_formula}')
                 refined_population.append(refined_tree)
             population = refined_population
             log.info(

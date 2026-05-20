@@ -16,6 +16,7 @@ from __future__ import annotations
 import copy
 import itertools
 import math
+import random
 import traceback
 from dataclasses import dataclass, fields
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple, Type, cast
@@ -175,7 +176,7 @@ class GradientDescentConfig:
     early_stopping_steps: int = 5
     gradient_clip_norm: float = 1.0
     soft_temperature: float = 10.0
-    window_soft_temperature: float = 4.0
+    window_soft_temperature: float = 2.0
     window_neighbor_radius: int = 2
     min_window: int = 2
     max_window: int = 60
@@ -295,7 +296,14 @@ def _finite_float(value: Any, fallback: float = 0.0) -> float:
     return out if math.isfinite(out) else float(fallback)
 
 
-def _pearson_corr(x, y, eps: float = 1e-6):
+def _pearson_corr(x, y, eps: float = 1e-6, min_std: float = 1e-4):
+    """Differentiable Pearson correlation with minimum-std guard.
+
+    The minimum-std clamp prevents gradient explosion in the backward pass
+    when the factor has near-zero variance (e.g. bounded operators like
+    StochasticK produce nearly constant slices).  Without this guard the
+    gradient of 1/(std_x * std_y) blows up when either std ≈ 0.
+    """
     mask = torch.isfinite(x) & torch.isfinite(y)
     if int(mask.detach().sum().item()) < 2:
         return x.sum() * 0.0
@@ -303,12 +311,12 @@ def _pearson_corr(x, y, eps: float = 1e-6):
     yv = y[mask]
     xv = xv - xv.mean()
     yv = yv - yv.mean()
-    # Do not use torch.std() here: its backward can be non-finite when the
-    # variance is zero.  The explicit variance + eps-inside-sqrt form keeps both
-    # forward and backward finite for constant/near-constant factor slices.
     cov = (xv * yv).mean()
     x_std = torch.sqrt((xv * xv).mean() + 1e-12)
     y_std = torch.sqrt((yv * yv).mean() + 1e-12)
+    _min = torch.tensor(float(min_std), dtype=x.dtype, device=x.device)
+    x_std = torch.maximum(x_std, _min)
+    y_std = torch.maximum(y_std, _min)
     return cov / (x_std * y_std + float(eps))
 
 
@@ -417,14 +425,19 @@ def _sample_std_last_dim(u, eps_inside_sqrt: float = 1e-12):
     return torch.sqrt((centered * centered).sum(dim=-1) / float(n - 1) + float(eps_inside_sqrt))
 
 
-def _sample_std_1d(x, eps_inside_sqrt: float = 1e-12):
-    """Sample std with ddof=1 for a 1-D tensor, matching pandas std() on non-degenerate data."""
+def _sample_std_1d(x, eps_inside_sqrt: float = 1e-12, min_std: float = 1e-4):
+    """Sample std with ddof=1, matching pandas std() on non-degenerate data.
+
+    Returns at least ``min_std`` to prevent gradient explosion in downstream
+    divisions (e.g. Sharpe = ret / vol).
+    """
     n = int(x.shape[0])
     if n <= 1:
-        return x.sum() * 0.0
+        return x.sum() * 0.0 + torch.tensor(float(min_std), dtype=x.dtype, device=x.device)
     x = torch.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0)
     centered = x - x.mean()
-    return torch.sqrt((centered * centered).sum() / float(n - 1) + eps_inside_sqrt)
+    raw = torch.sqrt((centered * centered).sum() / float(n - 1) + float(eps_inside_sqrt))
+    return torch.maximum(raw, torch.tensor(float(min_std), dtype=x.dtype, device=x.device))
 
 
 def _rolling_std(x, slices, window: int):
@@ -748,7 +761,14 @@ class _ParametricTorchEvaluator(_TorchModuleBase):  # type: ignore[misc]
         self._get_or_create_param(self.edge_params, self._edge_key(node, path, child_name), 1.0)
 
     def _register_window(self, node: FactorNode, path: str, window_name: str, init_value: float) -> None:
-        self._get_or_create_param(self.window_params, self._window_key(node, path, window_name), init_value)
+        # Add small random noise to break exact-integer symmetry so the
+        # soft-window blend gives non-zero gradient to neighbouring candidates
+        # from step 1.  Without noise the softmax concentrates on the original
+        # integer and ∂wp/∂score ≈ 0.
+        noise = (random.random() - 0.5) * 0.6
+        init = float(init_value) + noise
+        init = float(min(self.cfg.max_window, max(self.cfg.min_window, init)))
+        self._get_or_create_param(self.window_params, self._window_key(node, path, window_name), init)
 
     def _register_tree_params(self, node: FactorNode, path: str) -> None:
         if isinstance(node, ConstNode):
@@ -1278,8 +1298,13 @@ class _ParametricTorchEvaluator(_TorchModuleBase):  # type: ignore[misc]
         """
         root = self._materialize_node(self.root, 'root')
         scale = _finite_float(self.root_scale.detach().cpu().item(), 1.0)
-        if abs(scale - 1.0) > 1e-8:
-            root = OpMul(ConstNode(scale), root)
+        if abs(scale - 1.0) > 1e-4:
+            if isinstance(root, OpMul) and isinstance(root.left, ConstNode):
+                merged = _finite_float(scale * float(root.left.value), scale)
+                if abs(merged - 1.0) > 1e-4:
+                    root = OpMul(ConstNode(merged), root.right)
+            else:
+                root = OpMul(ConstNode(scale), root)
         try:
             infer_node_type(root)
         except Exception:
@@ -1290,8 +1315,15 @@ class _ParametricTorchEvaluator(_TorchModuleBase):  # type: ignore[misc]
         child = getattr(cast(Any, node), child_name)
         out = self._materialize_node(child, f'{path}.{child_name}')
         weight = _finite_float(self._edge_param(node, path, child_name).detach().cpu().item(), 1.0)
-        if abs(weight - 1.0) <= 1e-8:
+        if abs(weight - 1.0) <= 1e-4:
             return out
+        # Collapse consecutive Mul(Const, Mul(Const, x)) into Mul(Const, x)
+        # 检测连续 Mul(ConstNode, Mul(ConstNode, x)) 模式，合并为 Mul(ConstNode(w1*w2), x)
+        if isinstance(out, OpMul) and isinstance(out.left, ConstNode):
+            merged = _finite_float(weight * float(out.left.value), weight)
+            if abs(merged - 1.0) <= 1e-4:
+                return out.right
+            return OpMul(ConstNode(merged), out.right)
         return OpMul(ConstNode(weight), out)
 
     def _rounded_window(self, node: FactorNode, path: str, window_name: str = 'window') -> int:
@@ -1477,24 +1509,24 @@ def optimize_tree_with_gradient_descent(
                 no_improve += 1
 
             loss.backward()
+            # Sanitize non-finite gradients before clipping. Non-finite
+            # gradients occur when factor has near-zero variance (common for
+            # bounded operators like StochasticK, UpperShadowRatio), causing
+            # Pearson correlation backward to divide by near-zero std.
+            had_non_finite = False
+            for p in model.parameters():
+                if p.grad is not None:
+                    if not torch.isfinite(p.grad).all():
+                        had_non_finite = True
+                        p.grad.data = torch.nan_to_num(p.grad.data, nan=0.0, posinf=0.0, neginf=0.0)
+            if had_non_finite and should_log:
+                log.warning(
+                    f'[GPGD][run={run_id}] step={step + 1}: non-finite gradient sanitized '
+                    f'(NaN/inf → 0) before clipping.'
+                )
             if run_config.gradient_clip_norm > 0:
-                total_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=run_config.gradient_clip_norm)
-                last_grad_norm, last_grad_tensor_count, last_grad_finite = _gradient_norm_and_status(model.parameters())
-                if not bool(torch.isfinite(total_norm).detach().cpu().item()):
-                    optimizer.zero_grad(set_to_none=True)
-                    last_stop_reason = f'non_finite_gradient_at_step_{step + 1}'
-                    if should_log:
-                        log.warning(f'[GPGD][run={run_id}] step={step + 1}: non-finite gradient norm before clipping.')
-                    break
-            elif not _all_gradients_finite(model.parameters()):
-                optimizer.zero_grad(set_to_none=True)
-                last_grad_norm, last_grad_tensor_count, last_grad_finite = _gradient_norm_and_status(model.parameters())
-                last_stop_reason = f'non_finite_gradient_at_step_{step + 1}'
-                if should_log:
-                    log.warning(f'[GPGD][run={run_id}] step={step + 1}: non-finite gradient detected.')
-                break
-            else:
-                last_grad_norm, last_grad_tensor_count, last_grad_finite = _gradient_norm_and_status(model.parameters())
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=run_config.gradient_clip_norm)
+            last_grad_norm, last_grad_tensor_count, last_grad_finite = _gradient_norm_and_status(model.parameters())
 
             actual_steps = step + 1
             if should_log and (step == 0 or (step + 1) % run_config.progress_log_step_interval == 0 or step + 1 == run_config.gradient_descent_steps):
@@ -1522,7 +1554,7 @@ def optimize_tree_with_gradient_descent(
 
         if should_log:
             if formula_changed:
-                unchanged_reason = 'formula_changed'
+                unchanged_reason = ''  # formula actually changed, no unchanged reason
             elif actual_steps <= 0:
                 unchanged_reason = last_stop_reason
             elif not math.isfinite(best_score) or best_score <= (initial_score if initial_score is not None else best_score) + 1e-10:
@@ -1536,15 +1568,26 @@ def optimize_tree_with_gradient_descent(
             else:
                 unchanged_reason = 'parameters_changed_but_materialized_formula_same_rounding_or_tiny_weights'
 
-            log.info(
-                f'[GPGD][run={run_id}] summary: steps={actual_steps}/{run_config.gradient_descent_steps}, '
-                f'stop_reason={last_stop_reason}, initial_score={_format_float(initial_score if initial_score is not None else float("nan"))}, '
-                f'final_score={_format_float(final_score if final_score is not None else float("nan"))}, '
-                f'best_score={_format_float(best_score)}, last_loss={_format_float(last_loss if last_loss is not None else float("nan"))}, '
-                f'last_grad_norm={_format_float(last_grad_norm)}, grad_tensors={last_grad_tensor_count}, '
-                f'grad_finite={last_grad_finite}, max_param_delta={_format_float(param_delta)}, '
-                f'formula_changed={formula_changed}, unchanged_reason={unchanged_reason}'
-            )
+            if formula_changed:
+                log.info(
+                    f'[GPGD][run={run_id}] summary: steps={actual_steps}/{run_config.gradient_descent_steps}, '
+                    f'stop_reason={last_stop_reason}, initial_score={_format_float(initial_score if initial_score is not None else float("nan"))}, '
+                    f'final_score={_format_float(final_score if final_score is not None else float("nan"))}, '
+                    f'best_score={_format_float(best_score)}, last_loss={_format_float(last_loss if last_loss is not None else float("nan"))}, '
+                    f'last_grad_norm={_format_float(last_grad_norm)}, grad_tensors={last_grad_tensor_count}, '
+                    f'grad_finite={last_grad_finite}, max_param_delta={_format_float(param_delta)}, '
+                    f'formula_changed=True'
+                )
+            else:
+                log.info(
+                    f'[GPGD][run={run_id}] summary: steps={actual_steps}/{run_config.gradient_descent_steps}, '
+                    f'stop_reason={last_stop_reason}, initial_score={_format_float(initial_score if initial_score is not None else float("nan"))}, '
+                    f'final_score={_format_float(final_score if final_score is not None else float("nan"))}, '
+                    f'best_score={_format_float(best_score)}, last_loss={_format_float(last_loss if last_loss is not None else float("nan"))}, '
+                    f'last_grad_norm={_format_float(last_grad_norm)}, grad_tensors={last_grad_tensor_count}, '
+                    f'grad_finite={last_grad_finite}, max_param_delta={_format_float(param_delta)}, '
+                    f'formula_changed=False, unchanged_reason={unchanged_reason}'
+                )
             if not formula_changed:
                 log.info(
                     f'[GPGD][run={run_id}] unchanged_formula_detail: '
