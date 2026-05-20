@@ -59,11 +59,11 @@
   "enable_gradient_descent": false,
   "gradient_descent_method": "alternated",
   "generation_per_gradient_descent": 1,
-  "gradient_descent_steps": 20,
+  "gradient_descent_steps": 100,
   "parametric_method": "opgd",
   "gradient_descent_optimizer": "adam",
-  "learning_rate": 0.01,
-  "gradient_descent_early_stopping_steps": 5,
+  "learning_rate": 0.05,
+  "gradient_descent_early_stopping_steps": 20,
   "gradient_clip_norm": 1.0,
   "gradient_soft_temperature": 10.0
 }

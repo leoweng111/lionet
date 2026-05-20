@@ -348,15 +348,15 @@ class GPMiningParams(BaseModel):
     # alternated 模式下每隔多少 generation 执行一次梯度下降。
     generation_per_gradient_descent: int = 1
     # 每次梯度下降最大优化 step 数。
-    gradient_descent_steps: int = 20
+    gradient_descent_steps: int = 100
     # gpgd: 同一算子类型共享边权/窗口参数；opgd: 每个算子实例参数独立。
     parametric_method: str = "opgd"
     # PyTorch 优化器名称，支持 adam/adamw/sgd/rmsprop/adagrad。
     gradient_descent_optimizer: str = "adam"
     # 梯度下降学习率。
-    learning_rate: float = 0.01
+    learning_rate: float = 0.05
     # 连续多少个 step surrogate fitness 无提升则提前停止本次 GD。
-    gradient_descent_early_stopping_steps: int = 5
+    gradient_descent_early_stopping_steps: int = 20
     # 梯度裁剪阈值，提升数值稳定性；<=0 表示不裁剪。
     gradient_clip_norm: float = 1.0
     # 不可微算子平滑替身和窗口 soft blend 的温度参数。
