@@ -1072,15 +1072,15 @@ class _ParametricTorchEvaluator(_TorchModuleBase):  # type: ignore[misc]
         if isinstance(node, OpDelta):
             return _diff_by_group(self._child(node, path, 'child'), self.slices, 1)
         if isinstance(node, OpBodyRatio):
-            return _safe_div(self.fields['close'] - self.fields['open'], self.fields['high'] - self.fields['low'] + 1e-8)
+            return _safe_div(self.fields['close'] - self.fields['open'], self.fields['high'] - self.fields['low'] + 1e-8) + self._child(node, path, 'child') * 0.0
         if isinstance(node, OpUpperShadowRatio):
-            return _safe_div(self.fields['high'] - torch.maximum(self.fields['open'], self.fields['close']), self.fields['high'] - self.fields['low'] + 1e-8)
+            return _safe_div(self.fields['high'] - torch.maximum(self.fields['open'], self.fields['close']), self.fields['high'] - self.fields['low'] + 1e-8) + self._child(node, path, 'child') * 0.0
         if isinstance(node, OpLowerShadowRatio):
-            return _safe_div(torch.minimum(self.fields['open'], self.fields['close']) - self.fields['low'], self.fields['high'] - self.fields['low'] + 1e-8)
+            return _safe_div(torch.minimum(self.fields['open'], self.fields['close']) - self.fields['low'], self.fields['high'] - self.fields['low'] + 1e-8) + self._child(node, path, 'child') * 0.0
         if isinstance(node, OpStochasticK):
-            return _safe_div(self.fields['close'] - self.fields['low'], self.fields['high'] - self.fields['low'] + 1e-8)
+            return _safe_div(self.fields['close'] - self.fields['low'], self.fields['high'] - self.fields['low'] + 1e-8) + self._child(node, path, 'child') * 0.0
         if isinstance(node, OpTypicalPrice):
-            return (self.fields['high'] + self.fields['low'] + self.fields['close']) / 3.0
+            return (self.fields['high'] + self.fields['low'] + self.fields['close']) / 3.0 + self._child(node, path, 'child') * 0.0
         if isinstance(node, OpNanMean):
             vals = [self._edge_param(node, path, f'child{i}') * self._eval(c, f'{path}.child{i}') for i, c in enumerate(node.children)]
             return torch.stack(vals, dim=0).mean(dim=0)
