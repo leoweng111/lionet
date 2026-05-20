@@ -234,23 +234,25 @@
                 class="gd-tip"
               />
               <el-row :gutter="12">
-                <el-col :span="8"><el-form-item label="启用"><el-switch v-model="params.enable_gradient_descent" /></el-form-item></el-col>
-                <el-col :span="8"><el-form-item label="执行方式"><el-select v-model="params.gradient_descent_method" :disabled="!params.enable_gradient_descent" style="width:100%"><el-option label="alternated" value="alternated" /><el-option label="consecutive" value="consecutive" /></el-select></el-form-item></el-col>
-                <el-col :span="8"><el-form-item label="参数化"><el-select v-model="params.parametric_method" :disabled="!params.enable_gradient_descent" style="width:100%"><el-option label="OPGD（实例独立）" value="opgd" /><el-option label="GPGD（同类共享）" value="gpgd" /></el-select></el-form-item></el-col>
+                <el-col :span="12"><el-form-item label="启用"><el-switch v-model="params.enable_gradient_descent" /></el-form-item></el-col>
+                <el-col :span="12"><el-form-item label="执行方式"><el-select v-model="params.gradient_descent_method" :disabled="!params.enable_gradient_descent" style="width:100%"><el-option label="alternated（交叉执行）" value="alternated" /><el-option label="consecutive（仅终代）" value="consecutive" /></el-select></el-form-item></el-col>
               </el-row>
               <el-row :gutter="12">
-                <el-col :span="8"><el-form-item label="间隔代数"><el-input-number v-model="params.generation_per_gradient_descent" :min="1" :max="100" :disabled="!params.enable_gradient_descent || params.gradient_descent_method !== 'alternated'" style="width:100%" /></el-form-item></el-col>
-                <el-col :span="8"><el-form-item label="GD Steps"><el-input-number v-model="params.gradient_descent_steps" :min="1" :max="500" :disabled="!params.enable_gradient_descent" style="width:100%" /></el-form-item></el-col>
-                <el-col :span="8"><el-form-item label="早停Steps"><el-input-number v-model="params.gradient_descent_early_stopping_steps" :min="0" :max="100" :disabled="!params.enable_gradient_descent" style="width:100%" /></el-form-item></el-col>
+                <el-col :span="12"><el-form-item label="参数化方式"><el-select v-model="params.parametric_method" :disabled="!params.enable_gradient_descent" style="width:100%"><el-option label="OPGD（实例独立）" value="opgd" /><el-option label="GPGD（同类共享）" value="gpgd" /></el-select></el-form-item></el-col>
+                <el-col :span="12"><el-form-item label="间隔代数"><el-input-number v-model="params.generation_per_gradient_descent" :min="1" :max="100" :disabled="!params.enable_gradient_descent || params.gradient_descent_method !== 'alternated'" style="width:100%" /></el-form-item></el-col>
               </el-row>
               <el-row :gutter="12">
-                <el-col :span="8"><el-form-item label="优化器"><el-select v-model="params.gradient_descent_optimizer" :disabled="!params.enable_gradient_descent" style="width:100%"><el-option label="Adam" value="adam" /><el-option label="AdamW" value="adamw" /><el-option label="SGD" value="sgd" /><el-option label="RMSprop" value="rmsprop" /><el-option label="Adagrad" value="adagrad" /></el-select></el-form-item></el-col>
-                <el-col :span="8"><el-form-item label="学习率"><el-input-number v-model="params.learning_rate" :min="0.000001" :max="1" :step="0.001" :precision="6" :disabled="!params.enable_gradient_descent" style="width:100%" /></el-form-item></el-col>
-                <el-col :span="8"><el-form-item label="梯度裁剪"><el-input-number v-model="params.gradient_clip_norm" :min="0" :max="100" :step="0.1" :precision="2" :disabled="!params.enable_gradient_descent" style="width:100%" /></el-form-item></el-col>
+                <el-col :span="12"><el-form-item label="GD 优化步数"><el-input-number v-model="params.gradient_descent_steps" :min="1" :max="500" :disabled="!params.enable_gradient_descent" style="width:100%" /></el-form-item></el-col>
+                <el-col :span="12"><el-form-item label="早停忍耐步数"><el-input-number v-model="params.gradient_descent_early_stopping_steps" :min="0" :max="200" :disabled="!params.enable_gradient_descent" style="width:100%" /></el-form-item></el-col>
               </el-row>
-              <el-form-item label="平滑温度">
-                <el-input-number v-model="params.gradient_soft_temperature" :min="0.1" :max="50" :step="0.5" :precision="2" :disabled="!params.enable_gradient_descent" style="width:100%" />
-              </el-form-item>
+              <el-row :gutter="12">
+                <el-col :span="12"><el-form-item label="优化器"><el-select v-model="params.gradient_descent_optimizer" :disabled="!params.enable_gradient_descent" style="width:100%"><el-option label="Adam" value="adam" /><el-option label="AdamW" value="adamw" /><el-option label="SGD" value="sgd" /><el-option label="RMSprop" value="rmsprop" /><el-option label="Adagrad" value="adagrad" /></el-select></el-form-item></el-col>
+                <el-col :span="12"><el-form-item label="学习率"><el-input-number v-model="params.learning_rate" :min="0.000001" :max="1" :step="0.001" :precision="6" :disabled="!params.enable_gradient_descent" style="width:100%" /></el-form-item></el-col>
+              </el-row>
+              <el-row :gutter="12">
+                <el-col :span="12"><el-form-item label="梯度裁剪阈值"><el-input-number v-model="params.gradient_clip_norm" :min="0" :max="100" :step="0.1" :precision="2" :disabled="!params.enable_gradient_descent" style="width:100%" /></el-form-item></el-col>
+                <el-col :span="12"><el-form-item label="平滑温度"><el-input-number v-model="params.gradient_soft_temperature" :min="0.1" :max="50" :step="0.5" :precision="2" :disabled="!params.enable_gradient_descent" style="width:100%" /></el-form-item></el-col>
+              </el-row>
               <div class="gd-warning" v-if="params.enable_gradient_descent && nonDifferentiableFitnessIndicators.length">
                 当前选择了不可微 fitness：{{ nonDifferentiableFitnessIndicators.join(', ') }}。请将这些权重设为 0 后再启动。
               </div>

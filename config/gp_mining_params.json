@@ -139,7 +139,7 @@
     "Turnover": 0
   },
   "fitness_metric": "ic",
-  "generation_per_gradient_descent": 1,
+  "generation_per_gradient_descent": 5,
   "gp_assumed_initial_capital": 100000,
   "gp_const_prob": 0.02,
   "gp_crossover_prob": 0.3,
@@ -195,5 +195,5 @@
   "schedule_time": "11:00",
   "start_time": "20200101",
   "task_count": 1,
-  "version": "20260520_gp_test_1"
+  "version": "20260520_gp_test"
 }
