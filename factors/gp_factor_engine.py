@@ -5,6 +5,8 @@ without changing existing gp.py scripts.
 """
 
 import copy
+import multiprocessing
+import os
 import random
 import re
 import threading
@@ -13,6 +15,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple, Union, cast
 
 import numpy as np
 import pandas as pd
+from joblib import Parallel, delayed
 
 from utils.logging import log
 from utils.params import FUTURES_CONTRACT_MULTIPLIER, GP_DEFAULT_FITNESS_INDICATOR_WEIGHT, GP_SUPPORTED_INDICATOR
@@ -50,6 +53,107 @@ SHOCK_MUTATION_PROB: float = 0.75
 SHOCK_TOURNAMENT_SIZE: int = 3
 SHOCK_ROOT_CUT_PROB: float = 0.25
 SHOCK_HOIST_PROB: float = 0.35
+
+
+def _refine_one_tree_gd(
+    tree: 'FactorNode',
+    df: pd.DataFrame,
+    fitness_indicator_dict: Dict[str, float],
+    gd_config: Any,
+    apply_rolling_norm: bool,
+    rolling_norm_window: int,
+    rolling_norm_min_periods: int,
+    rolling_norm_eps: float,
+    rolling_norm_clip: float,
+) -> Tuple[Any, bool, str, str]:
+    """Refine a single tree with GD (module-level helper for joblib pickling)."""
+    # Each worker process should use only 1 torch thread to avoid
+    # oversubscription when multiple workers share CPU cores.
+    try:
+        import torch
+        torch.set_num_threads(1)
+    except Exception:
+        pass
+    from .gp_gradient_descent import optimize_tree_with_gradient_descent as _opt
+
+    before_formula = tree.to_formula()
+    refined_tree = _opt(
+        tree=tree,
+        df=df,
+        fitness_indicator_dict=fitness_indicator_dict,
+        config=gd_config,
+        apply_rolling_norm=apply_rolling_norm,
+        rolling_norm_window=rolling_norm_window,
+        rolling_norm_min_periods=rolling_norm_min_periods,
+        rolling_norm_eps=rolling_norm_eps,
+        rolling_norm_clip=rolling_norm_clip,
+    )
+    after_formula = refined_tree.to_formula()
+    changed = after_formula != before_formula
+    return refined_tree, changed, before_formula, after_formula
+
+
+def _refine_one_candidate_gd(
+    cand: 'GPCandidate',
+    df: pd.DataFrame,
+    fitness_indicator_dict: Dict[str, float],
+    gd_config: Any,
+    apply_rolling_norm: bool,
+    rolling_norm_window: int,
+    rolling_norm_min_periods: int,
+    rolling_norm_eps: float,
+    rolling_norm_clip: float,
+    depth_penalty_coef: float,
+    depth_penalty_start_depth: int,
+    depth_penalty_linear_coef: float,
+    depth_penalty_quadratic_coef: float,
+    small_factor_penalty_coef: float,
+    assumed_initial_capital: float,
+    consistency_penalty_enabled: bool,
+    consistency_penalty_coef: float,
+) -> Tuple[Any, float, float, int]:
+    """Refine a single elite candidate with GD + recalibrate fitness.
+
+    Returns (refined_node, penalized_fitness, original_fitness, sign) so the
+    caller can re-orient and wrap into GPCandidate.
+    """
+    try:
+        import torch
+        torch.set_num_threads(1)
+    except Exception:
+        pass
+    from .gp_gradient_descent import optimize_tree_with_gradient_descent as _opt
+
+    refined_node = _opt(
+        tree=cand.node,
+        df=df,
+        fitness_indicator_dict=fitness_indicator_dict,
+        config=gd_config,
+        apply_rolling_norm=apply_rolling_norm,
+        rolling_norm_window=rolling_norm_window,
+        rolling_norm_min_periods=rolling_norm_min_periods,
+        rolling_norm_eps=rolling_norm_eps,
+        rolling_norm_clip=rolling_norm_clip,
+    )
+    penalized_fitness, original_fitness, sign = calc_fitness_and_sign(
+        refined_node,
+        df,
+        fitness_indicator_dict=fitness_indicator_dict,
+        depth_penalty_coef=depth_penalty_coef,
+        depth_penalty_start_depth=depth_penalty_start_depth,
+        depth_penalty_linear_coef=depth_penalty_linear_coef,
+        depth_penalty_quadratic_coef=depth_penalty_quadratic_coef,
+        apply_rolling_norm=apply_rolling_norm,
+        rolling_norm_window=rolling_norm_window,
+        rolling_norm_min_periods=rolling_norm_min_periods,
+        rolling_norm_eps=rolling_norm_eps,
+        rolling_norm_clip=rolling_norm_clip,
+        small_factor_penalty_coef=small_factor_penalty_coef,
+        assumed_initial_capital=assumed_initial_capital,
+        consistency_penalty_enabled=consistency_penalty_enabled,
+        consistency_penalty_coef=consistency_penalty_coef,
+    )
+    return refined_node, penalized_fitness, original_fitness, sign
 
 
 def _generate_valid_random_tree(
@@ -1086,6 +1190,7 @@ def run_gp_evolution(
     gradient_soft_temperature: float = 10.0,
     gradient_window_soft_temperature: float = 4.0,
     gradient_window_neighbor_radius: int = 2,
+    n_jobs: int = 5,
 ) -> List[GPCandidate]:
     """运行遗传规划（GP）进行因子挖掘。
     参数说明（中文）：
@@ -1227,29 +1332,40 @@ def run_gp_evolution(
         ):
             log.info(
                 f'[GPGD] generation {gen_idx + 1}/{generations}: refining '
-                f'{len(population)} individuals before EliteArchive comparison.'
+                f'{len(population)} individuals before EliteArchive comparison '
+                f'(n_jobs={n_jobs}).'
             )
-            refined_population: List[FactorNode] = []
-            changed_count = 0
-            for tree in population:
-                before_formula = tree.to_formula()
-                refined_tree = optimize_tree_with_gradient_descent(
-                    tree=tree,
-                    df=df,
-                    fitness_indicator_dict=normalized_fitness_indicator_dict,
-                    config=gd_config,
-                    apply_rolling_norm=apply_rolling_norm,
-                    rolling_norm_window=rolling_norm_window,
-                    rolling_norm_min_periods=rolling_norm_min_periods,
-                    rolling_norm_eps=rolling_norm_eps,
-                    rolling_norm_clip=rolling_norm_clip,
+            if n_jobs > 1 and len(population) > 1:
+                results = Parallel(n_jobs=n_jobs, timeout=None)(
+                    delayed(_refine_one_tree_gd)(
+                        tree, df, normalized_fitness_indicator_dict, gd_config,
+                        apply_rolling_norm, rolling_norm_window,
+                        rolling_norm_min_periods, rolling_norm_eps, rolling_norm_clip,
+                    )
+                    for tree in population
                 )
-                after_formula = refined_tree.to_formula()
-                if after_formula != before_formula:
-                    changed_count += 1
-                    log.info(f'[GPGD] formula changed: before={before_formula}')
-                    log.info(f'[GPGD] formula changed:  after={after_formula}')
-                refined_population.append(refined_tree)
+                refined_population = []
+                changed_count = 0
+                for refined_tree, changed, before_formula, after_formula in results:
+                    refined_population.append(refined_tree)
+                    if changed:
+                        changed_count += 1
+                        log.info(f'[GPGD] formula changed: before={before_formula}')
+                        log.info(f'[GPGD] formula changed:  after={after_formula}')
+            else:
+                refined_population: List[FactorNode] = []
+                changed_count = 0
+                for tree in population:
+                    refined_tree, changed, before_formula, after_formula = _refine_one_tree_gd(
+                        tree, df, normalized_fitness_indicator_dict, gd_config,
+                        apply_rolling_norm, rolling_norm_window,
+                        rolling_norm_min_periods, rolling_norm_eps, rolling_norm_clip,
+                    )
+                    refined_population.append(refined_tree)
+                    if changed:
+                        changed_count += 1
+                        log.info(f'[GPGD] formula changed: before={before_formula}')
+                        log.info(f'[GPGD] formula changed:  after={after_formula}')
             population = refined_population
             log.info(
                 f'[GPGD] generation {gen_idx + 1}/{generations}: refinement finished, '
@@ -1570,46 +1686,53 @@ def run_gp_evolution(
         and gd_config.gradient_descent_steps > 0
         and elite_candidates
     ):
-        log.info(f'[GPGD] consecutive mode: refining {len(elite_candidates)} final elite candidates.')
-        refined_candidates: List[GPCandidate] = []
-        for cand in elite_candidates:
-            refined_node = optimize_tree_with_gradient_descent(
-                tree=cand.node,
-                df=df,
-                fitness_indicator_dict=normalized_fitness_indicator_dict,
-                config=gd_config,
-                apply_rolling_norm=apply_rolling_norm,
-                rolling_norm_window=rolling_norm_window,
-                rolling_norm_min_periods=rolling_norm_min_periods,
-                rolling_norm_eps=rolling_norm_eps,
-                rolling_norm_clip=rolling_norm_clip,
+        log.info(
+            f'[GPGD] consecutive mode: refining {len(elite_candidates)} final elite candidates '
+            f'(n_jobs={n_jobs}).'
+        )
+        if n_jobs > 1 and len(elite_candidates) > 1:
+            results = Parallel(n_jobs=n_jobs, timeout=None)(
+                delayed(_refine_one_candidate_gd)(
+                    cand, df, normalized_fitness_indicator_dict, gd_config,
+                    apply_rolling_norm, rolling_norm_window, rolling_norm_min_periods,
+                    rolling_norm_eps, rolling_norm_clip,
+                    depth_penalty_coef, depth_penalty_start_depth,
+                    depth_penalty_linear_coef, depth_penalty_quadratic_coef,
+                    small_factor_penalty_coef, assumed_initial_capital,
+                    consistency_penalty_enabled, consistency_penalty_coef,
+                )
+                for cand in elite_candidates
             )
-            penalized_fitness, original_fitness, sign = calc_fitness_and_sign(
-                refined_node,
-                df,
-                fitness_indicator_dict=normalized_fitness_indicator_dict,
-                depth_penalty_coef=depth_penalty_coef,
-                depth_penalty_start_depth=depth_penalty_start_depth,
-                depth_penalty_linear_coef=depth_penalty_linear_coef,
-                depth_penalty_quadratic_coef=depth_penalty_quadratic_coef,
-                apply_rolling_norm=apply_rolling_norm,
-                rolling_norm_window=rolling_norm_window,
-                rolling_norm_min_periods=rolling_norm_min_periods,
-                rolling_norm_eps=rolling_norm_eps,
-                rolling_norm_clip=rolling_norm_clip,
-                small_factor_penalty_coef=small_factor_penalty_coef,
-                assumed_initial_capital=assumed_initial_capital,
-                consistency_penalty_enabled=consistency_penalty_enabled,
-                consistency_penalty_coef=consistency_penalty_coef,
-            )
-            oriented_node = refined_node if sign > 0 else OpNeg(refined_node)
-            refined_candidates.append(GPCandidate(
-                node=oriented_node,
-                formula=oriented_node.to_formula(),
-                fitness=penalized_fitness,
-                original_fitness=original_fitness,
-                penalized_fitness=penalized_fitness,
-            ))
+            refined_candidates: List[GPCandidate] = []
+            for refined_node, penalized_fitness, original_fitness, sign in results:
+                oriented_node = refined_node if sign > 0 else OpNeg(refined_node)
+                refined_candidates.append(GPCandidate(
+                    node=oriented_node,
+                    formula=oriented_node.to_formula(),
+                    fitness=penalized_fitness,
+                    original_fitness=original_fitness,
+                    penalized_fitness=penalized_fitness,
+                ))
+        else:
+            refined_candidates = []
+            for cand in elite_candidates:
+                refined_node, penalized_fitness, original_fitness, sign = _refine_one_candidate_gd(
+                    cand, df, normalized_fitness_indicator_dict, gd_config,
+                    apply_rolling_norm, rolling_norm_window, rolling_norm_min_periods,
+                    rolling_norm_eps, rolling_norm_clip,
+                    depth_penalty_coef, depth_penalty_start_depth,
+                    depth_penalty_linear_coef, depth_penalty_quadratic_coef,
+                    small_factor_penalty_coef, assumed_initial_capital,
+                    consistency_penalty_enabled, consistency_penalty_coef,
+                )
+                oriented_node = refined_node if sign > 0 else OpNeg(refined_node)
+                refined_candidates.append(GPCandidate(
+                    node=oriented_node,
+                    formula=oriented_node.to_formula(),
+                    fitness=penalized_fitness,
+                    original_fitness=original_fitness,
+                    penalized_fitness=penalized_fitness,
+                ))
         elite_candidates = sorted(refined_candidates, key=lambda x: x.penalized_fitness, reverse=True)
 
     # ------------------------------------------------------------------

@@ -1824,6 +1824,7 @@ class GeneticFactorGenerator(FactorGenerator):
             gradient_descent_early_stopping_steps=self.gradient_descent_early_stopping_steps,
             gradient_clip_norm=self.gradient_clip_norm,
             gradient_soft_temperature=self.gradient_soft_temperature,
+            n_jobs=self.n_jobs,
         )
 
         if not candidates:
