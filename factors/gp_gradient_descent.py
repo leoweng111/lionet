@@ -510,6 +510,27 @@ def _rolling_time_weighted_mean(x, slices, window: int):
 
 
 def _rolling_norm(x, slices, window: int, min_periods: int, eps: float, clip: float):
+    """
+    z = (raw[t] - mean_hist) / (std_hist + eps)
+    为什么常数乘法被「吸收」了？
+    假设我把整个因子的输出乘以常数 C：
+    raw' = C * raw
+    那么历史均值也跟着缩放：
+    mean_hist' = rolling_mean(C * raw_hist) = C * mean_hist
+    历史标准差也同样缩放：
+    std_hist' = rolling_std(C * raw_hist) = |C| * std_hist
+    代入 rolling norm 公式：
+
+    z' = (C*raw[t] - C*mean_hist) / (|C|*std_hist + eps)
+
+    当 |C|*std_hist >> eps 时：
+
+    ≈ C*(raw[t] - mean_hist) / (|C|*std_hist)
+    = sign(C) * (raw[t] - mean_hist) / std_hist
+    = sign(C) * z
+
+    结论：无论 C 是 0.8、1.0、还是 1.5，经过 rolling norm 后的输出要么等于原始 z，要么等于 -z（符号翻转）。幅度完全不变。
+    """
     # For differentiable refinement, use full-window historical z-score. min_periods is
     # approximated by max(1, min(min_periods, window)) to preserve leakage-free shift.
     x = torch.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0)
@@ -593,10 +614,6 @@ class _ParametricTorchEvaluator(_TorchModuleBase):  # type: ignore[misc]
         self.edge_params = torch.nn.ParameterDict()
         self.const_params = torch.nn.ParameterDict()
         self.window_params = torch.nn.ParameterDict()
-        # root_scale是这整个因子(tree)的可学习缩放参数
-        # 初始时，整个因子树的输出不做任何缩放(1.0)
-        # 优化后：root_scale会变成比如 0.8 或 1.2，用来调整整个因子的量级，让 IC/ICIR 最大化
-        self.root_scale = torch.nn.Parameter(torch.tensor(1.0, dtype=self.dtype, device=self.device))
         self._material_param_names: Dict[Tuple[str, str], str] = {}
         self._register_tree_params(self.root, path='root')
 
@@ -1170,7 +1187,7 @@ class _ParametricTorchEvaluator(_TorchModuleBase):  # type: ignore[misc]
         raise NotImplementedError(f'Differentiable evaluator does not support {type(node).__name__}.')
 
     def forward(self):
-        out = self.root_scale * self._eval(self.root, 'root')
+        out = self._eval(self.root, 'root')
         if self.apply_rolling_norm:
             out = _rolling_norm(out, self.slices, self.rolling_norm_window, self.rolling_norm_min_periods, self.rolling_norm_eps, self.rolling_norm_clip)
         return torch.nan_to_num(out, nan=0.0, posinf=0.0, neginf=0.0)
@@ -1297,14 +1314,6 @@ class _ParametricTorchEvaluator(_TorchModuleBase):  # type: ignore[misc]
         将最终经过梯度下降优化后的参数值应用到原始因子树上，生成一个新的、具体的因子树。
         """
         root = self._materialize_node(self.root, 'root')
-        scale = _finite_float(self.root_scale.detach().cpu().item(), 1.0)
-        if abs(scale - 1.0) > 1e-4:
-            if isinstance(root, OpMul) and isinstance(root.left, ConstNode):
-                merged = _finite_float(scale * float(root.left.value), scale)
-                if abs(merged - 1.0) > 1e-4:
-                    root = OpMul(ConstNode(merged), root.right)
-            else:
-                root = OpMul(ConstNode(scale), root)
         try:
             infer_node_type(root)
         except Exception:

@@ -271,8 +271,11 @@ def test_ts_ic_icir_with_rolling_norm_has_finite_gradients() -> None:
         window_choices=[3, 5, 10, 20, 30],
     )
     for field in ['close', 'volume']:
+        # Use a shallow tree so edge weights are created; a bare DataNode
+        # has no trainable parameters after root_scale was removed.
+        from factors.factor_ops import OpAdd
         model = _ParametricTorchEvaluator(
-            root=DataNode(field),
+            root=OpAdd(DataNode(field), DataNode('open')),
             df=data,
             cfg=cfg,
             apply_rolling_norm=True,
@@ -335,8 +338,9 @@ def test_score_surrogate_matches_gp_yearly_metric_score() -> None:
         enable_gradient_descent=True,
         gradient_descent_steps=1,
     )
+    from factors.factor_ops import OpAdd
     model = _ParametricTorchEvaluator(
-        root=DataNode('close'),
+        root=OpAdd(DataNode('close'), DataNode('volume')),
         df=data,
         cfg=cfg,
         apply_rolling_norm=False,
@@ -357,6 +361,8 @@ def test_score_surrogate_matches_gp_yearly_metric_score() -> None:
     expected = _metric_score(eval_df, fitness_indicator_dict)
     assert np.isfinite(float(actual.detach().cpu().item()))
     assert np.allclose(float(actual.detach().cpu().item()), expected, atol=1e-4), f'score mismatch: {actual} vs {expected}'
+    params = list(model.parameters())
+    assert params, 'Model should have at least one trainable parameter.'
     (-actual).backward()
     grads = [p.grad for p in model.parameters() if p.grad is not None]
     assert grads, 'Yearly metric surrogate should participate in autograd.'
