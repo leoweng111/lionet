@@ -56,7 +56,7 @@
   "rolling_norm_min_periods": 20,
   "rolling_norm_window": 30,
   "start_time": "20200101",
-  "enable_gradient_descent": false,
+  "enable_gradient_descent": true,
   "gradient_descent_method": "alternated",
   "generation_per_gradient_descent": 1,
   "gradient_descent_steps": 100,

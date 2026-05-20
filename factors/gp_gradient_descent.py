@@ -1453,8 +1453,17 @@ def optimize_tree_with_gradient_descent(
             rolling_norm_clip=rolling_norm_clip,
             target_col=target_col,
         )
-        optimizer = _make_optimizer(run_config.gradient_descent_optimizer, model.parameters(), run_config.learning_rate)
         trainable_param_count = sum(p.numel() for p in model.parameters() if p.requires_grad)
+        # GP 初始化时 leaf_prob=0.2，约 20% 的初始种群树根节点直接是 DataNode（纯叶子节点），不包含任何算子。
+        # 这种树在 _register_tree_params 中直接返回，不注册任何参数。
+        if trainable_param_count == 0:
+            if should_log:
+                log.warning(
+                    f'[GPGD][run={run_id}] no trainable parameters in tree (bare leaf node), '
+                    f'skipping GD. formula={original_formula}'
+                )
+            return copy.deepcopy(tree)
+        optimizer = _make_optimizer(run_config.gradient_descent_optimizer, model.parameters(), run_config.learning_rate)
         initial_params = {name: p.detach().clone() for name, p in model.named_parameters()}
         best_score = -float('inf')
         initial_score = None
