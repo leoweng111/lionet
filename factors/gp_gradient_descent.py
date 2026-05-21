@@ -1595,11 +1595,11 @@ def optimize_tree_with_gradient_descent(
                     if not torch.isfinite(p.grad).all():
                         had_non_finite = True
                         p.grad.data = torch.nan_to_num(p.grad.data, nan=0.0, posinf=0.0, neginf=0.0)
-            if had_non_finite and should_log:
-                log.warning(
-                    f'[GPGD][run={run_id}] step={step + 1}: non-finite gradient sanitized '
-                    f'(NaN/inf → 0) before clipping.'
-                )
+            # if had_non_finite and should_log:
+            #     log.warning(
+            #         f'[GPGD][run={run_id}] step={step + 1}: non-finite gradient sanitized '
+            #         f'(NaN/inf → 0) before clipping.'
+            #     )
             if run_config.gradient_clip_norm > 0:
                 torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=run_config.gradient_clip_norm)
             last_grad_norm, last_grad_tensor_count, last_grad_finite = _gradient_norm_and_status(model.parameters())
