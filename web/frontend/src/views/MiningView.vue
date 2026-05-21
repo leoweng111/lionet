@@ -247,10 +247,13 @@
               </el-row>
               <el-row :gutter="12">
                 <el-col :span="12"><el-form-item label="优化器"><el-select v-model="params.gradient_descent_optimizer" :disabled="!params.enable_gradient_descent" style="width:100%"><el-option label="Adam" value="adam" /><el-option label="AdamW" value="adamw" /><el-option label="SGD" value="sgd" /><el-option label="RMSprop" value="rmsprop" /><el-option label="Adagrad" value="adagrad" /></el-select></el-form-item></el-col>
-                <el-col :span="12"><el-form-item label="学习率"><el-input-number v-model="params.learning_rate" :min="0.000001" :max="1" :step="0.001" :precision="6" :disabled="!params.enable_gradient_descent" style="width:100%" /></el-form-item></el-col>
+                <el-col :span="12"><el-form-item label="梯度裁剪阈值"><el-input-number v-model="params.gradient_clip_norm" :min="0" :max="100" :step="0.1" :precision="2" :disabled="!params.enable_gradient_descent" style="width:100%" /></el-form-item></el-col>
               </el-row>
               <el-row :gutter="12">
-                <el-col :span="12"><el-form-item label="梯度裁剪阈值"><el-input-number v-model="params.gradient_clip_norm" :min="0" :max="100" :step="0.1" :precision="2" :disabled="!params.enable_gradient_descent" style="width:100%" /></el-form-item></el-col>
+                <el-col :span="12"><el-form-item label="边权重学习率"><el-input-number v-model="params.learning_rate" :min="0.000001" :max="1" :step="0.001" :precision="6" :disabled="!params.enable_gradient_descent" style="width:100%" /></el-form-item></el-col>
+                <el-col :span="12"><el-form-item label="窗口学习率"><el-input-number v-model="params.window_learning_rate" :min="0.000001" :max="1" :step="0.001" :precision="6" :disabled="!params.enable_gradient_descent" style="width:100%" /></el-form-item></el-col>
+              </el-row>
+              <el-row :gutter="12">
                 <el-col :span="12"><el-form-item label="平滑温度"><el-input-number v-model="params.gradient_soft_temperature" :min="0.1" :max="50" :step="0.5" :precision="2" :disabled="!params.enable_gradient_descent" style="width:100%" /></el-form-item></el-col>
               </el-row>
               <div class="gd-warning" v-if="params.enable_gradient_descent && nonDifferentiableFitnessIndicators.length">
@@ -435,6 +438,7 @@ const defaultParams = () => ({
   parametric_method: 'opgd',
   gradient_descent_optimizer: 'adam',
   learning_rate: 0.05,
+  window_learning_rate: 0.15,
   gradient_descent_early_stopping_steps: 20,
   gradient_clip_norm: 1.0,
   gradient_soft_temperature: 10.0,

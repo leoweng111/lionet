@@ -195,5 +195,6 @@
   "schedule_time": "11:00",
   "start_time": "20200101",
   "task_count": 1,
-  "version": "20260520_gp_test_1"
+  "version": "20260520_gp_test_1",
+  "window_learning_rate": 0.15
 }

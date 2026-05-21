@@ -1189,7 +1189,8 @@ def run_gp_evolution(
     gradient_clip_norm: float = 1.0,
     gradient_soft_temperature: float = 10.0,
     gradient_window_soft_temperature: float = 4.0,
-    gradient_window_neighbor_radius: int = 2,
+    gradient_window_neighbor_radius: int = 4,
+    window_learning_rate: float = 0.15,
     n_jobs: int = 5,
 ) -> List[GPCandidate]:
     """运行遗传规划（GP）进行因子挖掘。
@@ -1245,6 +1246,7 @@ def run_gp_evolution(
             parametric_method=parametric_method,
             gradient_descent_optimizer=gradient_descent_optimizer,
             learning_rate=learning_rate,
+            window_learning_rate=window_learning_rate,
             early_stopping_steps=gradient_descent_early_stopping_steps,
             gradient_clip_norm=gradient_clip_norm,
             soft_temperature=gradient_soft_temperature,

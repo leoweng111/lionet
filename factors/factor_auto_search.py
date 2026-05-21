@@ -1533,6 +1533,7 @@ class GeneticFactorGenerator(FactorGenerator):
                  parametric_method: str = 'opgd',
                  gradient_descent_optimizer: str = 'adam',
                  learning_rate: float = 0.05,
+                 window_learning_rate: float = 0.15,
                  gradient_descent_early_stopping_steps: int = 20,
                  gradient_clip_norm: float = 1.0,
                  gradient_soft_temperature: float = 10.0,
@@ -1673,6 +1674,7 @@ class GeneticFactorGenerator(FactorGenerator):
         self.parametric_method = str(parametric_method or 'opgd').lower()
         self.gradient_descent_optimizer = str(gradient_descent_optimizer or 'adam').lower()
         self.learning_rate = float(learning_rate)
+        self.window_learning_rate = float(window_learning_rate)
         self.gradient_descent_early_stopping_steps = max(0, int(gradient_descent_early_stopping_steps))
         self.gradient_clip_norm = float(gradient_clip_norm)
         self.gradient_soft_temperature = float(gradient_soft_temperature)
@@ -1821,6 +1823,7 @@ class GeneticFactorGenerator(FactorGenerator):
             parametric_method=self.parametric_method,
             gradient_descent_optimizer=self.gradient_descent_optimizer,
             learning_rate=self.learning_rate,
+            window_learning_rate=self.window_learning_rate,
             gradient_descent_early_stopping_steps=self.gradient_descent_early_stopping_steps,
             gradient_clip_norm=self.gradient_clip_norm,
             gradient_soft_temperature=self.gradient_soft_temperature,

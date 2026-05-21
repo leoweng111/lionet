@@ -86,5 +86,6 @@
   "learning_rate": 0.05,
   "gradient_descent_early_stopping_steps": 20,
   "gradient_clip_norm": 1.0,
-  "gradient_soft_temperature": 10.0
+  "gradient_soft_temperature": 10.0,
+  "window_learning_rate": 0.15
 }

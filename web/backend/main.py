@@ -353,8 +353,10 @@ class GPMiningParams(BaseModel):
     parametric_method: str = "opgd"
     # PyTorch 优化器名称，支持 adam/adamw/sgd/rmsprop/adagrad。
     gradient_descent_optimizer: str = "adam"
-    # 梯度下降学习率。
+    # 梯度下降学习率（边权重和常数参数）。
     learning_rate: float = 0.05
+    # 窗口参数独立学习率（通常高于边权重学习率）。
+    window_learning_rate: float = 0.15
     # 连续多少个 step surrogate fitness 无提升则提前停止本次 GD。
     gradient_descent_early_stopping_steps: int = 20
     # 梯度裁剪阈值，提升数值稳定性；<=0 表示不裁剪。
@@ -1893,6 +1895,7 @@ def _execute_mining(params: GPMiningParams, task_id: str, cancel_event: threadin
             parametric_method=params.parametric_method,
             gradient_descent_optimizer=params.gradient_descent_optimizer,
             learning_rate=params.learning_rate,
+            window_learning_rate=params.window_learning_rate,
             gradient_descent_early_stopping_steps=params.gradient_descent_early_stopping_steps,
             gradient_clip_norm=params.gradient_clip_norm,
             gradient_soft_temperature=params.gradient_soft_temperature,

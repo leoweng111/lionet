@@ -173,11 +173,12 @@ class GradientDescentConfig:
     parametric_method: str = 'opgd'
     gradient_descent_optimizer: str = 'adam'
     learning_rate: float = 0.05
+    window_learning_rate: float = 0.15
     early_stopping_steps: int = 20
     gradient_clip_norm: float = 1.0
     soft_temperature: float = 10.0
-    window_soft_temperature: float = 2.0
-    window_neighbor_radius: int = 2
+    window_soft_temperature: float = 1.0
+    window_neighbor_radius: int = 4
     min_window: int = 2
     max_window: int = 60
     window_choices: Optional[Sequence[int]] = None
@@ -202,6 +203,7 @@ class GradientDescentConfig:
         cfg.gradient_descent_steps = max(0, int(cfg.gradient_descent_steps))
         cfg.early_stopping_steps = max(0, int(cfg.early_stopping_steps))
         cfg.learning_rate = float(cfg.learning_rate)
+        cfg.window_learning_rate = float(cfg.window_learning_rate)
         cfg.gradient_clip_norm = float(cfg.gradient_clip_norm)
         cfg.soft_temperature = max(0.1, float(cfg.soft_temperature))
         cfg.window_soft_temperature = max(0.1, float(cfg.window_soft_temperature))
@@ -782,6 +784,7 @@ class _ParametricTorchEvaluator(_TorchModuleBase):  # type: ignore[misc]
         # soft-window blend gives non-zero gradient to neighbouring candidates
         # from step 1.  Without noise the softmax concentrates on the original
         # integer and ∂wp/∂score ≈ 0.
+        # init_value 来自 GP 生成的树节点窗口值，例如 TsMean(close, 20) 的 20。加上 ±0.3 噪声后实际初始值是 19.7 ~ 20.3。
         noise = (random.random() - 0.5) * 0.6
         init = float(init_value) + noise
         init = float(min(self.cfg.max_window, max(self.cfg.min_window, init)))
@@ -875,16 +878,24 @@ class _ParametricTorchEvaluator(_TorchModuleBase):  # type: ignore[misc]
     def _soft_window_weights(self, window_param, candidates: Sequence[int]):
         """Return smooth weights for discrete window candidates.
 
-        Window optimization uses a separate, moderate temperature and squared
-        distance. Compared with ``-soft_temperature * abs(wp - w)``, this keeps
-        the initial hard-window approximation close to the GP tree while still
-        providing non-negligible gradients to neighbouring windows.
+        Uses linear distance (Laplacian kernel) instead of squared distance
+        (Gaussian kernel).  Linear distance gives constant gradient magnitude
+        regardless of distance, so even distant candidate windows contribute
+        meaningful gradient signal.  This makes the window parameter much more
+        responsive during gradient descent.
+
+        Gaussian kernel: 权重 ∝ exp(-T · (wp - w)²)
+        特点：当 wp 精确等于某个候选值时（比如 wp=20），那个候选的权重 ≈ 1，其余 ≈ 0。
+        这确保 GD 初始时的因子值和 GP 原始因子值几乎完全一致——因为初始化前没有主动改变窗口的意图，不应破坏 GP 生成的因子。
+        代价：高斯衰减太快，距离 2 以上的候选权重 ≈ 0，梯度也 ≈ 0，窗口参数难以移动。
+
+        Laplacian kernel: 线性距离 exp(-T·|d|) 形成拉普拉斯分布，衰减慢，远距离候选保持可感知权重 → 更强的梯度信号。
         """
         logits = []
         temp = float(getattr(self.cfg, 'window_soft_temperature', self.soft_temperature))
         for w in candidates:
             dist = window_param - float(w)
-            logits.append(-temp * dist * dist)
+            logits.append(-temp * torch.abs(dist))
         return torch.softmax(torch.stack(logits), dim=0)
 
     def _safe_window_int(self, node: FactorNode, path: str, window_name: str = 'window', fallback: Optional[int] = None) -> int:
@@ -925,7 +936,7 @@ class _ParametricTorchEvaluator(_TorchModuleBase):  # type: ignore[misc]
         return: 平滑后的算子输出时序。例如和原始ts_mean(close, 20)几乎相同的数组
         """
 
-        # wp是可学习的窗口参数，是一个连续值。例如21.3
+        # wp是可学习的窗口参数，是一个连续值。例如21.3。初始值在_register_window中设置
         wp = self._window_param(node, path, 'window')
         candidates = self._window_candidates(init_window)
         outs = []
@@ -1399,18 +1410,23 @@ class _ParametricTorchEvaluator(_TorchModuleBase):  # type: ignore[misc]
         return copy.deepcopy(node)
 
 
-def _make_optimizer(name: str, params: Iterable[Any], learning_rate: float):
+def _make_optimizer(name: str, param_groups: List[Dict[str, Any]]):
+    """Create optimizer from param groups, each with its own learning rate.
+
+    Each element in ``param_groups`` is a dict with keys ``params`` (iterable
+    of parameters) and ``lr`` (learning rate for that group).
+    """
     opt = str(name or 'adam').lower()
     if opt == 'adam':
-        return torch.optim.Adam(params, lr=learning_rate)
+        return torch.optim.Adam(param_groups)
     if opt == 'adamw':
-        return torch.optim.AdamW(params, lr=learning_rate)
+        return torch.optim.AdamW(param_groups)
     if opt == 'sgd':
-        return torch.optim.SGD(params, lr=learning_rate, momentum=0.9)
+        return torch.optim.SGD(param_groups, momentum=0.9)
     if opt == 'rmsprop':
-        return torch.optim.RMSprop(params, lr=learning_rate)
+        return torch.optim.RMSprop(param_groups)
     if opt == 'adagrad':
-        return torch.optim.Adagrad(params, lr=learning_rate)
+        return torch.optim.Adagrad(param_groups)
     raise ValueError(f'Unsupported gradient_descent_optimizer={name}. Use adam/adamw/sgd/rmsprop/adagrad.')
 
 
@@ -1482,7 +1498,19 @@ def optimize_tree_with_gradient_descent(
                     f'skipping GD. formula={original_formula}'
                 )
             return copy.deepcopy(tree)
-        optimizer = _make_optimizer(run_config.gradient_descent_optimizer, model.parameters(), run_config.learning_rate)
+        # Build param groups so window parameters get a higher learning rate
+        # than edge/const parameters (whose gradient is often near-zero under
+        # scale-invariant fitness + rolling norm).
+        edge_and_const_params = list(model.edge_params.parameters()) + list(model.const_params.parameters())
+        window_params_list = list(model.window_params.parameters())
+        param_groups = []
+        if edge_and_const_params:
+            param_groups.append({'params': edge_and_const_params, 'lr': run_config.learning_rate})
+        if window_params_list:
+            param_groups.append({'params': window_params_list, 'lr': run_config.window_learning_rate})
+        if not param_groups:
+            param_groups.append({'params': model.parameters(), 'lr': run_config.learning_rate})
+        optimizer = _make_optimizer(run_config.gradient_descent_optimizer, param_groups)
         initial_params = {name: p.detach().clone() for name, p in model.named_parameters()}
         best_score = -float('inf')
         initial_score = None
