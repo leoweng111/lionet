@@ -1324,12 +1324,31 @@ class _ParametricTorchEvaluator(_TorchModuleBase):  # type: ignore[misc]
         child = getattr(cast(Any, node), child_name)
         out = self._materialize_node(child, f'{path}.{child_name}')
         weight = _finite_float(self._edge_param(node, path, child_name).detach().cpu().item(), 1.0)
+        return self._apply_edge_weight(out, weight)
+
+    def _apply_edge_weight(self, out: FactorNode, weight: float) -> FactorNode:
+        """Fold edge weight into a materialized child, avoiding nested Mul chains.
+
+        Rules (applied in order):
+        1. weight ≈ 1.0 → return out unchanged
+        2. out is ConstNode → merge: ConstNode(weight * value)
+        3. out is Mul(ConstNode, x) → merge: Mul(ConstNode(weight*const), x)
+           If x is also Mul(ConstNode, y), merge all three constants into one.
+        4. otherwise → wrap: Mul(ConstNode(weight), out)
+        """
         if abs(weight - 1.0) <= 1e-4:
             return out
-        # Collapse consecutive Mul(Const, Mul(Const, x)) into Mul(Const, x)
-        # 检测连续 Mul(ConstNode, Mul(ConstNode, x)) 模式，合并为 Mul(ConstNode(w1*w2), x)
+        if isinstance(out, ConstNode):
+            merged = _finite_float(weight * float(out.value), weight)
+            return ConstNode(merged)
         if isinstance(out, OpMul) and isinstance(out.left, ConstNode):
             merged = _finite_float(weight * float(out.left.value), weight)
+            # Merge one more level if right child is also Mul(ConstNode, y)
+            if isinstance(out.right, OpMul) and isinstance(out.right.left, ConstNode):
+                merged2 = _finite_float(merged * float(out.right.left.value), merged)
+                if abs(merged2 - 1.0) <= 1e-4:
+                    return out.right.right
+                return OpMul(ConstNode(merged2), out.right.right)
             if abs(merged - 1.0) <= 1e-4:
                 return out.right
             return OpMul(ConstNode(merged), out.right)
