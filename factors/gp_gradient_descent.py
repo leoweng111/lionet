@@ -132,8 +132,10 @@ class GradientDescentConfig:
         parameters among the same operator class and child edge name.
     gradient_descent_optimizer:
         Torch optimizer name. Supported: adam, adamw, sgd, rmsprop, adagrad.
-    learning_rate:
-        Optimizer learning rate.
+    edge_learning_rate:
+        Learning rate for edge weight and constant parameters.
+    window_learning_rate:
+        Learning rate for window parameters (usually higher).
     early_stopping_steps:
         Stop GD when surrogate fitness does not improve for this many steps.
     gradient_clip_norm:
@@ -172,7 +174,7 @@ class GradientDescentConfig:
     gradient_descent_steps: int = 100
     parametric_method: str = 'opgd'
     gradient_descent_optimizer: str = 'adam'
-    learning_rate: float = 0.05
+    edge_learning_rate: float = 0.05
     window_learning_rate: float = 0.15
     early_stopping_steps: int = 20
     gradient_clip_norm: float = 1.0
@@ -202,7 +204,7 @@ class GradientDescentConfig:
         cfg.generation_per_gradient_descent = max(1, int(cfg.generation_per_gradient_descent))
         cfg.gradient_descent_steps = max(0, int(cfg.gradient_descent_steps))
         cfg.early_stopping_steps = max(0, int(cfg.early_stopping_steps))
-        cfg.learning_rate = float(cfg.learning_rate)
+        cfg.edge_learning_rate = float(cfg.edge_learning_rate)
         cfg.window_learning_rate = float(cfg.window_learning_rate)
         cfg.gradient_clip_norm = float(cfg.gradient_clip_norm)
         cfg.soft_temperature = max(0.1, float(cfg.soft_temperature))
@@ -899,6 +901,12 @@ class _ParametricTorchEvaluator(_TorchModuleBase):  # type: ignore[misc]
         return torch.softmax(torch.stack(logits), dim=0)
 
     def _safe_window_int(self, node: FactorNode, path: str, window_name: str = 'window', fallback: Optional[int] = None) -> int:
+        """Round window parameter to the nearest candidate, not the nearest integer.
+
+        The differentiable soft blend only evaluates the candidate windows from
+        ``_window_candidates``.  Rounding to an arbitrary integer can select a
+        value that was never part of the blend and whose fitness is unknown.
+        """
         if fallback is None:
             fallback = int(getattr(cast(Any, node), window_name, self.cfg.min_window))
         fallback = int(min(self.cfg.max_window, max(self.cfg.min_window, int(fallback))))
@@ -909,7 +917,9 @@ class _ParametricTorchEvaluator(_TorchModuleBase):  # type: ignore[misc]
             raw = float(fallback)
         if not math.isfinite(raw):
             raw = float(fallback)
-        return int(min(self.cfg.max_window, max(self.cfg.min_window, round(raw))))
+        # Snap to the nearest candidate window rather than the nearest integer.
+        candidates = self._window_candidates(int(getattr(cast(Any, node), window_name, 1)))
+        return min(candidates, key=lambda w: abs(float(w) - raw))
 
     def _sanitize_parameters_(self) -> None:
         """Keep learnable parameters finite after optimizer steps."""
@@ -1505,11 +1515,11 @@ def optimize_tree_with_gradient_descent(
         window_params_list = list(model.window_params.parameters())
         param_groups = []
         if edge_and_const_params:
-            param_groups.append({'params': edge_and_const_params, 'lr': run_config.learning_rate})
+            param_groups.append({'params': edge_and_const_params, 'lr': run_config.edge_learning_rate})
         if window_params_list:
             param_groups.append({'params': window_params_list, 'lr': run_config.window_learning_rate})
         if not param_groups:
-            param_groups.append({'params': model.parameters(), 'lr': run_config.learning_rate})
+            param_groups.append({'params': model.parameters(), 'lr': run_config.edge_learning_rate})
         optimizer = _make_optimizer(run_config.gradient_descent_optimizer, param_groups)
         initial_params = {name: p.detach().clone() for name, p in model.named_parameters()}
         best_score = -float('inf')
@@ -1529,7 +1539,8 @@ def optimize_tree_with_gradient_descent(
         if should_log:
             log.info(
                 f'[GPGD][run={run_id}] start: device={model.device}, optimizer={run_config.gradient_descent_optimizer}, '
-                f'lr={run_config.learning_rate}, steps={run_config.gradient_descent_steps}, '
+                f'edge_lr={run_config.edge_learning_rate}, win_lr={run_config.window_learning_rate}, '
+                f'steps={run_config.gradient_descent_steps}, '
                 f'params={trainable_param_count}, method={run_config.parametric_method}, '
                 f'indicators={requested_indicators}, apply_rolling_norm={apply_rolling_norm}, '
                 f'formula={original_formula}'

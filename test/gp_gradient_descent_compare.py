@@ -113,7 +113,7 @@ def _ctor_kwargs(params: Dict[str, Any], enable_gd: bool, fitness_indicator_dict
         'consistency_penalty_enabled', 'consistency_penalty_coef', 'outsample_ratio',
         'outsample_start_time', 'outsample_end_time', 'gradient_descent_method',
         'generation_per_gradient_descent', 'gradient_descent_steps', 'parametric_method',
-        'gradient_descent_optimizer', 'learning_rate', 'gradient_descent_early_stopping_steps',
+        'gradient_descent_optimizer', 'edge_learning_rate', 'window_learning_rate', 'gradient_descent_early_stopping_steps',
         'gradient_clip_norm', 'gradient_soft_temperature',
     ]
     kwargs = {k: params[k] for k in keys if k in params}

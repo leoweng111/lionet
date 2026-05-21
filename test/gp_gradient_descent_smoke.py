@@ -92,7 +92,7 @@ def test_alternated_full_generator_flow() -> None:
         gradient_descent_steps=2,
         parametric_method='opgd',
         gradient_descent_optimizer='adam',
-        learning_rate=0.01,
+        edge_learning_rate=0.01,
         gradient_descent_early_stopping_steps=1,
     )
     result = fg.auto_mine_select_and_save_fc(filter_indicator_dict=_extreme_filter(), n_jobs=1)
@@ -133,7 +133,7 @@ def test_consecutive_engine_flow() -> None:
         gradient_descent_steps=2,
         parametric_method='gpgd',
         gradient_descent_optimizer='adamw',
-        learning_rate=0.01,
+        edge_learning_rate=0.01,
         gradient_descent_early_stopping_steps=1,
     )
     assert candidates, 'consecutive GP+GD should return candidates.'
@@ -222,7 +222,7 @@ def test_gradient_descent_materializes_edge_weights_and_windows() -> None:
     cfg = GradientDescentConfig.from_kwargs(
         enable_gradient_descent=True,
         gradient_descent_steps=5,
-        learning_rate=0.05,
+        edge_learning_rate=0.05,
         gradient_descent_optimizer='adam',
         early_stopping_steps=5,
         min_window=3,

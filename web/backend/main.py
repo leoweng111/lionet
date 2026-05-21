@@ -354,15 +354,19 @@ class GPMiningParams(BaseModel):
     # PyTorch 优化器名称，支持 adam/adamw/sgd/rmsprop/adagrad。
     gradient_descent_optimizer: str = "adam"
     # 梯度下降学习率（边权重和常数参数）。
-    learning_rate: float = 0.05
+    edge_learning_rate: float = 0.05
     # 窗口参数独立学习率（通常高于边权重学习率）。
     window_learning_rate: float = 0.15
     # 连续多少个 step surrogate fitness 无提升则提前停止本次 GD。
     gradient_descent_early_stopping_steps: int = 20
     # 梯度裁剪阈值，提升数值稳定性；<=0 表示不裁剪。
     gradient_clip_norm: float = 1.0
-    # 不可微算子平滑替身和窗口 soft blend 的温度参数。
+    # 不可微算子平滑替身的温度参数。
     gradient_soft_temperature: float = 10.0
+    # 窗口 soft blend 的温度参数（低于算子温度以保持更好的梯度）。
+    gradient_window_soft_temperature: float = 1.0
+    # 窗口候选集扩展半径（原始窗口 ± radius）。
+    gradient_window_neighbor_radius: int = 4
     filter_net_return_mean: float = 0.05
     filter_net_return_yearly: float = 0.03
     filter_net_sharpe_mean: float = 0.5
@@ -1894,11 +1898,13 @@ def _execute_mining(params: GPMiningParams, task_id: str, cancel_event: threadin
             gradient_descent_steps=params.gradient_descent_steps,
             parametric_method=params.parametric_method,
             gradient_descent_optimizer=params.gradient_descent_optimizer,
-            learning_rate=params.learning_rate,
+            edge_learning_rate=params.edge_learning_rate,
             window_learning_rate=params.window_learning_rate,
             gradient_descent_early_stopping_steps=params.gradient_descent_early_stopping_steps,
             gradient_clip_norm=params.gradient_clip_norm,
             gradient_soft_temperature=params.gradient_soft_temperature,
+            gradient_window_soft_temperature=params.gradient_window_soft_temperature,
+            gradient_window_neighbor_radius=params.gradient_window_neighbor_radius,
             consistency_penalty_enabled=params.consistency_penalty_enabled,
             consistency_penalty_coef=params.consistency_penalty_coef,
             outsample_ratio=params.outsample_ratio,

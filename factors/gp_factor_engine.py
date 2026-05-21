@@ -1184,11 +1184,11 @@ def run_gp_evolution(
     gradient_descent_steps: int = 100,
     parametric_method: str = 'opgd',
     gradient_descent_optimizer: str = 'adam',
-    learning_rate: float = 0.05,
+    edge_learning_rate: float = 0.05,
     gradient_descent_early_stopping_steps: int = 20,
     gradient_clip_norm: float = 1.0,
     gradient_soft_temperature: float = 10.0,
-    gradient_window_soft_temperature: float = 4.0,
+    gradient_window_soft_temperature: float = 1.0,
     gradient_window_neighbor_radius: int = 4,
     window_learning_rate: float = 0.15,
     n_jobs: int = 5,
@@ -1245,7 +1245,7 @@ def run_gp_evolution(
             gradient_descent_steps=gradient_descent_steps,
             parametric_method=parametric_method,
             gradient_descent_optimizer=gradient_descent_optimizer,
-            learning_rate=learning_rate,
+            edge_learning_rate=edge_learning_rate,
             window_learning_rate=window_learning_rate,
             early_stopping_steps=gradient_descent_early_stopping_steps,
             gradient_clip_norm=gradient_clip_norm,
@@ -1280,7 +1280,7 @@ def run_gp_evolution(
         f'gradient_descent_steps={gradient_descent_steps}, '
         f'parametric_method={parametric_method}, '
         f'gradient_descent_optimizer={gradient_descent_optimizer}, '
-        f'learning_rate={learning_rate}'
+        f'edge_learning_rate={edge_learning_rate}, window_learning_rate={window_learning_rate}'
     )
 
     # ------------------------------------------------------------------

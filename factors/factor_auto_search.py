@@ -1532,11 +1532,13 @@ class GeneticFactorGenerator(FactorGenerator):
                  gradient_descent_steps: int = 100,
                  parametric_method: str = 'opgd',
                  gradient_descent_optimizer: str = 'adam',
-                 learning_rate: float = 0.05,
+                 edge_learning_rate: float = 0.05,
                  window_learning_rate: float = 0.15,
                  gradient_descent_early_stopping_steps: int = 20,
                  gradient_clip_norm: float = 1.0,
                  gradient_soft_temperature: float = 10.0,
+                 gradient_window_soft_temperature: float = 1.0,
+                 gradient_window_neighbor_radius: int = 4,
                  outsample_ratio: float = 0.0,
                  outsample_start_time: Optional[str] = None,
                  outsample_end_time: Optional[str] = None):
@@ -1596,7 +1598,8 @@ class GeneticFactorGenerator(FactorGenerator):
         - gradient_descent_steps: 每次梯度下降最大 step 数。
         - parametric_method: gpgd 为同类算子共享边权/窗口参数，opgd 为每个算子实例独立参数。
         - gradient_descent_optimizer: PyTorch 优化器，支持 adam/adamw/sgd/rmsprop/adagrad。
-        - learning_rate: 梯度下降学习率。
+        - edge_learning_rate: 边权重和常数参数的学习率。
+        - window_learning_rate: 窗口参数的学习率（通常更高）。
         - gradient_descent_early_stopping_steps: GD 连续多少 step surrogate fitness 无提升则早停。
         - gradient_clip_norm: 梯度裁剪阈值，<=0 表示不裁剪。
         - gradient_soft_temperature: 不可微算子平滑替身和窗口 soft blend 的温度参数。
@@ -1673,11 +1676,13 @@ class GeneticFactorGenerator(FactorGenerator):
         self.gradient_descent_steps = max(0, int(gradient_descent_steps))
         self.parametric_method = str(parametric_method or 'opgd').lower()
         self.gradient_descent_optimizer = str(gradient_descent_optimizer or 'adam').lower()
-        self.learning_rate = float(learning_rate)
+        self.edge_learning_rate = float(edge_learning_rate)
         self.window_learning_rate = float(window_learning_rate)
         self.gradient_descent_early_stopping_steps = max(0, int(gradient_descent_early_stopping_steps))
         self.gradient_clip_norm = float(gradient_clip_norm)
         self.gradient_soft_temperature = float(gradient_soft_temperature)
+        self.gradient_window_soft_temperature = float(gradient_window_soft_temperature)
+        self.gradient_window_neighbor_radius = int(gradient_window_neighbor_radius)
         if self.enable_gradient_descent:
             from .gp_gradient_descent_config import validate_gradient_descent_fitness_indicators
             validate_gradient_descent_fitness_indicators(self.fitness_indicator_dict)
@@ -1822,11 +1827,13 @@ class GeneticFactorGenerator(FactorGenerator):
             gradient_descent_steps=self.gradient_descent_steps,
             parametric_method=self.parametric_method,
             gradient_descent_optimizer=self.gradient_descent_optimizer,
-            learning_rate=self.learning_rate,
+            edge_learning_rate=self.edge_learning_rate,
             window_learning_rate=self.window_learning_rate,
             gradient_descent_early_stopping_steps=self.gradient_descent_early_stopping_steps,
             gradient_clip_norm=self.gradient_clip_norm,
             gradient_soft_temperature=self.gradient_soft_temperature,
+            gradient_window_soft_temperature=self.gradient_window_soft_temperature,
+            gradient_window_neighbor_radius=self.gradient_window_neighbor_radius,
             n_jobs=self.n_jobs,
         )
 
