@@ -54,6 +54,10 @@ DATABASE = "futures"
 DAILY_COLLECTION = "continuous_contract_price_daily"
 MIN_COLLECTION = "continuous_contract_price_1min"
 
+# 分批写入大小: 每批 BATCH_SIZE 条一次性 bulk_write, 避免 52 万条一次性提交;
+# 中断(Ctrl+C)时最多只影响当前这一批, 且能打印已写入进度。
+BATCH_SIZE = 5000
+
 # 是否优先复用日频库的换月安排(True); False 或日频库为空时用分钟 gap 检测回退
 USE_DB_ROLLOVER_SCHEDULE = True
 # 换月日: 只把「第一根分钟 bar」标记 is_rollover=True(True), 或整日都标记(False)
@@ -244,6 +248,33 @@ def cross_check_gaps(df: pd.DataFrame, schedule: pd.DataFrame, threshold: float)
         print(f"  [提示] 日频换月日中有 {n_miss} 天不在分钟数据中(可能分钟数据缺失或已到期)")
 
 
+def write_in_batches(out: pd.DataFrame) -> int:
+    """分批写入数据库, 支持 Ctrl+C 安全中断。返回已写入条数。"""
+    from mongo.mongify import update_data
+
+    total = len(out)
+    n_batches = (total + BATCH_SIZE - 1) // BATCH_SIZE
+    written = 0
+    print(f"\n开始分批写入 {DATABASE}.{MIN_COLLECTION}: 共 {total} 条, "
+          f"每批 {BATCH_SIZE} 条, 共 {n_batches} 批。按 Ctrl+C 可安全中断。")
+    try:
+        for i, start in enumerate(range(0, total, BATCH_SIZE), 1):
+            chunk = out.iloc[start:start + BATCH_SIZE]
+            update_data(database=DATABASE,
+                        collection=MIN_COLLECTION,
+                        df=chunk,
+                        method=METHOD,
+                        filter_column=["time", "instrument_id"])
+            written += len(chunk)
+            print(f"  批次 {i}/{n_batches}: 已写入 {written}/{total} 条")
+    except KeyboardInterrupt:
+        print(f"\n[中断] 已写入约 {written}/{total} 条。")
+        print("  已写入的批次是完整数据; 当前批次可能只写了部分(upsert 幂等, 重跑会覆盖补齐)。")
+        print("  重新运行本脚本即可继续/补齐, 无需清库。")
+        sys.exit(130)
+    return written
+
+
 def main():
     preview = "--preview" in sys.argv
     if "--csv" in sys.argv:
@@ -263,9 +294,7 @@ def main():
     df = pd.read_csv(csv_path, parse_dates=["datetime"])
     df = df.dropna(subset=["datetime"])
     df = df.sort_values("datetime").reset_index(drop=True)
-    df["td"] = assign_trading_day(df["datetime"])
-    print(f"读取 {len(df)} 行, 时间范围 {df['datetime'].min()} ~ {df['datetime'].max()}, "
-          f"{df['td'].nunique()} 个交易日")
+    print(f"读取 {len(df)} 行, 时间范围 {df['datetime'].min()} ~ {df['datetime'].max()}")
 
     # 1) 换月安排
     schedule = pd.DataFrame()
@@ -280,6 +309,25 @@ def main():
     if schedule.empty:
         schedule = detect_rollover_schedule_from_gaps(df, threshold=GAP_WARNING_THRESHOLD)
         print(f"[回退] 基于隔夜跳空检测到 {int(schedule['is_rollover'].sum())} 个换月日")
+
+    # 以日频换月安排的交易日列表为基准, 重算分钟数据的交易日归属(保证与日频完全一致)
+    if not schedule.empty and "td" in schedule.columns:
+        trading_days = sorted(pd.unique(schedule["td"]).tolist())
+        df["td"] = assign_trading_day(df["datetime"], trading_days=trading_days)
+    else:
+        df["td"] = assign_trading_day(df["datetime"])
+    print(f"读取 {len(df)} 行, 时间范围 {df['datetime'].min()} ~ {df['datetime'].max()}, "
+          f"{df['td'].nunique()} 个交易日")
+
+    # 覆盖检查: 分钟数据中有多少交易日不在日频换月安排中
+    sched_tds = set(schedule["td"].dropna()) if not schedule.empty else set()
+    min_tds = set(df["td"].dropna())
+    missing = sorted(min_tds - sched_tds)
+    if missing:
+        print(f"[警告] 分钟数据有 {len(missing)} 个交易日不在日频换月安排中"
+              f"(将沿用上一个 factor/symbol): "
+              f"{[pd.Timestamp(t).date().isoformat() for t in missing[:10]]}"
+              f"{'...' if len(missing) > 10 else ''}")
 
     roll_days = schedule.loc[schedule["is_rollover"], "td"].tolist()
     print(f"换月安排: 共 {len(schedule)} 个交易日, 其中换月日 {len(roll_days)} 个")
@@ -307,13 +355,8 @@ def main():
         print("\n[预览模式] 未写入数据库。去掉 --preview 即可正式导入。")
         return
 
-    # 5) 写入数据库
-    from mongo.mongify import update_data
-    update_data(database=DATABASE,
-                collection=MIN_COLLECTION,
-                df=out,
-                method=METHOD,
-                filter_column=["time", "instrument_id"])
+    # 5) 分批写入数据库(可安全中断)
+    write_in_batches(out)
     print(f"\n完成: 已写入 {len(out)} 条记录到 {DATABASE}.{MIN_COLLECTION}。")
 
 
