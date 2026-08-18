@@ -2,9 +2,11 @@
   "apply_rolling_norm": true,
   "collection": "genetic_programming",
   "database": "factors",
-  "enable_real_oos": false,
+  "enable_real_oos": true,
   "end_time": "20241231",
-  "factor_name_list": [],
+  "factor_name_list": [
+    "fac_gp_0001"
+  ],
   "fee_per_lot": 2,
   "initial_capital": 1000000,
   "instrument_id": "C0",
@@ -12,7 +14,7 @@
   "min_open_ratio": 1,
   "oos_end": "20251231",
   "oos_start": "20250101",
-  "real_oos_end": "20260330",
+  "real_oos_end": "20260810",
   "real_oos_start": "20260101",
   "rolling_norm_clip": 5,
   "rolling_norm_eps": 1e-08,
@@ -21,5 +23,5 @@
   "signal_delay_days": 1,
   "slippage": 1,
   "start_time": "20200101",
-  "version": ""
+  "version": "20260611_gp_test"
 }

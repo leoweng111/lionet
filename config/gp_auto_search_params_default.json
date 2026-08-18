@@ -80,7 +80,7 @@
   "schedule_time": "11:00",
   "start_time": "20200101",
   "task_count": 1,
-  "enable_gradient_descent": false,
+  "enable_gradient_descent": true,
   "gradient_descent_method": "alternated",
   "generation_per_gradient_descent": 5,
   "gradient_descent_steps": 100,

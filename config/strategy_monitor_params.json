@@ -1,6 +1,6 @@
 {
   "apply_rolling_norm": true,
-  "auto_monitor_enabled": true,
+  "auto_monitor_enabled": false,
   "auto_monitor_time": "20:15",
   "collection": "factor_fusion",
   "database": "factors",
