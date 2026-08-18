@@ -44,7 +44,7 @@ except NameError:
 
 # ================== 配置区 ==================
 FREQ = "1m"                # 分钟周期: 1m / 5m / 15m / 30m / 60m
-START_DATE = "2021-08-01"   # 5 年前(按需修改)
+START_DATE = "2020-01-01"   # 5 年前(按需修改)
 END_DATE = "2026-08-17"     # 截止日(含当天)
 FIELDS = ["open", "high", "low", "close", "volume", "money", "open_interest"]
 CHUNK_DAYS = 14             # 每窗口天数(1m 下 14 天约 2800 根, 稳妥)
@@ -54,15 +54,16 @@ OUT_DIR = "data/fut_min"    # 输出目录(研究环境文件系统, 相对当�
 # 主力连续合约代码(从聚宽官方「商品期货数据」页确认的格式)
 # 上期所 .XSGE
 FUTURE_CODES = [
-    "RB9999.XSGE",  # 螺纹钢
-    "CU9999.XSGE",  # 铜
-    "AU9999.XSGE",  # 黄金
-    "AG9999.XSGE",  # 白银
-    "M9999.XDCE",   # 豆粕(大商所)
-    "I9999.XDCE",   # 铁矿石(大商所)
-    "TA9999.XZCE",  # PTA(郑商所)
-    "SA9999.XZCE",  # 纯碱(郑商所)
-    "SC9999.XINE",  # 原油(能源中心)
+    "C9999.XDCE",  # 玉米
+    # "RB9999.XSGE",  # 螺纹钢
+    # "CU9999.XSGE",  # 铜
+    # "AU9999.XSGE",  # 黄金
+    # "AG9999.XSGE",  # 白银
+    # "M9999.XDCE",   # 豆粕(大商所)
+    # "I9999.XDCE",   # 铁矿石(大商所)
+    # "TA9999.XZCE",  # PTA(郑商所)
+    # "SA9999.XZCE",  # 纯碱(郑商所)
+    # "SC9999.XINE",  # 原油(能源中心)
 ]
 
 # 更多品种(按需取消注释启用)
