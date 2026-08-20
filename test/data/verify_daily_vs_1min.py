@@ -125,6 +125,21 @@ def _diff_report(name: str, daily: pd.Series, mini: pd.Series, ok: pd.Series,
     return diff
 
 
+def build_roll_window_mask(td_series: pd.Series, all_roll_days, window: int) -> pd.Series:
+    """标记 td 中「落在任一换月日 ± window 个交易日内」的日子。"""
+    tds = sorted(pd.unique(td_series.dropna()))
+    if not tds:
+        return pd.Series(False, index=td_series.index)
+    pos = {t: i for i, t in enumerate(tds)}
+    roll_set = set(all_roll_days)
+    mask = {}
+    for t in tds:
+        i = pos[t]
+        win = set(tds[max(0, i - window): i + window + 1])
+        mask[t] = bool(win & roll_set)
+    return td_series.map(mask).fillna(False)
+
+
 def main():
     parser = argparse.ArgumentParser(description="验证日频与分钟数据是否匹配")
     parser.add_argument("--instrument", default="C0")
@@ -135,6 +150,12 @@ def main():
     parser.add_argument("--atol", type=float, default=0.02, help="OHLC 价格差异阈值(元), 默认 0.02")
     parser.add_argument("--vol-rtol", type=float, default=0.01, help="volume 相对差异阈值, 默认 1%")
     parser.add_argument("--factor-rtol", type=float, default=1e-9, help="factor 相对差异阈值")
+    parser.add_argument("--roll-window", type=int, default=5,
+                        help="换月窗口(换月日前后 N 个交易日), 窗口内 OHLC 差异视为换月导致的预期差异")
+    parser.add_argument("--gap-threshold", type=float, default=0.01,
+                        help="分钟数据隔夜跳空阈值, 用于识别聚宽侧换月日")
+    parser.add_argument("--oi-chg-threshold", type=float, default=0.15,
+                        help="分钟数据持仓量单日变化阈值, 用于识别「价格跳空小但持仓量跳变」的主力切换日")
     args = parser.parse_args()
 
     print("=" * 78)
@@ -166,13 +187,26 @@ def main():
     if df_min is None or df_min.empty:
         print(f"[错误] 分钟库 {args.database}.{args.min_col} 无 {args.instrument} 数据")
         sys.exit(1)
+    df_min = df_min.copy()
+    df_min["time"] = _clean_time(df_min["time"])
+    df_min = df_min.dropna(subset=["time"])
     print(f"分钟: {len(df_min)} 行")
 
-    # 交易日列表以日频库为准(用于夜盘归属: 周五夜盘 -> 下周一)
-    trading_days = sorted(pd.unique(df_daily["td"]).tolist())
+    # 交易日列表用「日频库 ∪ 分钟数据日盘日期」的并集。
+    # 原因: 若日频库缺失某些交易日, 仅用日频库 td 会让夜盘归属(searchsorted)错位,
+    #       导致某些 td 被塞入过多 bar、volume 被放大。
+    min_day = set(pd.unique(df_min.loc[df_min["time"].dt.hour < 20, "time"].dt.normalize()))
+    daily_day = set(pd.unique(df_daily["td"]))
+    missing_in_daily = sorted(min_day - daily_day)
+    if missing_in_daily:
+        print(f"[提示] 分钟数据有 {len(missing_in_daily)} 个交易日不在日频库(已并入交易日列表, "
+              f"请核对日频库是否缺数据): "
+              f"{[pd.Timestamp(t).date().isoformat() for t in missing_in_daily[:10]]}"
+              f"{'...' if len(missing_in_daily) > 10 else ''}")
+    trading_days = sorted(daily_day | min_day)
     if not trading_days:
-        print("[警告] 日频库无有效交易日, 改用分钟数据日盘日期推断")
-        trading_days = None
+        print("[警告] 无有效交易日, 无法聚合")
+        sys.exit(1)
 
     # ---- 聚合分钟 ----
     min_daily = aggregate_minute_to_daily(df_min, trading_days=trading_days)
@@ -201,6 +235,38 @@ def main():
     if both.empty:
         print("\n[结论] 两边没有共同交易日, 无法对比!")
         sys.exit(1)
+
+    # ---- 换月窗口标记 ----
+    # 换月窗口 = 日频侧换月日(is_rollover) ∪ 聚宽分钟侧换月日(隔夜跳空), 前后 N 个交易日。
+    # 两个数据源的换月日不一致时, 窗口内 OHLC 指向不同合约, 差异属预期, 不计入"真正不一致"。
+    daily_roll = set(df_daily.loc[df_daily["is_rollover"], "td"].dropna())
+    _mf = df_min.copy()
+    _mf["td"] = assign_trading_day(_mf["time"], trading_days=trading_days)
+    _mf_first = _mf.groupby("td").first()
+    _mf_last = _mf.groupby("td").last()
+    _md = pd.DataFrame({"open": _mf_first["open"], "close": _mf_last["close"],
+                        "position": _mf_last["position"]}).sort_index()
+    _md["prev_close"] = _md["close"].shift(1)
+    _md["gap_ret"] = _md["open"] / _md["prev_close"] - 1.0
+    _md["oi_chg"] = _md["position"].pct_change()
+    # 主力切换信号: 价格隔夜跳空 或 持仓量大幅跳变(价格接近但持仓量跳变, 如 2026-04-15 oi+44%)
+    min_roll = set(_md[(_md["gap_ret"].abs() > args.gap_threshold) |
+                       (_md["oi_chg"].abs() > args.oi_chg_threshold)].index)
+    all_roll = daily_roll | min_roll
+    both["is_roll_window"] = build_roll_window_mask(both["td"], all_roll, args.roll_window)
+    print(f"\n换月窗口: 日频换月 {len(daily_roll)} 个, 分钟侧换月 {len(min_roll)} 个, "
+          f"合并后换月日 {len(all_roll)} 个 | 窗口内交易日 {int(both['is_roll_window'].sum())} 天"
+          f"({args.roll_window} 天窗口)")
+
+    # 数据缺失标记: 分钟 bar 数明显不足(玉米正常约345=夜盘120+日盘225; 缺夜盘只剩约225)
+    _bar_map = dict(zip(min_daily["td"], min_daily["bar_count"]))
+    both["bar_count_min"] = both["td"].map(_bar_map)
+    both["is_data_missing"] = both["bar_count_min"].fillna(0) < 300
+    _n_miss = int(both["is_data_missing"].sum())
+    if _n_miss:
+        print(f"[数据缺失] 有 {_n_miss} 个交易日分钟 bar 数不足(可能缺夜盘/数据不完整), "
+              f"vol/position 会偏低: "
+              f"{[pd.Timestamp(t).date().isoformat() for t in both.loc[both['is_data_missing'], 'td']][:10]}{'...' if _n_miss > 10 else ''}")
 
     # ---- 字段对比 ----
     atol = args.atol
@@ -251,6 +317,16 @@ def main():
     _diff_report("is_rollover", both["is_rollover_daily"], both["is_rollover_min"], ok_roll)
     _diff_report("symbol", both["symbol_daily"], both["symbol_min"], ok_symbol)
 
+    # ---- 非换月窗口内 OHLC 匹配(真正的同合约价格一致性) ----
+    calm = both[~both["is_roll_window"]]
+    if not calm.empty:
+        print(f"\n  [非换月窗口 {len(calm)} 天] OHLC 匹配(排除换月导致的合约切换):")
+        for col in ["open", "high", "low", "close"]:
+            a = pd.to_numeric(calm[f"{col}_daily"], errors="coerce")
+            b = pd.to_numeric(calm[f"{col}_min"], errors="coerce")
+            okc = (a - b).abs() <= atol
+            print(f"    {col:8s} 匹配 {int(okc.sum())}/{len(calm)}")
+
     # ---- 汇总 ----
     all_ok = pd.Series(np.ones(len(both), dtype=bool))
     for mask in [ok_open, ok_high, ok_low, ok_close, ok_vol, ok_pos, ok_wf, ok_cwf, ok_roll, ok_symbol]:
@@ -273,8 +349,15 @@ def main():
             if not bool(ok_cwf.loc[r.name]): issues.append(f"cwf {r['cur_weighted_factor_daily']} vs {r['cur_weighted_factor_min']}")
             if not bool(ok_roll.loc[r.name]): issues.append(f"is_rollover {r['is_rollover_daily']} vs {r['is_rollover_min']}")
             if not bool(ok_symbol.loc[r.name]): issues.append(f"symbol {r['symbol_daily']} vs {r['symbol_min']}")
-            print(f"  {pd.Timestamp(r['td']).date()}: " + "; ".join(issues))
-        print(f"\n  共 {len(bad)}/{len(both)} 天不完全一致")
+            tags = []
+            if bool(r["is_data_missing"]):
+                tags.append(f"数据缺失:bar数={int(r['bar_count_min'])}")
+            if bool(r["is_roll_window"]):
+                tags.append("换月窗口,预期差异")
+            tag = (" [" + ",".join(tags) + "]") if tags else ""
+            print(f"  {pd.Timestamp(r['td']).date()}:{tag} " + "; ".join(issues))
+        print(f"\n  共 {len(bad)}/{len(both)} 天不完全一致 "
+              f"(其中换月窗口内 {int(bad['is_roll_window'].sum())} 天, 非换月窗口 {int((~bad['is_roll_window']).sum())} 天)")
 
     # ---- 每天分钟 bar 数异常检查(全量) ----
     print("\n--- 每天分钟 bar 数检查(全量) ---")
@@ -293,12 +376,22 @@ def main():
     print("  日频 settle 为交易所真实结算价; 分钟库中 settle 在导入时取 close, 因此两者必然不同(属预期)。")
 
     # ---- 结论 ----
-    match = both[~all_ok].empty and only_daily.empty and only_min.empty
+    miss_bad = both[both["is_data_missing"] & (~all_ok)]
+    win_bad = both[both["is_roll_window"] & (~all_ok) & (~both["is_data_missing"])]
+    other_bad = both[(~both["is_roll_window"]) & (~both["is_data_missing"]) & (~all_ok)]
+    match = other_bad.empty and only_daily.empty and only_min.empty
     print("\n" + "=" * 78)
     if match:
-        print("结论: ✅ 日频与分钟数据在所有对比维度上完全一致, 两个数据源匹配。")
+        detail = []
+        if len(win_bad):
+            detail.append(f"换月窗口内 {len(win_bad)} 天差异(两数据源换月规则不同, 预期)")
+        if len(miss_bad):
+            detail.append(f"{len(miss_bad)} 天数据缺失(缺夜盘/bar数不足, vol偏低)")
+        print("结论: ✅ 数据完整且非换月窗口的数据完全一致" +
+              (f"; 另有 {', '.join(detail)}。" if detail else "。"))
     else:
-        print("结论: ❌ 存在不一致, 请查看上方不匹配明细。")
+        print(f"结论: ❌ 数据完整且非换月窗口内有 {len(other_bad)} 天不一致, 请查看上方明细"
+              f"(另有换月窗口 {len(win_bad)} 天预期差异, 数据缺失 {len(miss_bad)} 天)。")
     print("=" * 78)
 
 
