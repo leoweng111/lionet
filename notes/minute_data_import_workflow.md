@@ -139,6 +139,7 @@ python -u test/data/verify_daily_vs_1min.py                  # 全量
 python -u test/data/verify_daily_vs_1min.py --sample 60      # 随机抽样
 python -u test/data/verify_daily_vs_1min.py --atol 0.02      # 价格阈值(元)
 python -u test/data/verify_daily_vs_1min.py --roll-window 5  # 换月窗口天数
+python -u test/data/verify_daily_vs_1min.py --no-roll-window # 不打印 [换月窗口,预期差异] 的日子, 只打印非换月窗口的日子
 ```
 
 ### 验证内容
@@ -153,6 +154,8 @@ python -u test/data/verify_daily_vs_1min.py --roll-window 5  # 换月窗口天�
 1. **`[换月窗口,预期差异]`**：该日落在任一换月日 ± N 天（默认 5）。换月日 = 日频侧 `is_rollover` ∪ 分钟侧（gap>1% 或 oi_chg>15%）。属**两数据源换月规则不同**，预期差异，不算错。
 2. **`[数据缺失:bar数=N]`**：该交易日 bar 数 < 300（缺夜盘/数据不完整），vol 偏低。需补数据（见第 7 节）。
 3. **无标记**：真不一致，需排查。
+
+若只想看"真不一致"，用 `--no-roll-window` 跳过换月窗口日子（默认打印全部）；统计行仍反映全量（换月窗口/非换月各多少天）。
 
 ### 一个重要修复：交易日列表用并集
 

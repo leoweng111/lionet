@@ -156,6 +156,8 @@ def main():
                         help="分钟数据隔夜跳空阈值, 用于识别聚宽侧换月日")
     parser.add_argument("--oi-chg-threshold", type=float, default=0.15,
                         help="分钟数据持仓量单日变化阈值, 用于识别「价格跳空小但持仓量跳变」的主力切换日")
+    parser.add_argument("--no-roll-window", action="store_true",
+                        help="不打印 [换月窗口,预期差异] 的日子, 只打印非换月窗口的日子(默认打印全部)")
     args = parser.parse_args()
 
     print("=" * 78)
@@ -333,9 +335,13 @@ def main():
         all_ok &= mask.fillna(False) if hasattr(mask, "fillna") else mask
 
     print("\n--- 不匹配明细(至少一个字段不一致的日子) ---")
-    bad = both[~all_ok]
+    bad_all = both[~all_ok]
+    bad = bad_all[~bad_all["is_roll_window"]] if args.no_roll_window else bad_all
+    if args.no_roll_window:
+        print(f"[--no-roll-window] 已跳过 {int(bad_all['is_roll_window'].sum())} 个换月窗口日子, "
+              f"仅显示非换月窗口 {len(bad)} 天")
     if bad.empty:
-        print("  全部一致 ✅")
+        print("  全部一致 ✅" if bad_all.empty else "  非换月窗口内全部一致 ✅")
     else:
         for _, r in bad.iterrows():
             issues = []
@@ -356,8 +362,9 @@ def main():
                 tags.append("换月窗口,预期差异")
             tag = (" [" + ",".join(tags) + "]") if tags else ""
             print(f"  {pd.Timestamp(r['td']).date()}:{tag} " + "; ".join(issues))
-        print(f"\n  共 {len(bad)}/{len(both)} 天不完全一致 "
-              f"(其中换月窗口内 {int(bad['is_roll_window'].sum())} 天, 非换月窗口 {int((~bad['is_roll_window']).sum())} 天)")
+        print(f"\n  共 {len(bad_all)}/{len(both)} 天不完全一致 "
+              f"(其中换月窗口内 {int(bad_all['is_roll_window'].sum())} 天, "
+              f"非换月窗口 {int((~bad_all['is_roll_window']).sum())} 天)")
 
     # ---- 每天分钟 bar 数异常检查(全量) ----
     print("\n--- 每天分钟 bar 数检查(全量) ---")
