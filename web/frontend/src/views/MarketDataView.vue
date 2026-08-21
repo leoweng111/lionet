@@ -45,8 +45,8 @@
         </el-card>
       </el-tab-pane>
 
-      <!-- ═══ Tab 2: 价格数据更新 ═══ -->
-      <el-tab-pane label="价格数据更新" name="price-update">
+      <!-- ═══ Tab 2: 日频价格数据更新 ═══ -->
+      <el-tab-pane label="日频价格数据更新" name="price-update">
         <el-card shadow="never">
           <template #header>
             <div style="display:flex;align-items:center;justify-content:space-between;">
@@ -58,6 +58,12 @@
             </div>
           </template>
           <el-form :model="priceParams" label-width="160px" size="small" style="max-width:600px;">
+            <el-form-item label="来源">
+              <el-select v-model="priceParams.source" style="width:100%;">
+                <el-option label="akshare" value="akshare" />
+                <el-option label="joinquant" value="joinquant" />
+              </el-select>
+            </el-form-item>
             <el-form-item label="合约（可多选）">
               <el-select v-model="priceParams.instrument_id" multiple filterable allow-create clearable
                 placeholder="留空=更新全部" style="width:100%;">
@@ -104,6 +110,12 @@
 
           <el-divider content-position="left">自动价格更新配置（T日更新T日）</el-divider>
           <el-form :model="scheduleParams" label-width="160px" size="small" style="max-width:600px;">
+            <el-form-item label="来源">
+              <el-select v-model="scheduleParams.source" :disabled="!scheduleParams.enabled" style="width:100%;">
+                <el-option label="akshare" value="akshare" />
+                <el-option label="joinquant" value="joinquant" />
+              </el-select>
+            </el-form-item>
             <el-form-item label="自动更新时间">
               <el-time-picker
                 v-model="scheduleTimeDisplay"
@@ -167,48 +179,145 @@
         </el-card>
       </el-tab-pane>
 
+      <!-- ═══ Tab 2b: 分钟频价格数据更新 ═══ -->
+      <el-tab-pane label="分钟频价格数据更新" name="price-update-1min">
+        <el-card shadow="never">
+          <template #header><span style="font-weight:600;">更新连续合约分钟价格（天勤 EDB 免费接口，近1年分钟线）</span></template>
+          <el-form :model="price1minParams" label-width="160px" size="small" style="max-width:600px;">
+            <el-form-item label="来源">
+              <el-select v-model="price1minParams.source" style="width:100%;">
+                <el-option label="tqsdk_edb（天勤）" value="tqsdk_edb" />
+              </el-select>
+            </el-form-item>
+            <el-form-item label="合约（可多选）">
+              <el-select v-model="price1minParams.instrument_id" multiple filterable allow-create clearable
+                placeholder="留空=更新全部" style="width:100%;">
+                <el-option v-for="id in instrumentIds" :key="`m_${id}`" :label="id" :value="id" />
+              </el-select>
+            </el-form-item>
+            <el-form-item label="开始日期">
+              <el-input v-model="price1minParams.start_date" placeholder="留空=最近90天" clearable />
+            </el-form-item>
+            <el-form-item label="结束日期">
+              <el-input v-model="price1minParams.end_date" :placeholder="todayStr" clearable />
+            </el-form-item>
+            <el-form-item label="请求间隔(秒)">
+              <el-input-number v-model="price1minParams.wait_time" :min="0" :max="10" :step="0.1" :precision="1" style="width:100%;" />
+            </el-form-item>
+            <el-form-item label="更新方式(method)">
+              <el-select v-model="price1minParams.method" style="width:100%;">
+                <el-option v-for="m in updateMethods" :key="`m_method_${m}`" :label="m" :value="m" />
+              </el-select>
+            </el-form-item>
+            <el-form-item>
+              <el-button type="primary" :loading="price1minLoading" @click="handleUpdatePrice1min">
+                <el-icon v-if="!price1minLoading"><Upload /></el-icon> {{ price1minLoading ? '更新中...' : '启动价格更新' }}
+              </el-button>
+              <el-button
+                type="danger"
+                plain
+                :loading="price1minStopping"
+                :disabled="!price1minLoading || !currentPrice1minTaskId"
+                @click="handleStopPrice1minUpdate"
+                style="margin-left:8px;"
+              >停止</el-button>
+            </el-form-item>
+          </el-form>
+          <el-alert
+            type="info" :closable="false" show-icon style="margin-top:8px;"
+            title="数据源：天勤 EDB 免费接口，可获取近1年主力连续分钟线；换月因子复用日频库，按 time+instrument_id upsert 幂等写入。"
+          />
+          <div v-if="price1minLogs.length" class="log-panel" style="margin-top:8px;">
+            <div class="log-panel-header">操作日志 ({{ price1minLogs.length }} 条)</div>
+            <div class="log-panel-body">
+              <div
+                v-for="(line, i) in price1minLogs"
+                :key="`p1m_${i}`"
+                class="log-line"
+                :class="{ 'log-warn': line.includes('WARNING'), 'log-err': line.includes('ERROR') }"
+              >{{ line }}</div>
+            </div>
+          </div>
+        </el-card>
+      </el-tab-pane>
+
       <!-- ═══ Tab 3: 数据概览 ═══ -->
       <el-tab-pane label="数据概览" name="overview">
         <el-card shadow="never">
-          <template #header>
-            <div style="display:flex;align-items:center;justify-content:space-between;">
-              <span style="font-weight:600;">数据库数据概览</span>
-              <el-button size="small" :loading="overviewLoading" @click="loadOverview"><el-icon><Refresh /></el-icon> 刷新</el-button>
-            </div>
-          </template>
-          <el-table :data="overviewData" stripe size="small" max-height="500" style="width:100%;" v-loading="overviewLoading">
-            <el-table-column prop="instrument_id" label="合约ID" width="100" />
-            <el-table-column prop="start_date" label="起始日期" width="120" />
-            <el-table-column prop="end_date" label="结束日期" width="120" />
-            <el-table-column prop="total_rows" label="总行数" width="90" />
-            <el-table-column prop="expected_bdays" label="预期交易日" width="110" />
-            <el-table-column label="缺失日期数" width="120">
-              <template #default="{ row }">
-                <span v-if="!row.missing_dates_count" style="color:#67c23a;">0</span>
-                <el-popover v-else placement="right" :width="260" trigger="click">
-                  <template #reference>
-                    <el-link type="warning" :underline="true" style="font-weight:600;">{{ row.missing_dates_count }}</el-link>
+          <el-tabs v-model="overviewFreq" type="card">
+            <!-- 日频概览 -->
+            <el-tab-pane label="日频" name="daily">
+              <div style="display:flex;justify-content:flex-end;margin-bottom:8px;">
+                <el-button size="small" :loading="overviewLoading" @click="loadOverview"><el-icon><Refresh /></el-icon> 刷新日频</el-button>
+              </div>
+              <el-table :data="overviewData" stripe size="small" max-height="500" style="width:100%;" v-loading="overviewLoading">
+                <el-table-column prop="instrument_id" label="合约ID" width="100" />
+                <el-table-column prop="start_date" label="起始日期" width="120" />
+                <el-table-column prop="end_date" label="结束日期" width="120" />
+                <el-table-column prop="total_rows" label="总行数" width="90" />
+                <el-table-column prop="expected_bdays" label="预期交易日" width="110" />
+                <el-table-column label="缺失日期数" width="120">
+                  <template #default="{ row }">
+                    <span v-if="!row.missing_dates_count" style="color:#67c23a;">0</span>
+                    <el-popover v-else placement="right" :width="260" trigger="click">
+                      <template #reference>
+                        <el-link type="warning" :underline="true" style="font-weight:600;">{{ row.missing_dates_count }}</el-link>
+                      </template>
+                      <div style="font-size:12px;font-weight:600;margin-bottom:6px;">{{ row.instrument_id }} 缺失日期明细</div>
+                      <div style="max-height:300px;overflow-y:auto;">
+                        <div v-for="d in (row.missing_dates || [])" :key="d" style="font-size:12px;line-height:1.8;font-family:monospace;">{{ d }}</div>
+                      </div>
+                      <div v-if="!row.missing_dates?.length" style="color:#909399;font-size:12px;">无明细数据</div>
+                    </el-popover>
                   </template>
-                  <div style="font-size:12px;font-weight:600;margin-bottom:6px;">{{ row.instrument_id }} 缺失日期明细</div>
-                  <div style="max-height:300px;overflow-y:auto;">
-                    <div v-for="d in (row.missing_dates || [])" :key="d" style="font-size:12px;line-height:1.8;font-family:monospace;">{{ d }}</div>
-                  </div>
-                  <div v-if="!row.missing_dates?.length" style="color:#909399;font-size:12px;">无明细数据</div>
-                </el-popover>
-              </template>
-            </el-table-column>
-            <el-table-column label="缺失字段" min-width="150">
-              <template #default="{ row }">
-                <span v-if="!row.missing_fields || Object.keys(row.missing_fields).length === 0" style="color:#67c23a;">无</span>
-                <span v-else style="color:#e6a23c;">{{ Object.entries(row.missing_fields).map(([k,v]) => `${k}:${v}`).join(', ') }}</span>
-              </template>
-            </el-table-column>
-            <el-table-column prop="status" label="状态" width="80">
-              <template #default="{ row }">
-                <el-tag :type="row.status === '完整' ? 'success' : 'warning'" size="small">{{ row.status }}</el-tag>
-              </template>
-            </el-table-column>
-          </el-table>
+                </el-table-column>
+                <el-table-column label="缺失字段" min-width="150">
+                  <template #default="{ row }">
+                    <span v-if="!row.missing_fields || Object.keys(row.missing_fields).length === 0" style="color:#67c23a;">无</span>
+                    <span v-else style="color:#e6a23c;">{{ Object.entries(row.missing_fields).map(([k,v]) => `${k}:${v}`).join(', ') }}</span>
+                  </template>
+                </el-table-column>
+                <el-table-column prop="status" label="状态" width="80">
+                  <template #default="{ row }">
+                    <el-tag :type="row.status === '完整' ? 'success' : 'warning'" size="small">{{ row.status }}</el-tag>
+                  </template>
+                </el-table-column>
+              </el-table>
+            </el-tab-pane>
+
+            <!-- 分钟频概览 -->
+            <el-tab-pane label="分钟频" name="min">
+              <div style="display:flex;justify-content:flex-end;margin-bottom:8px;">
+                <el-button size="small" :loading="overview1minLoading" @click="loadOverview1min"><el-icon><Refresh /></el-icon> 刷新分钟</el-button>
+              </div>
+              <el-table :data="overview1minData" stripe size="small" max-height="500" style="width:100%;" v-loading="overview1minLoading">
+                <el-table-column prop="instrument_id" label="合约ID" width="100" />
+                <el-table-column prop="start_time" label="起始时间" width="150" show-overflow-tooltip />
+                <el-table-column prop="end_time" label="结束时间" width="150" show-overflow-tooltip />
+                <el-table-column prop="total_rows" label="总bar数" width="100" />
+                <el-table-column prop="trade_days" label="交易日数" width="100" />
+                <el-table-column label="缺夜盘交易日" width="130">
+                  <template #default="{ row }">
+                    <span v-if="!row.missing_night_days" style="color:#67c23a;">0</span>
+                    <el-popover v-else placement="right" :width="260" trigger="click">
+                      <template #reference>
+                        <el-link type="warning" :underline="true" style="font-weight:600;">{{ row.missing_night_days }}</el-link>
+                      </template>
+                      <div style="font-size:12px;font-weight:600;margin-bottom:6px;">{{ row.instrument_id }} 缺夜盘交易日明细</div>
+                      <div style="max-height:300px;overflow-y:auto;">
+                        <div v-for="d in (row.missing_night_dates || [])" :key="d" style="font-size:12px;line-height:1.8;font-family:monospace;">{{ d }}</div>
+                      </div>
+                    </el-popover>
+                  </template>
+                </el-table-column>
+                <el-table-column prop="status" label="状态" width="100">
+                  <template #default="{ row }">
+                    <el-tag :type="row.status === '完整' ? 'success' : 'warning'" size="small">{{ row.status }}</el-tag>
+                  </template>
+                </el-table-column>
+              </el-table>
+            </el-tab-pane>
+          </el-tabs>
         </el-card>
       </el-tab-pane>
 
@@ -217,6 +326,12 @@
         <el-card shadow="never">
           <template #header><span style="font-weight:600;">查看详细行情数据</span></template>
           <el-form :inline="true" size="small" style="margin-bottom:12px;">
+            <el-form-item label="频率">
+              <el-select v-model="detailParams.freq" style="width:110px;">
+                <el-option label="日频" value="daily" />
+                <el-option label="分钟频" value="min" />
+              </el-select>
+            </el-form-item>
             <el-form-item label="合约">
               <el-select v-model="detailParams.instrument_id" filterable placeholder="选择合约" style="width:140px;">
                 <el-option v-for="id in instrumentIds" :key="id" :label="id" :value="id" />
@@ -252,9 +367,10 @@
             <div style="display:flex;align-items:center;justify-content:space-between;">
               <span style="font-weight:600;">数据库更新操作日志</span>
               <div style="display:flex;align-items:center;gap:8px;">
-                <el-select v-model="opLogTaskType" placeholder="任务类型" clearable size="small" style="width:140px;">
+                <el-select v-model="opLogTaskType" placeholder="任务类型" clearable size="small" style="width:160px;">
                   <el-option label="update-info" value="update-info" />
                   <el-option label="update-price" value="update-price" />
+                  <el-option label="update-price-1min" value="update-price-1min" />
                 </el-select>
                 <el-date-picker
                   v-model="opLogDateRange"
@@ -342,11 +458,14 @@ import {
   getMarketDataConfig,
   updateContractInfo,
   updateContractPrice,
+  updateContractPrice1min,
   getMarketDataTaskStatus,
   terminateMarketDataTask,
   getMarketDataLogs,
   getMarketDataOverview,
+  getMarketDataOverview1min,
   getMarketDataPrice,
+  getMarketDataPrice1min,
   deleteMarketData,
   getScheduledStatus,
   updateScheduledConfig,
@@ -456,6 +575,7 @@ const scheduleParams = reactive({
   wait_time: 2.0,
   method: 'bulk_write_update',
   only_update_new: true,
+  source: 'akshare',
 })
 const scheduleTimeDisplay = ref(scheduleParams.schedule_time)
 const onScheduleTimeChange = (val) => {
@@ -485,6 +605,7 @@ const priceParams = reactive({
   wait_time: 2.0,
   method: 'bulk_write_update',
   only_update_new: true,
+  source: 'akshare',
 })
 
 const loadScheduleStatus = async () => {
@@ -501,6 +622,7 @@ const loadScheduleStatus = async () => {
     scheduleParams.wait_time = Number.isFinite(Number(data.wait_time)) ? Number(data.wait_time) : 2.0
     scheduleParams.method = data.method || 'bulk_write_update'
     scheduleParams.only_update_new = data.only_update_new !== false
+    scheduleParams.source = data.source || 'akshare'
     scheduleConfigReady.value = true
   } catch { /* ignore */ }
   finally {
@@ -518,6 +640,7 @@ const saveScheduleConfig = async () => {
       wait_time: scheduleParams.wait_time,
       method: scheduleParams.method,
       only_update_new: scheduleParams.only_update_new,
+      source: scheduleParams.source,
     })
   } catch (err) {
     ElMessage.error('保存失败: ' + (err.response?.data?.detail || err.message))
@@ -553,6 +676,7 @@ const handleUpdatePrice = async () => {
       wait_time: priceParams.wait_time,
       method: priceParams.method,
       only_update_new: priceParams.only_update_new,
+      source: priceParams.source,
     }
     const { data } = await updateContractPrice(payload)
     currentPriceTaskId.value = data.task_id || ''
@@ -582,6 +706,61 @@ const handleStopPriceUpdate = async () => {
   }
 }
 
+// ── Tab 2b: Update Price 1min ──
+const price1minLoading = ref(false)
+const price1minLogs = ref([])
+const price1minStopping = ref(false)
+const currentPrice1minTaskId = ref('')
+const price1minParams = reactive({
+  instrument_id: [],
+  start_date: '',
+  end_date: '',
+  wait_time: 0.5,
+  method: 'bulk_write_update',
+  source: 'tqsdk_edb',
+})
+const handleUpdatePrice1min = async () => {
+  price1minLoading.value = true
+  price1minStopping.value = false
+  currentPrice1minTaskId.value = ''
+  price1minLogs.value = []
+  try {
+    const payload = {
+      instrument_id: price1minParams.instrument_id.length ? price1minParams.instrument_id : null,
+      start_date: price1minParams.start_date || null,
+      end_date: price1minParams.end_date || null,
+      wait_time: price1minParams.wait_time,
+      method: price1minParams.method,
+      source: price1minParams.source,
+    }
+    const { data } = await updateContractPrice1min(payload)
+    currentPrice1minTaskId.value = data.task_id || ''
+    ElMessage.success(data.message)
+    pollMarketTask(data.task_id, price1minLogs, () => {
+      price1minLoading.value = false
+      price1minStopping.value = false
+      currentPrice1minTaskId.value = ''
+    })
+  } catch (err) {
+    ElMessage.error('启动失败: ' + (err.response?.data?.detail || err.message))
+    price1minLoading.value = false
+    price1minStopping.value = false
+    currentPrice1minTaskId.value = ''
+  }
+}
+const handleStopPrice1minUpdate = async () => {
+  if (!currentPrice1minTaskId.value) return
+  try {
+    price1minStopping.value = true
+    await terminateMarketDataTask(currentPrice1minTaskId.value)
+    ElMessage.success('已发送停止请求')
+  } catch (err) {
+    ElMessage.error('停止失败: ' + (err.response?.data?.detail || err.message))
+  } finally {
+    price1minStopping.value = false
+  }
+}
+
 const pollMarketTask = (taskId, logsRef, onDone) => {
   const timer = setInterval(async () => {
     try {
@@ -602,6 +781,9 @@ const pollMarketTask = (taskId, logsRef, onDone) => {
 // ── Tab 3: Overview ──
 const overviewLoading = ref(false)
 const overviewData = ref([])
+const overviewFreq = ref('daily')
+const overview1minLoading = ref(false)
+const overview1minData = ref([])
 const loadOverview = async () => {
   overviewLoading.value = true
   try {
@@ -613,6 +795,17 @@ const loadOverview = async () => {
     overviewLoading.value = false
   }
 }
+const loadOverview1min = async () => {
+  overview1minLoading.value = true
+  try {
+    const { data } = await getMarketDataOverview1min()
+    overview1minData.value = data.overview || []
+  } catch (err) {
+    ElMessage.error('加载失败: ' + (err.response?.data?.detail || err.message))
+  } finally {
+    overview1minLoading.value = false
+  }
+}
 // 已改为仅手动点击“刷新”按钮触发，不再在切换页签时自动请求
 
 // ── Tab 4: Detail + K-line ──
@@ -622,18 +815,21 @@ const detailColumns = ref([])
 const showKline = ref(false)
 const klineContainer = ref(null)
 let klineChart = null
-const detailParams = reactive({ instrument_id: '', start_date: '', end_date: '' })
+const detailParams = reactive({ freq: 'daily', instrument_id: '', start_date: '', end_date: '' })
 
 const loadDetail = async () => {
   if (!detailParams.instrument_id) { ElMessage.warning('请选择合约'); return }
   detailLoading.value = true
   showKline.value = false
   try {
-    const { data } = await getMarketDataPrice({
+    const common = {
       instrument_id: detailParams.instrument_id,
       start_date: detailParams.start_date || undefined,
       end_date: detailParams.end_date || undefined,
-    })
+    }
+    const { data } = detailParams.freq === 'min'
+      ? await getMarketDataPrice1min(common)
+      : await getMarketDataPrice(common)
     detailRows.value = data.rows || []
     detailColumns.value = data.columns || []
   } catch (err) {

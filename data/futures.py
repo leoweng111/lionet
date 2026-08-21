@@ -15,6 +15,11 @@ from utils.params import (
 )
 from utils.logging import log
 
+# 数据来源标识: 每条价格记录都带 source 字段
+SOURCE_AKSHARE = 'akshare'        # 日频数据(akshare 接口)
+SOURCE_JOINQUANT = 'joinquant'    # 分钟频数据(聚宽), 及由其聚合的日频
+SOURCE_EDB = 'tqsdk_edb'          # 分钟频数据(天勤 EDB 免费接口)
+
 
 class UpdateCancelledError(RuntimeError):
     """Raised when an update task is cancelled by user."""
@@ -400,12 +405,16 @@ def update_futures_continuous_contract_price(instrument_id: Union[str, List, Non
 
     log.info(f'共获取 {len(df_futures_price)} 行数据，开始写入数据库...')
 
+    # 日频 akshare 来源: 加 source 字段, 并与 joinquant 聚合的日频共存(唯一键含 source)
+    df_futures_price = df_futures_price.copy()
+    df_futures_price['source'] = SOURCE_AKSHARE
     update_data(database='futures',
                 collection='continuous_contract_price_daily',
                 df=df_futures_price,
-                method=method)
+                method=method,
+                filter_column=['time', 'instrument_id', 'source'])
 
-    log.info(f'Successfully update futures continuous contract daily price ({len(df_futures_price)} rows).')
+    log.info(f'Successfully update futures continuous contract daily price ({len(df_futures_price)} rows, source={SOURCE_AKSHARE}).')
 
 
 def _to_root_instrument(instrument_id: str) -> str:
@@ -1042,3 +1051,434 @@ def update_risk_free_rate(method: str = 'insert_many'):
     """
     df_rfr = get_risk_free_rate(from_database=False)
     update_data(database='futures', collection='risk_free_rate', df=df_rfr, method=method)
+
+
+# ================== 分钟频率价格更新（天勤 EDB 免费接口） ==================
+# 数据源: 天勤 EDB 行情历史服务 https://edb.shinnytech.com
+#   免费可获取「近 1 年」的主力连续合约 1 分钟线(period=60), 无需 token。
+#   主连 symbol: KQ.m@{交易所}.{品种}  郑商所品种代码大写, 其余小写。
+# 换月因子(symbol/weighted_factor/is_rollover)复用日频库 continuous_contract_price_daily。
+# 写入 collection: futures.continuous_contract_price_1min。
+
+_FUTURES_ROOT_TO_EXCHANGE: Dict[str, str] = {
+    # 上期所 SHFE
+    'RB': 'SHFE', 'CU': 'SHFE', 'AL': 'SHFE', 'ZN': 'SHFE', 'AU': 'SHFE', 'AG': 'SHFE',
+    'NI': 'SHFE', 'SN': 'SHFE', 'PB': 'SHFE', 'FU': 'SHFE', 'BU': 'SHFE', 'RU': 'SHFE',
+    'SP': 'SHFE', 'SS': 'SHFE', 'HC': 'SHFE', 'WR': 'SHFE', 'AO': 'SHFE', 'BR': 'SHFE', 'AD': 'SHFE',
+    # 大商所 DCE
+    'C': 'DCE', 'M': 'DCE', 'Y': 'DCE', 'A': 'DCE', 'B': 'DCE', 'CS': 'DCE', 'JD': 'DCE',
+    'L': 'DCE', 'V': 'DCE', 'PP': 'DCE', 'J': 'DCE', 'JM': 'DCE', 'I': 'DCE', 'EG': 'DCE',
+    'EB': 'DCE', 'PG': 'DCE', 'LH': 'DCE', 'P': 'DCE', 'RR': 'DCE', 'BB': 'DCE', 'FB': 'DCE', 'LG': 'DCE',
+    # 郑商所 CZCE
+    'TA': 'CZCE', 'SR': 'CZCE', 'CF': 'CZCE', 'MA': 'CZCE', 'FG': 'CZCE', 'SA': 'CZCE',
+    'UR': 'CZCE', 'AP': 'CZCE', 'CJ': 'CZCE', 'OI': 'CZCE', 'RM': 'CZCE', 'PF': 'CZCE',
+    'PK': 'CZCE', 'SF': 'CZCE', 'SM': 'CZCE', 'PX': 'CZCE', 'PR': 'CZCE', 'CY': 'CZCE',
+    'WH': 'CZCE', 'SH': 'CZCE', 'ZC': 'CZCE',
+    # 能源 INE
+    'SC': 'INE', 'NR': 'INE', 'LU': 'INE', 'BC': 'INE', 'EC': 'INE',
+    # 广期所 GFEX
+    'SI': 'GFEX', 'LC': 'GFEX',
+}
+
+
+def _root_to_edb_symbol(root: str) -> Optional[str]:
+    """把品种 root(如 C/RB/TA)转成 EDB 主连 symbol(如 KQ.m@DCE.c / KQ.m@SHFE.rb / KQ.m@CZCE.TA)。"""
+    r = str(root).upper().strip()
+    if not r:
+        return None
+    exch = _FUTURES_ROOT_TO_EXCHANGE.get(r)
+    if not exch:
+        return None
+    code = r if exch == 'CZCE' else r.lower()
+    return f'KQ.m@{exch}.{code}'
+
+
+def _fetch_edb_kline(symbol: str, start_time: str, end_time: str,
+                     period: int = 60, wait_time: float = 0.5) -> pd.DataFrame:
+    """调用天勤 EDB 免费接口获取主连分钟线(period=60 秒=1分钟), 返回含 datetime 的 DataFrame。"""
+    import io
+    import urllib.parse
+    import urllib.request
+
+    params = {'period': period, 'symbol': symbol,
+              'start_time': start_time, 'end_time': end_time}
+    url = 'https://edb.shinnytech.com/md/kline?' + urllib.parse.urlencode(params)
+    req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        raw = resp.read().decode('utf-8', 'ignore')
+    if wait_time > 0:
+        time.sleep(wait_time)
+    if not raw.strip():
+        return pd.DataFrame()
+    df = pd.read_csv(io.StringIO(raw))
+    if 'datetime_nano' in df.columns:
+        df['datetime'] = (pd.to_datetime(df['datetime_nano'], unit='ns', utc=True)
+                          .dt.tz_convert('Asia/Shanghai').dt.tz_localize(None))
+    return df
+
+
+def _gen_minute_windows(start_dt: pd.Timestamp, end_dt: pd.Timestamp,
+                        days: int = 30) -> List[tuple]:
+    """按天生成分钟拉取窗口, 避免单次请求数据量过大。"""
+    windows: List[tuple] = []
+    cur = start_dt
+    while cur < end_dt:
+        win_end = min(cur + pd.Timedelta(days=days), end_dt)
+        windows.append((cur, win_end))
+        cur = win_end
+    return windows
+
+
+def assign_trading_day_1min(datetime_series: pd.Series, trading_days=None) -> pd.Series:
+    """给分钟 bar 打「交易日」标签。
+
+    中国商品期货夜盘(小时>=20)属于「下一个交易日」; 日盘(09:00-15:00)属于当天;
+    周五夜盘属于下周一(不能简单+1天)。交易日列表默认从「日盘 bar(小时<20)」推断。
+    """
+    if trading_days is None:
+        day_mask = datetime_series.dt.hour < 20
+        tds = np.array(sorted(pd.unique(datetime_series[day_mask].dt.normalize())),
+                       dtype='datetime64[D]')
+    else:
+        tds = np.array(pd.to_datetime(list(trading_days)).normalize(), dtype='datetime64[D]')
+        tds = np.unique(tds)
+    night = datetime_series.dt.hour >= 20
+    cal = datetime_series.dt.normalize().values.astype('datetime64[D]')
+    out = pd.Series(pd.NaT, index=datetime_series.index, dtype='datetime64[ns]')
+    if tds.size == 0:
+        return out
+    day_pos = np.minimum(np.searchsorted(tds, cal[~night], side='left'), tds.size - 1)
+    out.loc[~night] = pd.to_datetime(tds[day_pos])
+    night_pos = np.minimum(np.searchsorted(tds, cal[night], side='right'), tds.size - 1)
+    out.loc[night] = pd.to_datetime(tds[night_pos])
+    return out
+
+
+def detect_rollover_from_minute_df(df: pd.DataFrame,
+                                   initial_weighted_factor: float = 1.0,
+                                   gap_threshold: float = 0.01,
+                                   oi_chg_threshold: float = 0.15) -> pd.DataFrame:
+    """基于分钟数据自身检测主力切换日, 并计算后复权因子链。
+
+    - 换月日信号: ① 隔夜价格跳空 |gap|>gap_threshold; ② 持仓量单日|变化|>oi_chg_threshold
+      (价格接近但持仓量跳变, 如某天持仓 +44% 就是主力切换)。
+    - 换月比例 ≈ prev_close / open: 连续序列只有主力价, 用跳空比例近似消除换月跳空。
+    - 返回 schedule: td, symbol, weighted_factor, cur_weighted_factor, is_rollover。
+    """
+    first = df.groupby('td').first()
+    last = df.groupby('td').last()
+    pos_col = 'position' if 'position' in last.columns else \
+        ('open_interest' if 'open_interest' in last.columns else None)
+    daily = pd.DataFrame({
+        'open': first['open'],
+        'close': last['close'],
+        'position': last[pos_col] if pos_col else 0,
+    }).sort_index()
+    daily['prev_close'] = daily['close'].shift(1)
+    daily['gap_ret'] = daily['open'] / daily['prev_close'] - 1.0
+    daily['oi_chg'] = pd.to_numeric(daily['position'], errors='coerce').pct_change()
+    daily['is_rollover'] = ((daily['gap_ret'].abs() > gap_threshold)
+                            | (daily['oi_chg'].abs() > oi_chg_threshold))
+
+    wf = float(initial_weighted_factor)
+    wfs = []
+    for t, row in daily.iterrows():
+        if bool(row['is_rollover']) and pd.notna(row['prev_close']) and abs(row['open']) > 1e-12:
+            wf *= float(row['prev_close'] / row['open'])
+        wfs.append(wf)
+    daily['weighted_factor'] = wfs
+    daily['cur_weighted_factor'] = 1.0
+    daily['symbol'] = ''
+    return daily.reset_index()[['td', 'symbol', 'weighted_factor', 'cur_weighted_factor', 'is_rollover']]
+
+
+def build_minute_continuous_df_from_edb(df: pd.DataFrame,
+                                        schedule: pd.DataFrame,
+                                        instrument_id: str,
+                                        symbol: str = '',
+                                        mark_first_only: bool = True) -> pd.DataFrame:
+    """把 EDB 分钟 df 与换月 schedule 合并, 生成待入库 DataFrame。
+
+    df 需含: datetime, open, high, low, close, volume, open_interest, td
+    """
+    out = df.merge(schedule, on='td', how='left')
+    out['symbol'] = out['symbol'].fillna('').ffill()
+    if symbol:
+        out['symbol'] = out['symbol'].replace('', symbol).fillna(symbol)
+    out['weighted_factor'] = pd.to_numeric(out['weighted_factor'], errors='coerce').ffill().fillna(1.0)
+    out['cur_weighted_factor'] = pd.to_numeric(out['cur_weighted_factor'], errors='coerce').ffill().fillna(1.0)
+    daily_is_rollover = out['is_rollover'].fillna(False).astype(bool)
+    first_of_day = ~out.duplicated(subset='td', keep='first')
+    out['is_rollover'] = daily_is_rollover & first_of_day if mark_first_only else daily_is_rollover
+
+    out['instrument_id'] = instrument_id
+    out['settle'] = out['close']
+    out = out.rename(columns={'datetime': 'time', 'open_interest': 'position'})
+    out['time'] = pd.to_datetime(out['time'], errors='coerce')
+    price_cols = ['open', 'high', 'low', 'close', 'settle', 'volume', 'position', 'money',
+                  'weighted_factor', 'cur_weighted_factor']
+    for c in price_cols:
+        if c in out.columns:
+            out[c] = pd.to_numeric(out[c], errors='coerce')
+    if 'money' not in out.columns:
+        out['money'] = np.nan
+
+    out = out.dropna(subset=['time', 'open', 'high', 'low', 'close'])
+    for c, fill_val in [('settle', None), ('volume', 0.0), ('position', 0.0),
+                        ('money', 0.0), ('weighted_factor', 1.0), ('cur_weighted_factor', 1.0)]:
+        if c == 'settle':
+            out['settle'] = out['settle'].fillna(out['close'])
+        else:
+            out[c] = out[c].fillna(fill_val)
+
+    cols = ['time', 'instrument_id', 'symbol', 'open', 'high', 'low', 'close', 'settle',
+            'volume', 'position', 'money', 'weighted_factor', 'cur_weighted_factor', 'is_rollover']
+    out = out[cols].sort_values('time').reset_index(drop=True)
+    out = out.drop_duplicates(subset=['time', 'instrument_id'], keep='last').reset_index(drop=True)
+    return out
+
+
+def _load_latest_wf_1min(instrument_id: str) -> float:
+    """读取分钟库该品种最新一天的 weighted_factor, 用于增量更新时锚定 wf 链连续。"""
+    try:
+        df = get_data('futures', 'continuous_contract_price_1min', {'instrument_id': instrument_id})
+        if df is None or df.empty:
+            return 1.0
+        df['time'] = pd.to_datetime(df['time'], errors='coerce')
+        df = df.dropna(subset=['time'])
+        if df.empty or 'weighted_factor' not in df.columns:
+            return 1.0
+        latest = df.loc[df['time'].idxmax()]
+        try:
+            return float(latest['weighted_factor'])
+        except Exception:
+            return 1.0
+    except Exception:
+        return 1.0
+
+
+def update_futures_continuous_contract_price_1min(
+    instrument_id: Union[str, List[str], None] = None,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    wait_time: float = 0.5,
+    method: str = 'bulk_write_update',
+    cancel_event=None,
+    source: str = SOURCE_EDB,
+) -> None:
+    """从天勤 EDB 免费接口获取主力连续合约的近期分钟线, 写入 continuous_contract_price_1min。
+
+    - 数据源: 天勤 EDB 免费接口, **免费额度为近 1 年分钟线**(period=60)。默认取最近 90 天。
+    - 换月日/后复权因子: **基于分钟数据自身检测**(隔夜跳空 + 持仓量跳变),
+      保证分钟数据内部自洽; 与日频库换月日相互独立, 不依赖日频数据。
+    - 增量更新: 以数据库已有最新 weighted_factor 锚定, 保证 wf 链连续。
+    - 写入唯一键含 source(默认 tqsdk_edb), 与 joinquant 分钟数据并存。
+    - 注意: 若 start_date 早于近 1 年, EDB 免费接口可能取不到, 请使用付费专业版。
+    """
+    if instrument_id is None:
+        instrument_id = get_futures_continuous_contract_info(from_database=True)['instrument_id'].tolist()
+    if isinstance(instrument_id, str):
+        instrument_id = [instrument_id]
+
+    end_dt = pd.Timestamp(end_date or date.today().strftime('%Y%m%d'))
+    if start_date:
+        start_dt = pd.Timestamp(start_date)
+    else:
+        start_dt = end_dt - pd.Timedelta(days=90)
+
+    # EDB 免费仅近 1 年, 提前预警
+    if start_dt < (end_dt - pd.Timedelta(days=365)):
+        log.warning(f'[1min] start_date={start_dt.date()} 早于近1年, EDB 免费接口可能取不到更早数据')
+
+    log.info(f'[1min] 更新 {len(instrument_id)} 个合约分钟数据: {start_dt.date()} ~ {end_dt.date()}')
+
+    from mongo.mongify import update_data
+
+    for idx, ins_id in enumerate(instrument_id, 1):
+        _raise_if_cancelled(cancel_event)
+        root = _to_root_instrument(ins_id)
+        edb_symbol = _root_to_edb_symbol(root)
+        if not edb_symbol:
+            log.warning(f'[1min] {ins_id} 找不到 EDB 主连代码(root={root}), 跳过')
+            continue
+        log.info(f'[{idx}/{len(instrument_id)}] {ins_id} EDB主连={edb_symbol}')
+
+        # 1) 拉取 EDB 分钟线(分段, 避免单次过大)
+        frames: List[pd.DataFrame] = []
+        for ws, we in _gen_minute_windows(start_dt, end_dt):
+            _raise_if_cancelled(cancel_event)
+            df_k = _fetch_edb_kline(edb_symbol, str(ws), str(we), wait_time=wait_time)
+            if df_k is not None and not df_k.empty:
+                frames.append(df_k)
+        if not frames:
+            log.warning(f'[1min] {ins_id} 未拉到数据, 跳过')
+            continue
+        edb_df = pd.concat(frames, ignore_index=True)
+        edb_df = edb_df.drop_duplicates(subset='datetime').sort_values('datetime').reset_index(drop=True)
+        edb_df = edb_df.rename(columns={'close_oi': 'open_interest'})
+        if 'open_interest' not in edb_df.columns:
+            edb_df['open_interest'] = edb_df.get('open_oi', 0)
+        edb_df['code'] = edb_symbol
+        log.info(f'[1min] {ins_id} 拉到 {len(edb_df)} 根分钟bar')
+
+        # 2) 交易日归属 + 基于聚宽分钟数据自身检测换月日 + 计算后复权因子链
+        edb_df['td'] = assign_trading_day_1min(edb_df['datetime'])
+        initial_wf = _load_latest_wf_1min(ins_id)   # 增量锚定: 接续数据库已有 wf 链
+        schedule = detect_rollover_from_minute_df(edb_df, initial_weighted_factor=initial_wf)
+        schedule['symbol'] = edb_symbol
+        out = build_minute_continuous_df_from_edb(edb_df, schedule, ins_id, symbol=edb_symbol)
+        if out.empty:
+            log.warning(f'[1min] {ins_id} 构建结果为空, 跳过')
+            continue
+        out['source'] = source
+        log.info(f'[1min] {ins_id} 构建完成 {len(out)} 行')
+
+        # 3) 分批写入(每批 5000, 可安全中断; 唯一键含 source, 与 joinquant 分钟并存)
+        total = len(out)
+        for i in range(0, total, 5000):
+            _raise_if_cancelled(cancel_event)
+            chunk = out.iloc[i:i + 5000]
+            update_data(database='futures', collection='continuous_contract_price_1min',
+                        df=chunk, method=method, filter_column=['time', 'instrument_id', 'source'])
+            log.info(f'[1min] {ins_id} 写入 {min(i + 5000, total)}/{total}')
+        log.info(f'[1min] {ins_id} 完成, 共写入 {total} 行')
+
+    log.info('[1min] 分钟价格更新全部完成')
+
+
+def _is_holiday_normal(td, trading_days) -> bool:
+    """判断某交易日是否因「前一交易日是节前最后交易日(法定节假日前夜盘暂停)」而无夜盘(属正常)。"""
+    try:
+        import datetime as _dt
+        import chinese_calendar as cc
+
+        tds = sorted(trading_days)
+        try:
+            idx = tds.index(td)
+        except ValueError:
+            return False
+        if idx == 0:
+            return False
+        prev = tds[idx - 1]
+        cur = prev + _dt.timedelta(days=1)
+        while cur < td:
+            if cur.weekday() < 5 and cc.is_holiday(cur.date()):
+                return True
+            cur += _dt.timedelta(days=1)
+        return False
+    except Exception:
+        return False
+
+
+def aggregate_minute_to_daily_df(df_min: pd.DataFrame, trading_days=None) -> pd.DataFrame:
+    """把分钟 df 按交易日聚合成日频 df。
+
+    df_min 需含: time, open, high, low, close, volume, position, money,
+                 weighted_factor, cur_weighted_factor, is_rollover, symbol。
+    返回列: time(交易日), open, high, low, close, settle, volume, position, money,
+            weighted_factor, cur_weighted_factor, is_rollover, symbol, bar_count。
+    """
+    df = df_min.copy()
+    df['time'] = pd.to_datetime(df['time'], errors='coerce')
+    df = df.dropna(subset=['time'])
+    df['td'] = assign_trading_day_1min(df['time'], trading_days=trading_days)
+    df = df.dropna(subset=['td'])
+    for c in ['open', 'high', 'low', 'close', 'volume', 'position', 'money',
+              'weighted_factor', 'cur_weighted_factor']:
+        if c in df.columns:
+            df[c] = pd.to_numeric(df[c], errors='coerce')
+
+    g = df.groupby('td')
+    out = pd.DataFrame({
+        'time': g['time'].first(),
+        'open': g['open'].first(),
+        'high': g['high'].max(),
+        'low': g['low'].min(),
+        'close': g['close'].last(),
+        'volume': g['volume'].sum(),
+        'position': g['position'].last(),
+        'money': g['money'].sum(),
+        'weighted_factor': g['weighted_factor'].first(),
+        'cur_weighted_factor': g['cur_weighted_factor'].first(),
+        'is_rollover': g['is_rollover'].any(),
+        'symbol': g['symbol'].first(),
+        'bar_count': g.size(),
+    }).reset_index()
+    out = out.rename(columns={'td': 'time'})
+    out['time'] = pd.to_datetime(out['time']).dt.normalize()
+    out['settle'] = out['close']
+    return out
+
+
+def update_futures_continuous_contract_price_from_minute(
+    instrument_id: Union[str, List[str], None] = None,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    method: str = 'bulk_write_update',
+    cancel_event=None,
+    source: str = SOURCE_JOINQUANT,
+) -> None:
+    """把分钟频数据库中的 joinquant 数据聚合成日频, 写入日频库(source=joinquant, 与 akshare 并存)。
+
+    - 换月日/weighted_factor/cur_weighted_factor/is_rollover 直接沿用分钟数据(由聚宽数据确定)。
+    - 写入唯一键含 source, 不覆盖 akshare 日频。
+    - 对「无分钟数据 / 缺夜盘 / 节假日无夜盘」的交易日输出 warning, 便于前端展示。
+    """
+    if instrument_id is None:
+        instrument_id = get_futures_continuous_contract_info(from_database=True)['instrument_id'].tolist()
+    if isinstance(instrument_id, str):
+        instrument_id = [instrument_id]
+
+    end_dt = pd.Timestamp(end_date or date.today().strftime('%Y%m%d'))
+    start_dt = pd.Timestamp(start_date) if start_date else pd.Timestamp(RESEARCH_START_DATE)
+
+    log.info(f'[min2daily] 将分钟(source={source})聚合成日频: {start_dt.date()} ~ {end_dt.date()}, instruments={instrument_id}')
+    from mongo.mongify import update_data
+
+    for idx, ins_id in enumerate(instrument_id, 1):
+        _raise_if_cancelled(cancel_event)
+        df_min = get_data('futures', 'continuous_contract_price_1min',
+                          {'instrument_id': ins_id, 'source': source})
+        if df_min is None or df_min.empty:
+            log.warning(f'[min2daily] {ins_id} 分钟库无 source={source} 数据, 跳过')
+            continue
+        df_min = df_min.copy()
+        df_min['time'] = pd.to_datetime(df_min['time'], errors='coerce')
+        df_min = df_min.dropna(subset=['time'])
+        df_min = df_min[(df_min['time'] >= start_dt) & (df_min['time'] <= end_dt + pd.Timedelta(days=1))]
+
+        trading_days = get_trading_days(start_dt.strftime('%Y%m%d'), end_dt.strftime('%Y%m%d'))
+        daily = aggregate_minute_to_daily_df(df_min, trading_days=trading_days)
+        if daily.empty:
+            log.warning(f'[min2daily] {ins_id} 聚合结果为空, 跳过')
+            continue
+
+        # 缺失 / 缺夜盘 / 节假日检查
+        bar_map = dict(zip(daily['time'].dt.normalize(), daily['bar_count']))
+        for t in trading_days:
+            if t not in bar_map:
+                log.warning(f'[min2daily] {ins_id} 交易日 {t.date()} 无 {source} 分钟数据(缺失)')
+            elif int(bar_map[t]) < 300:
+                if _is_holiday_normal(t, trading_days):
+                    log.warning(f'[min2daily] {ins_id} 交易日 {t.date()} bar数不足({int(bar_map[t])}), '
+                                f'属节假日(节前无夜盘)正常')
+                else:
+                    log.warning(f'[min2daily] {ins_id} 交易日 {t.date()} bar数不足({int(bar_map[t])}), 疑似缺夜盘')
+
+        daily['instrument_id'] = ins_id
+        daily['source'] = source
+        cols = ['time', 'instrument_id', 'symbol', 'open', 'high', 'low', 'close', 'settle',
+                'volume', 'position', 'money', 'weighted_factor', 'cur_weighted_factor',
+                'is_rollover', 'source']
+        out = daily[cols].drop_duplicates(subset=['time', 'instrument_id', 'source'], keep='last')
+        out = out.sort_values('time').reset_index(drop=True)
+
+        total = len(out)
+        for i in range(0, total, 5000):
+            _raise_if_cancelled(cancel_event)
+            chunk = out.iloc[i:i + 5000]
+            update_data(database='futures', collection='continuous_contract_price_daily',
+                        df=chunk, method=method, filter_column=['time', 'instrument_id', 'source'])
+            log.info(f'[min2daily] {ins_id} 写入 {min(i + 5000, total)}/{total}')
+        log.info(f'[min2daily] {ins_id} 完成, 共写入 {total} 行')
+    log.info('[min2daily] 全部完成')

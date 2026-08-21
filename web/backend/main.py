@@ -35,6 +35,9 @@ from data.futures import (
     get_trading_days,
     update_futures_continuous_contract_info,
     update_futures_continuous_contract_price,
+    update_futures_continuous_contract_price_1min,
+    update_futures_continuous_contract_price_from_minute,
+    assign_trading_day_1min,
     UpdateCancelledError,
 )
 from factors.factor_auto_search import GeneticFactorGenerator, FactorFusioner, LLMPromptFactorGenerator
@@ -3099,6 +3102,17 @@ class UpdatePriceParams(BaseModel):
     wait_time: float = 2.0
     method: str = "bulk_write_update"
     only_update_new: bool = False
+    source: str = "akshare"   # akshare=原akshare日频; joinquant=从分钟库聚合日频
+
+
+class UpdatePrice1minParams(BaseModel):
+    """分钟频率价格更新参数(天勤EDB免费接口, 免费额度近1年分钟线)。"""
+    instrument_id: Optional[List[str]] = None
+    start_date: Optional[str] = None   # 留空=最近90天
+    end_date: Optional[str] = None
+    wait_time: float = 0.5
+    method: str = "bulk_write_update"
+    source: str = "tqsdk_edb"   # 天勤 EDB 来源标识
 
 
 class ScheduleConfigParams(BaseModel):
@@ -3109,6 +3123,7 @@ class ScheduleConfigParams(BaseModel):
     wait_time: float = 2.0
     method: str = "bulk_write_update"
     only_update_new: bool = True
+    source: str = "akshare"   # akshare=原akshare日频; joinquant=从分钟库聚合日频
 
 
 class DeleteDataParams(BaseModel):
@@ -3147,6 +3162,7 @@ def _run_daily_price_update():
     instrument_id = cfg.get("instrument_id")
     if not instrument_id:
         instrument_id = None
+    src = str(cfg.get("source") or "akshare")
     task_id = f"scheduled_{uuid.uuid4().hex[:8]}"
     market_data_tasks[task_id] = {
         "type": "update-price", "status": "running",
@@ -3159,6 +3175,7 @@ def _run_daily_price_update():
             "wait_time": float(cfg.get("wait_time", 2.0)),
             "method": str(cfg.get("method") or "bulk_write_update"),
             "only_update_new": bool(cfg.get("only_update_new", True)),
+            "source": src,
             "scheduled": True,
         },
     }
@@ -3168,20 +3185,30 @@ def _run_daily_price_update():
     lionet_logger.addHandler(handler)
     try:
         lionet_logger.info(
-            f"定时更新启动: date={target_day}, instrument_id={instrument_id}, "
+            f"定时更新启动: source={src}, date={target_day}, instrument_id={instrument_id}, "
             f"load_prev_weighted_factor={cfg.get('load_prev_weighted_factor', True)}, "
             f"wait_time={cfg.get('wait_time', 2.0)}, method={cfg.get('method', 'bulk_write_update')}, "
             f"only_update_new={cfg.get('only_update_new', True)}"
         )
-        update_futures_continuous_contract_price(
-            instrument_id=instrument_id,
-            start_date=target_day,
-            end_date=target_day,
-            load_prev_weighted_factor=bool(cfg.get("load_prev_weighted_factor", True)),
-            wait_time=float(cfg.get("wait_time", 2.0)),
-            method=str(cfg.get("method") or "bulk_write_update"),
-            only_update_new=bool(cfg.get("only_update_new", True)),
-        )
+        if src == "joinquant":
+            # 定时从分钟库聚合 joinquant 日频
+            update_futures_continuous_contract_price_from_minute(
+                instrument_id=instrument_id,
+                start_date=target_day,
+                end_date=target_day,
+                method=str(cfg.get("method") or "bulk_write_update"),
+                source="joinquant",
+            )
+        else:
+            update_futures_continuous_contract_price(
+                instrument_id=instrument_id,
+                start_date=target_day,
+                end_date=target_day,
+                load_prev_weighted_factor=bool(cfg.get("load_prev_weighted_factor", True)),
+                wait_time=float(cfg.get("wait_time", 2.0)),
+                method=str(cfg.get("method") or "bulk_write_update"),
+                only_update_new=bool(cfg.get("only_update_new", True)),
+            )
         lionet_logger.info('定时更新完成')
         market_data_tasks[task_id]["status"] = "completed"
     except Exception as e:
@@ -3305,22 +3332,34 @@ async def api_update_price(params: UpdatePriceParams):
             effective_start_date = params.start_date or RESEARCH_START_DATE
             cancel_event = market_data_tasks[task_id].get("cancel_event")
             lionet_logger.info(
-                f'价格数据更新任务启动: instrument_id={params.instrument_id}, '
+                f'价格数据更新任务启动: source={params.source}, instrument_id={params.instrument_id}, '
                 f'start_date={effective_start_date}, end_date={params.end_date}, '
                 f'load_prev_weighted_factor={params.load_prev_weighted_factor}, '
                 f'wait_time={params.wait_time}, method={params.method}, '
                 f'only_update_new={params.only_update_new}'
             )
-            update_futures_continuous_contract_price(
-                instrument_id=params.instrument_id,
-                start_date=effective_start_date,
-                end_date=params.end_date,
-                load_prev_weighted_factor=params.load_prev_weighted_factor,
-                wait_time=params.wait_time,
-                method=params.method,
-                only_update_new=params.only_update_new,
-                cancel_event=cancel_event,
-            )
+            if params.source == "joinquant":
+                # 从分钟频库(joinquant)聚合为日频写入日频库, 不覆盖 akshare
+                update_futures_continuous_contract_price_from_minute(
+                    instrument_id=params.instrument_id,
+                    start_date=params.start_date,
+                    end_date=params.end_date,
+                    method=params.method,
+                    cancel_event=cancel_event,
+                    source="joinquant",
+                )
+            else:
+                # 原 akshare 日频更新
+                update_futures_continuous_contract_price(
+                    instrument_id=params.instrument_id,
+                    start_date=effective_start_date,
+                    end_date=params.end_date,
+                    load_prev_weighted_factor=params.load_prev_weighted_factor,
+                    wait_time=params.wait_time,
+                    method=params.method,
+                    only_update_new=params.only_update_new,
+                    cancel_event=cancel_event,
+                )
             if market_data_tasks[task_id].get("status") == "terminated":
                 lionet_logger.warning('价格数据更新任务已被终止')
                 return
@@ -3342,6 +3381,61 @@ async def api_update_price(params: UpdatePriceParams):
 
     threading.Thread(target=_run, daemon=True).start()
     return {"task_id": task_id, "message": "价格数据更新任务已启动"}
+
+
+@app.post("/api/market-data/update-price-1min")
+async def api_update_price_1min(params: UpdatePrice1minParams):
+    """更新分钟连续合约价格(天勤EDB免费接口近1年分钟线, 异步任务)。"""
+    task_id = f"price1min_{uuid.uuid4().hex[:8]}"
+    market_data_tasks[task_id] = {
+        "type": "update-price-1min", "status": "running",
+        "started_at": datetime.now().isoformat(), "logs": [],
+        "params": params.dict(),
+        "cancel_event": threading.Event(),
+    }
+    _save_market_data_task_to_db(task_id)
+
+    def _run():
+        from utils.logging import log as lionet_logger
+        handler = _MarketDataLogHandler(task_id)
+        lionet_logger.addHandler(handler)
+        try:
+            cancel_event = market_data_tasks[task_id].get("cancel_event")
+            lionet_logger.info(
+                f'分钟价格数据更新任务启动: instrument_id={params.instrument_id}, '
+                f'start_date={params.start_date}, end_date={params.end_date}, '
+                f'wait_time={params.wait_time}, method={params.method}'
+            )
+            update_futures_continuous_contract_price_1min(
+                instrument_id=params.instrument_id,
+                start_date=params.start_date,
+                end_date=params.end_date,
+                wait_time=params.wait_time,
+                method=params.method,
+                cancel_event=cancel_event,
+                source=params.source,
+            )
+            if market_data_tasks[task_id].get("status") == "terminated":
+                lionet_logger.warning('分钟价格数据更新任务已被终止')
+                return
+            lionet_logger.info('分钟价格数据更新任务完成')
+            market_data_tasks[task_id]["status"] = "completed"
+        except UpdateCancelledError as e:
+            market_data_tasks[task_id]["status"] = "terminated"
+            market_data_tasks[task_id]["error"] = str(e)
+            lionet_logger.warning(f'分钟价格数据更新任务已终止: {e}')
+        except Exception as e:
+            market_data_tasks[task_id]["status"] = "failed"
+            market_data_tasks[task_id]["error"] = str(e)
+            lionet_logger.error(f'分钟价格数据更新任务失败: {e}')
+            traceback.print_exc()
+        finally:
+            market_data_tasks[task_id]["finished_at"] = datetime.now().isoformat()
+            _save_market_data_task_to_db(task_id)
+            lionet_logger.removeHandler(handler)
+
+    threading.Thread(target=_run, daemon=True).start()
+    return {"task_id": task_id, "message": "分钟价格数据更新任务已启动"}
 
 
 @app.post("/api/market-data/terminate/{task_id}")
@@ -3667,6 +3761,132 @@ async def api_get_price(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.get("/api/market-data/price-1min")
+async def api_get_price_1min(
+    instrument_id: str,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+):
+    """获取分钟连续合约价格(continuous_contract_price_1min), 用于表格展示和K线图。"""
+
+    def _query():
+        op = {"instrument_id": instrument_id}
+        ts_start = pd.Timestamp(start_date) if start_date else None
+        ts_end = pd.Timestamp(end_date) if end_date else None
+        if ts_start is not None and ts_end is not None:
+            op["time"] = {"$gte": ts_start, "$lte": ts_end + pd.Timedelta(days=1)}
+        elif ts_start is not None:
+            op["time"] = {"$gte": ts_start}
+        elif ts_end is not None:
+            op["time"] = {"$lte": ts_end + pd.Timedelta(days=1)}
+        else:
+            # 默认最近 90 天, 避免一次性返回过大
+            op["time"] = {"$gte": pd.Timestamp(datetime.now()) - pd.Timedelta(days=90)}
+        df = get_data(database="futures", collection="continuous_contract_price_1min",
+                      mongo_operator=op)
+        if df is None or df.empty:
+            return {"rows": [], "columns": []}
+        df["time"] = pd.to_datetime(df["time"], errors="coerce")
+        df = df.sort_values("time").reset_index(drop=True)
+        df["time"] = df["time"].dt.strftime("%Y-%m-%d %H:%M:%S")
+        if "_id" in df.columns:
+            df = df.drop(columns=["_id"])
+        for c in ["open", "high", "low", "close", "settle", "volume", "position", "money",
+                  "weighted_factor", "cur_weighted_factor"]:
+            if c in df.columns:
+                df[c] = pd.to_numeric(df[c], errors="coerce")
+        columns = df.columns.tolist()
+        rows = []
+        for rec in df.to_dict(orient="records"):
+            clean = {}
+            for k, v in rec.items():
+                if isinstance(v, float) and (np.isnan(v) or np.isinf(v)):
+                    clean[k] = None
+                elif isinstance(v, (np.integer,)):
+                    clean[k] = int(v)
+                elif isinstance(v, (np.floating,)):
+                    fv = float(v)
+                    clean[k] = None if (np.isnan(fv) or np.isinf(fv)) else fv
+                elif isinstance(v, (np.bool_,)):
+                    clean[k] = bool(v)
+                else:
+                    clean[k] = v
+            rows.append(clean)
+        return {"rows": rows, "columns": columns}
+
+    try:
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(None, _query)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/market-data/overview-1min")
+async def api_market_data_overview_1min():
+    """分钟频率数据概览: 按品种统计分钟库(continuous_contract_price_1min)覆盖/缺夜盘情况。"""
+
+    def _compute():
+        try:
+            df_info = get_futures_continuous_contract_info(instrument_id=None, from_database=True)
+            if df_info is None or df_info.empty:
+                return {"overview": []}
+            all_ids = sorted(df_info["instrument_id"].dropna().unique().tolist())
+
+            # 交易日归属(复用 data.futures 中的分钟交易日归属逻辑)
+            assign_trading_day = assign_trading_day_1min
+
+            result = []
+            for ins_id in all_ids:
+                try:
+                    df = get_data(database="futures", collection="continuous_contract_price_1min",
+                                  mongo_operator={"instrument_id": ins_id})
+                    if df is None or df.empty:
+                        result.append({
+                            "instrument_id": str(ins_id),
+                            "start_time": "-", "end_time": "-",
+                            "total_rows": 0, "trade_days": 0,
+                            "missing_night_days": 0, "missing_night_dates": [],
+                            "status": "无数据",
+                        })
+                        continue
+                    df = df.copy()
+                    df["time"] = pd.to_datetime(df["time"], errors="coerce")
+                    df = df.dropna(subset=["time"]).sort_values("time")
+                    if df.empty:
+                        continue
+                    df["td"] = assign_trading_day(df["time"])
+                    g = df.groupby("td").size()
+                    missing_night = g[g < 300]
+                    result.append({
+                        "instrument_id": str(ins_id),
+                        "start_time": df["time"].min().strftime("%Y-%m-%d %H:%M"),
+                        "end_time": df["time"].max().strftime("%Y-%m-%d %H:%M"),
+                        "total_rows": len(df),
+                        "trade_days": int(g.size),
+                        "missing_night_days": len(missing_night),
+                        "missing_night_dates": [pd.Timestamp(t).date().strftime("%Y-%m-%d")
+                                                for t in missing_night.index[:50]],
+                        "status": "完整" if len(missing_night) == 0 else "有缺夜盘",
+                    })
+                except Exception:
+                    result.append({
+                        "instrument_id": str(ins_id),
+                        "start_time": "-", "end_time": "-",
+                        "total_rows": 0, "trade_days": 0,
+                        "missing_night_days": 0, "missing_night_dates": [],
+                        "status": "查询异常",
+                    })
+            return {"overview": result}
+        except Exception as e:
+            return {"error": str(e)}
+
+    loop = asyncio.get_event_loop()
+    resp = await loop.run_in_executor(None, _compute)
+    if "error" in resp:
+        raise HTTPException(status_code=500, detail=resp["error"])
+    return resp
+
+
 @app.post("/api/market-data/delete")
 async def api_delete_price(params: DeleteDataParams):
     """Delete price data for given instrument_ids and optional date range."""
@@ -3703,6 +3923,7 @@ async def api_scheduled_status():
         "wait_time": float(_daily_schedule_config.get("wait_time", 2.0)),
         "method": str(_daily_schedule_config.get("method") or "bulk_write_update"),
         "only_update_new": bool(_daily_schedule_config.get("only_update_new", True)),
+        "source": str(_daily_schedule_config.get("source") or "akshare"),
     }
 
 
@@ -3718,6 +3939,7 @@ async def api_update_schedule_config(params: ScheduleConfigParams):
         "wait_time": float(params.wait_time),
         "method": str(params.method),
         "only_update_new": bool(params.only_update_new),
+        "source": str(params.source or "akshare"),
     })
     _save_market_schedule_config_to_db()
     return {
