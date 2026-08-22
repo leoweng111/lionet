@@ -1390,7 +1390,6 @@ def aggregate_minute_to_daily_df(df_min: pd.DataFrame, trading_days=None) -> pd.
 
     g = df.groupby('td')
     out = pd.DataFrame({
-        'time': g['time'].first(),
         'open': g['open'].first(),
         'high': g['high'].max(),
         'low': g['low'].min(),
@@ -1404,6 +1403,7 @@ def aggregate_minute_to_daily_df(df_min: pd.DataFrame, trading_days=None) -> pd.
         'symbol': g['symbol'].first(),
         'bar_count': g.size(),
     }).reset_index()
+    # reset_index 后的索引列名是 'td'(交易日), 直接作为日频 time
     out = out.rename(columns={'td': 'time'})
     out['time'] = pd.to_datetime(out['time']).dt.normalize()
     out['settle'] = out['close']

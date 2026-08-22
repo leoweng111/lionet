@@ -279,12 +279,12 @@ python -u test/data/verify_daily_vs_1min.py
   - 分钟研究**独立用聚宽口径**（聚宽换月日 + 聚宽后复权）：内部自洽，可独立做分钟策略；
   - 日频、分钟**混用/对齐**（组合因子、跨频率验证）：必须统一换月日，最好日频也改用聚宽 9999（同源同规则）。
 
-### 分钟数据的两种换月口径（务必区分）
+### 分钟数据的换月口径（务必区分）
 
-1. **历史全量导入**（`import_c0_1min_to_db.py`）：复用日频库换月安排（symbol/weighted_factor/is_rollover），保证与日频一致，但换月窗口内价格与 factor 可能不自洽。
-2. **分钟增量更新**（`data.futures.update_futures_continuous_contract_price_1min`，天勤 EDB）：**基于聚宽分钟数据自身检测换月日**（隔夜跳空 + 持仓量跳变），自己算 `weighted_factor` 链（增量锚定到数据库已有最新 wf），分钟数据内部自洽，与日频换月日相互独立。
+1. **历史全量导入**（`import_c0_1min_to_db.py`）：**优先使用 CSV 中由聚宽 `get_dominant_future` 导出的换月字段**（聚宽官方口径，最准）；若 CSV 无这些字段则回退到"分钟数据自身 gap 检测"。
+2. **分钟增量更新**（`data.futures.update_futures_continuous_contract_price_1min`，天勤 EDB）：**基于分钟数据自身检测换月日**（隔夜跳空 + 持仓量跳变），自己算 `weighted_factor` 链；天勤无聚宽接口，故用此近似。
 
-> 推荐用口径 2 做分钟策略研究（自洽可靠）；若要与日频同口径，需统一数据源。这两种方式写入的都是 `continuous_contract_price_1min`，但 factor 来源不同——重跑会互相覆盖，请勿混用。
+> 聚宽口径是官方主力切换日（最准）；天勤口径是自洽近似。两者写入同一分钟库但 source 不同（joinquant / tqsdk_edb），可并存；下游按 source 过滤。
 
 ---
 
@@ -292,15 +292,17 @@ python -u test/data/verify_daily_vs_1min.py
 
 | 脚本 | 作用 |
 |---|---|
-| `test/data/joinquant_fut_min_export.py` | 聚宽研究环境导出主力连续分钟 CSV |
-| `test/data/import_c0_1min_to_db.py` | 读 CSV → 复用日频换月安排 → 分批写入 `continuous_contract_price_1min` |
+| `test/data/joinquant_fut_min_export.py` | 聚宽研究环境导出主力连续分钟 CSV（用 `get_dominant_future` 计算换月，CSV 含 `symbol/is_rollover/weighted_factor/cur_weighted_factor`） |
+| `test/data/joinquant_fix_missing_night.py` | 聚宽环境补拉缺夜盘交易日的完整数据（同样带换月字段） |
+| `test/data/import_c0_1min_to_db.py` | 合并两个 CSV → **优先用 CSV 换月字段** → `source='joinquant'` → 覆盖更新分钟库 |
+| `test/data/backfill_daily_source.py` | 给日频库已有记录回填 `source='akshare'` |
+| `test/data/aggregate_minute_to_daily.py` | 把 joinquant 分钟聚合为日频写入日频库（不覆盖 akshare） |
 | `test/data/verify_daily_vs_1min.py` | 验证日频 vs 分钟一致性（区分换月窗口/数据缺失/真不一致） |
 | `test/data/find_missing_night_days.py` | 找出缺夜盘交易日（排除节假日正常、CSV 首日）并生成补数列表 |
-| `test/data/joinquant_fix_missing_night.py` | 聚宽环境补拉缺失交易日的完整数据 |
 | `test/data/check_duplicate_1min.py` | 检查分钟库重复 bar |
 | `test/data/compare_db_vs_csv_1min.py` | 按交易日逐根对比数据库与 CSV |
 | `test/data/stop_c0_import.py` | 一键停止导入（杀进程 + killOp） |
-| `data/futures.py` | 日频连续合约构建与换月调整逻辑 |
+| `data/futures.py` | 日频构建 + 分钟(天勤)/聚合日频等更新逻辑 |
 | `mongo/mongify.py` | MongoDB 读写封装（get_data/update_data/delete_data） |
 
 ---
@@ -332,42 +334,67 @@ python -u test/data/verify_daily_vs_1min.py
 
 > 分钟/日频库的唯一键都**含 source**，因此同一 (time, instrument_id) 可能同时存在 akshare 与 joinquant 两条日频、或 joinquant 与 tqsdk_edb 两条分钟。**下游读取/回测时如需单一口径，请按 source 过滤。**
 
-### 14.2 脚本/操作运行顺序
+### 14.2 完整操作步骤
+
+#### A. 首次全量初始化（一次性，用聚宽历史数据）
 
 ```bash
+cd /Users/wenglongao/work_repo/lionet
+
 # 0) 确认 Mongo 已启动
 mongosh "mongodb://leo:密码@127.0.0.1:27017" --eval 'db.runCommand({ping:1})'
 
 # 1) 给日频库已有数据回填 source='akshare'（只补缺 source 的记录）
 python -u test/data/backfill_daily_source.py
 
-# 2) 全量导入聚宽分钟（合并两个 CSV, source=joinquant, 覆盖该品种旧分钟数据）
-python -u test/data/import_c0_1min_to_db.py
-#   默认合并 /Users/wenglongao/Downloads/C9999.XDCE.csv + C9999.XDCE_fix_night.csv
+# 2) 聚宽研究环境运行导出脚本（用 get_dominant_future 计算换月, CSV 带换月字段）：
+#    test/data/joinquant_fut_min_export.py   -> 导出主 CSV
+#    下载到本地: /Users/wenglongao/Downloads/C9999.XDCE.csv
 
-# 3) （可选）把 joinquant 分钟聚合为日频写入日频库（不覆盖 akshare）
+# 3) 本地根据主 CSV 找出缺夜盘交易日, 生成补数列表(基于 CSV, 不需等落库):
+python -u test/data/find_missing_night_days.py --csv /Users/wenglongao/Downloads/C9999.XDCE.csv
+#    -> 把输出的 MISSING_RANGES 整段粘贴到 joinquant_fix_missing_night.py 配置区
+
+# 4) 聚宽研究环境运行补夜盘脚本(同样带换月字段):
+#    test/data/joinquant_fix_missing_night.py
+#    下载到本地: /Users/wenglongao/Downloads/C9999.XDCE_fix_night.csv
+
+# 5) 全量导入聚宽分钟（自动合并主CSV+补夜盘CSV, source=joinquant, 覆盖该品种旧分钟数据）
+python -u test/data/import_c0_1min_to_db.py
+
+# 6) 把 joinquant 分钟聚合为日频写入日频库（source=joinquant，不覆盖 akshare）
 python -u test/data/aggregate_minute_to_daily.py --instrument C0
 
-# 4) 天勤 EDB 近期分钟更新（也可用前端「分钟频价格数据更新」, source=tqsdk_edb）
-#    在 data/futures.py 中 update_futures_continuous_contract_price_1min(source='tqsdk_edb')
-
-# 5) 前端操作
-#    行情数据 → 日频价格数据更新：
-#        来源=akshare    → 原 akshare 日频更新
-#        来源=joinquant  → 从分钟库聚合 joinquant 日频（自动+手动都可选来源）
-#    行情数据 → 分钟频价格数据更新：来源=tqsdk_edb（天勤）
-#    数据概览 → 日频 / 分钟频 子页
-#    数据查看 → 频率下拉(日频/分钟频)，分钟频支持 K 线
+# 7) 验证（会区分换月窗口/数据缺失/真不一致）
+python -u test/data/verify_daily_vs_1min.py
 ```
+
+#### B. 日常增量更新
+
+- **分钟频（近期数据）**：前端「行情数据 → 分钟频价格数据更新」，来源选 `tqsdk_edb`（天勤），默认取最近 90 天；等价后端 `POST /api/market-data/update-price-1min`。
+- **日频**：前端「行情数据 → 日频价格数据更新」，来源二选一：
+  - `akshare`：走 akshare 接口更新日频（source='akshare'）；
+  - `joinquant`：从分钟库聚合 joinquant 日频（source='joinquant'，不覆盖 akshare），对"无分钟数据/缺夜盘/节假日"输出 warning 并在前端日志显示。
+- 手动与定时自动更新都支持选择来源。
+
+#### C. 前端功能位置
+
+- 行情数据 → **日频价格数据更新**：手动 + 自动，都有「来源」下拉框（akshare / joinquant）
+- 行情数据 → **分钟频价格数据更新**：「来源」下拉框（tqsdk_edb，预留扩展）
+- 数据概览：**日频 / 分钟频** 两个子页
+- 数据查看：**频率**下拉（日频/分钟频），分钟频支持 K 线
 
 ### 14.3 代码实现要点
 
+- **聚宽换月日（官方口径）**：`joinquant_fut_min_export.py` / `joinquant_fix_missing_night.py` 使用聚宽 `get_dominant_future` 获取每个交易日的主力合约，主力切换日即换月日，并用换月日新旧合约开盘价计算 `cur_ratio`，`weighted_factor` 累乘。**CSV 中直接导出 `symbol / is_rollover / weighted_factor / cur_weighted_factor`**。
+  - 用法注意：部分聚宽环境支持批量 `get_dominant_future(root, 开始, end_date=结束)`（`end_date` 是关键字参数）；**但研究环境部分版本不支持 `end_date`**，此时脚本会自动回退为**逐交易日查询** `get_dominant_future(root, 日期)`。交易日从已拉取的分钟数据日盘自动推断，无需额外接口。
+- `test/data/import_c0_1min_to_db.py`：合并两个 CSV → **优先使用 CSV 中已有的换月字段**；若 CSV 无这些字段则回退到"分钟数据自身检测换月(gap+持仓量跳变)" → `source='joinquant'` → 覆盖更新分钟库。
 - `data/futures.py`：
   - `update_futures_continuous_contract_price`（日频 akshare）写库前加 `source='akshare'`，唯一键含 source；
-  - `update_futures_continuous_contract_price_1min`（天勤 EDB）：基于分钟数据自身检测换月日（gap + 持仓量跳变），`source='tqsdk_edb'`；
+  - `update_futures_continuous_contract_price_1min`（天勤 EDB）：**天勤无聚宽接口，保留基于分钟数据自身检测换月日**（gap + 持仓量跳变），`source='tqsdk_edb'`；
   - `update_futures_continuous_contract_price_from_minute`：把分钟库 joinquant 聚合成日频写入日频库（不覆盖 akshare），并输出缺失/缺夜盘/节假日的 warning；
   - `aggregate_minute_to_daily_df` / `assign_trading_day_1min` / `detect_rollover_from_minute_df` / `build_minute_continuous_df_from_edb` 均在 data/futures.py 内实现，**不再从 test 文件夹 import**。
-- `test/data/import_c0_1min_to_db.py`：合并两个 CSV → 用聚宽数据自身检测换月 → `source='joinquant'` → 覆盖更新分钟库。
+- **换月口径小结**：聚宽分钟数据用**聚宽官方换月日**（最准）；天勤近期数据用**分钟数据自身 gap 检测**（天勤无聚宽接口）。两者都是自洽的，但主力规则可能不同，跨 source 混用时注意。
 
 ### 14.4 注意事项
 

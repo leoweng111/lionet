@@ -40,7 +40,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from mongo.mongify import get_data  # noqa: E402
-from import_c0_1min_to_db import assign_trading_day  # noqa: E402  与导入脚本保持同一归属规则
+from data.futures import assign_trading_day_1min  # noqa: E402  与导入脚本保持同一归属规则
 
 DATABASE = "futures"
 DAILY_COLLECTION = "continuous_contract_price_daily"
@@ -62,7 +62,7 @@ def aggregate_minute_to_daily(df_min: pd.DataFrame, trading_days=None) -> pd.Dat
     df = df_min.copy()
     df["time"] = _clean_time(df["time"])
     df = df.dropna(subset=["time"])
-    df["td"] = assign_trading_day(df["time"], trading_days=trading_days)
+    df["td"] = assign_trading_day_1min(df["time"], trading_days=trading_days)
 
     for c in ["open", "high", "low", "close", "volume", "position", "money"]:
         if c in df.columns:
@@ -243,7 +243,7 @@ def main():
     # 两个数据源的换月日不一致时, 窗口内 OHLC 指向不同合约, 差异属预期, 不计入"真正不一致"。
     daily_roll = set(df_daily.loc[df_daily["is_rollover"], "td"].dropna())
     _mf = df_min.copy()
-    _mf["td"] = assign_trading_day(_mf["time"], trading_days=trading_days)
+    _mf["td"] = assign_trading_day_1min(_mf["time"], trading_days=trading_days)
     _mf_first = _mf.groupby("td").first()
     _mf_last = _mf.groupby("td").last()
     _md = pd.DataFrame({"open": _mf_first["open"], "close": _mf_last["close"],

@@ -26,7 +26,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from import_c0_1min_to_db import assign_trading_day  # noqa: E402 复用同一归属规则
+from data.futures import assign_trading_day_1min  # noqa: E402 复用同一归属规则
 
 CSV_PATH = "/Users/wenglongao/Downloads/C9999.XDCE.csv"
 BAR_THRESHOLD = 340   # 正常 345; 低于此视为缺夜盘/数据不完整
@@ -50,7 +50,7 @@ def main():
         csv_path = _sys.argv[_sys.argv.index("--csv") + 1]
     df = pd.read_csv(csv_path, parse_dates=["datetime"])
     df = df.dropna(subset=["datetime"]).sort_values("datetime").reset_index(drop=True)
-    df["td"] = assign_trading_day(df["datetime"])
+    df["td"] = assign_trading_day_1min(df["datetime"])
 
     cnt = df.groupby("td").agg(bar_count=("open", "count")).sort_index()
     tds = list(cnt.index)

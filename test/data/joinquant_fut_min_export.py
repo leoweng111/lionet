@@ -4,6 +4,15 @@
 在聚宽研究环境(网页版 Jupyter)中运行, 把多个商品期货品种的分钟数据
 分批拉取、去重、排序后保存为 CSV, 供本地下载用于因子挖掘/回测。
 
+换月日判断
+----
+使用聚宽官方接口 get_dominant_future 获取每个交易日的主力合约:
+    get_dominant_future(root, start_date, end_date=end_date)   # 注意 end_date 是关键字参数!
+主力合约切换的日期即为换月日, 并用换月日当天新旧合约的开盘价计算后复权因子:
+    cur_ratio = 旧合约开盘 / 新合约开盘,  weighted_factor 累乘。
+CSV 中会直接导出 symbol / is_rollover / weighted_factor / cur_weighted_factor 字段,
+本地导入时直接使用, 不再自行检测换月。
+
 =================== 使用方法 ===================
 1. 打开 https://www.joinquant.com 研究环境, 新建一个 notebook;
 2. 把本文件全部内容粘贴到一个单元格(或上传本 .py 后执行 %run joinquant_fut_min_export.py);
@@ -11,36 +20,37 @@
 4. 运行结束后, 在研究环境左侧文件树中找到 data/fut_min/ 目录, 右键下载 CSV。
 
 =================== 说明 ===================
-- 聚宽研究环境已内置 jqdata, 无需登录/授权, 直接调用 get_price。
-- 主力连续合约代码格式: 品种+9999+交易所后缀 (如 RB9999.XSGE);
-  指数合约(持仓额加权)格式: 品种+8888+交易所后缀 (如 RB8888.XSGE)。
+- 聚宽研究环境已内置 jqdata, get_price / get_dominant_future 均为全局函数, 无需 import。
 - 分钟数据时间戳为「时间段结束」(1m 的 bar 时间戳从 09:31 到 15:00, 夜盘延续)。
-- 脚本按 14 天一个窗口分批拉取, 避免单次请求数据量过大; 每品种独立保存,
-  并以「窗口标记文件」做断点续传——中断后重新运行, 已完成的窗口会跳过。
-- 若免费权限拉不到 5 年(某时段无数据/报错), 脚本会打印警告并继续,
-  可适当缩短 START_DATE 或开通研究版。
+- 夜盘(21:00 后)归下一个交易日; 周五夜盘归下周一。
+- 若某时段无数据/报错, 脚本打印警告并继续。
 """
 
 import os
 import time
 import datetime as dt
 
+import numpy as np
 import pandas as pd
 
-# ---- 解析 get_price (兼容不同运行环境) ----
-# 聚宽研究环境: get_price 等数据函数已被预置为「全局函数」, 直接使用即可, 无需 import;
-#               from jqdata import get_price 会报 ImportError, 因为 jqdata 模块不直接导出它。
-# 本地 jqdatasdk: 需 from jqdatasdk import * 或 from jqdatasdk import get_price。
+# ---- 解析 get_price / get_dominant_future (兼容不同运行环境) ----
 try:
-    get_price  # noqa: F821  研究环境全局已存在
+    get_price  # noqa: F821
 except NameError:
     try:
-        from jqdata import get_price
+        from jqdata import get_price, get_dominant_future
     except ImportError:
         try:
             from jqdata import *
         except ImportError:
-            from jqdatasdk import get_price
+            from jqdatasdk import get_price, get_dominant_future
+try:
+    get_dominant_future  # noqa: F821
+except NameError:
+    try:
+        from jqdata import get_dominant_future
+    except ImportError:
+        from jqdatasdk import get_dominant_future
 
 # ================== 配置区 ==================
 FREQ = "1m"                # 分钟周期: 1m / 5m / 15m / 30m / 60m
@@ -52,7 +62,6 @@ SLEEP_SEC = 0.3             # 每次请求间隔, 避免触发限频
 OUT_DIR = "data/fut_min"    # 输出目录(研究环境文件系统, 相对当前工作目录)
 
 # 主力连续合约代码(从聚宽官方「商品期货数据」页确认的格式)
-# 上期所 .XSGE
 FUTURE_CODES = [
     "C9999.XDCE",  # 玉米
     # "RB9999.XSGE",  # 螺纹钢
@@ -87,8 +96,111 @@ END_DT = dt.datetime.strptime(END_DATE, "%Y-%m-%d").replace(hour=15)
 FLAG_ROOT = os.path.join(OUT_DIR, "_flags")
 
 
+def _root_from_code(code: str) -> str:
+    """从主力连续代码提取品种 root, 如 C9999.XDCE -> C ; TA9999.XZCE -> TA"""
+    sym = str(code).split(".")[0]   # C9999
+    root = sym.rstrip("0123456789")  # C
+    return root
+
+
+def _get_day_open(contract: str, date) -> float:
+    """获取某合约在某交易日的日线开盘价。失败返回 None。"""
+    try:
+        df = get_price(contract, start_date=str(date), end_date=str(date),
+                       frequency="daily", fields=["open"])
+        if df is not None and not df.empty:
+            df = df.reset_index()
+            return float(pd.to_numeric(df["open"], errors="coerce").iloc[-1])
+    except Exception:
+        pass
+    return None
+
+
+def get_dominant_series_compat(root: str, trade_days):
+    """获取每日主力合约 Series(交易日 -> 合约)。
+
+    兼容不同版本:
+      1) 优先尝试批量: get_dominant_future(root, start, end_date=end);
+      2) 若版本不支持 end_date(TypeError), 回退为逐交易日查询 get_dominant_future(root, date)。
+    """
+    trade_days = sorted(set(pd.Timestamp(d) for d in trade_days))
+    if not trade_days:
+        return pd.Series(dtype=object)
+
+    try:
+        dom = get_dominant_future(root, str(trade_days[0].date()),
+                                  end_date=str(trade_days[-1].date()))
+        if dom is not None and len(dom) > 0:
+            return dom
+    except TypeError:
+        pass
+    except Exception:
+        pass
+
+    print("    [信息] get_dominant_future 不支持 end_date, 改为逐交易日查询")
+    series = {}
+    for d in trade_days:
+        try:
+            series[pd.Timestamp(d)] = str(get_dominant_future(root, str(d.date())))
+        except Exception as e:
+            print(f"    [警告] {d.date()} 主力获取失败: {e}")
+    return pd.Series(series).sort_index()
+
+
+def build_dominant_schedule(root: str, trade_days):
+    """用 get_dominant_future 计算每日主力合约 / 换月日 / 后复权因子链。
+
+    返回 DataFrame: td(交易日), symbol, is_rollover, weighted_factor, cur_weighted_factor
+    """
+    dom = get_dominant_series_compat(root, trade_days)
+    if dom is None or len(dom) == 0:
+        return pd.DataFrame()
+
+    items = dom.items() if isinstance(dom, pd.Series) else dom.iteritems()
+    rows = []
+    wf = 1.0
+    cur_cwf = 1.0
+    prev_symbol = None
+    for d, symbol in items:
+        symbol = str(symbol)
+        is_roll = (prev_symbol is not None and symbol != prev_symbol)
+        if is_roll and prev_symbol is not None:
+            old_open = _get_day_open(prev_symbol, d)
+            new_open = _get_day_open(symbol, d)
+            if old_open and new_open and abs(new_open) > 1e-12:
+                cur_cwf = old_open / new_open
+                wf *= cur_cwf
+        rows.append({
+            "td": pd.Timestamp(d).normalize(),
+            "symbol": symbol,
+            "is_rollover": is_roll,
+            "weighted_factor": wf,
+            "cur_weighted_factor": cur_cwf,
+        })
+        prev_symbol = symbol
+
+    df = pd.DataFrame(rows)
+    df = df.drop_duplicates(subset="td", keep="last").sort_values("td")
+    return df
+
+
+def assign_trading_day_local(datetime_series, trading_days):
+    """给分钟 bar 打交易日标签(夜盘归下一交易日, 周五夜盘归下周一)。"""
+    tds = np.array(sorted(pd.to_datetime(list(trading_days)).normalize()), dtype="datetime64[D]")
+    tds = np.unique(tds)
+    night = datetime_series.dt.hour >= 20
+    cal = datetime_series.dt.normalize().values.astype("datetime64[D]")
+    out = pd.Series(pd.NaT, index=datetime_series.index, dtype="datetime64[ns]")
+    if tds.size == 0:
+        return out
+    day_pos = np.minimum(np.searchsorted(tds, cal[~night], side="left"), tds.size - 1)
+    out.loc[~night] = pd.to_datetime(tds[day_pos])
+    night_pos = np.minimum(np.searchsorted(tds, cal[night], side="right"), tds.size - 1)
+    out.loc[night] = pd.to_datetime(tds[night_pos])
+    return out
+
+
 def gen_windows(start_dt, end_dt, chunk_days):
-    """按 chunk_days 生成 [start, end] 窗口列表, end 一律取到 15:00"""
     windows = []
     cur = start_dt
     while cur < end_dt:
@@ -99,7 +211,6 @@ def gen_windows(start_dt, end_dt, chunk_days):
 
 
 def fetch_chunk(code, start, end, depth=0):
-    """拉取一个窗口, 若因数据量过大/超时失败则折半重试"""
     try:
         df = get_price(code, start_date=str(start), end_date=str(end),
                        frequency=FREQ, fields=FIELDS)
@@ -120,12 +231,10 @@ def fetch_chunk(code, start, end, depth=0):
 
 
 def normalize(df, code):
-    """get_price 返回 MultiIndex(time, code) DataFrame, 转成规整 DataFrame"""
     if df is None or df.empty:
         return pd.DataFrame()
     df = df.reset_index()
     cols = list(df.columns)
-    # 找时间列与代码列
     time_col, code_col = None, None
     for c in cols:
         if str(c).lower() in ("time", "datetime", "index"):
@@ -146,7 +255,6 @@ def normalize(df, code):
 
 
 def load_existing(code):
-    """读取该品种已保存的 CSV(续传时与新拉数据合并)"""
     path = os.path.join(OUT_DIR, f"{code}.csv")
     if os.path.exists(path):
         try:
@@ -162,21 +270,23 @@ def main():
     start_dt = dt.datetime.strptime(START_DATE, "%Y-%m-%d")
     windows = gen_windows(start_dt, END_DT, CHUNK_DAYS)
     print("=" * 70)
-    print(f"聚宽研究环境 | 导出 {len(FUTURE_CODES)} 个品种 {FREQ} 分钟数据")
+    print(f"聚宽研究环境 | 导出 {len(FUTURE_CODES)} 个品种 {FREQ} 分钟数据 (换月用 get_dominant_future)")
     print(f"时间范围: {START_DATE} ~ {END_DATE} | 总窗口: {len(windows)}")
     print("=" * 70)
 
     for code in FUTURE_CODES:
+        root = _root_from_code(code)
+        print(f"\n>>> 处理 {code} (root={root})")
+
         flag_dir = os.path.join(FLAG_ROOT, code)
         os.makedirs(flag_dir, exist_ok=True)
         done = set(f.split(".")[0] for f in os.listdir(flag_dir))
         todo = [w for w in windows if w[0].strftime("%Y%m%d") not in done]
-
         if not todo:
             print(f"[跳过] {code}: 全部窗口已完成")
             continue
 
-        print(f"\n>>> 正在导出 {code} ... 待处理 {len(todo)}/{len(windows)} 窗口")
+        print(f"    {code} 待处理 {len(todo)}/{len(windows)} 窗口")
         parts = []
         existing = load_existing(code)
         if len(existing) > 0:
@@ -190,7 +300,7 @@ def main():
                 nd = normalize(df, code)
                 if not nd.empty:
                     parts.append(nd)
-                open(flag, "w").close()  # 成功(含该时段无数据)即标记完成
+                open(flag, "w").close()
             else:
                 print(f"      [警告] 窗口 {ws}~{we} 拉取失败, 未标记, 重跑会重试")
             if i % 10 == 0 or i == len(todo):
@@ -200,16 +310,43 @@ def main():
             merged = pd.concat(parts, ignore_index=True)
             merged = merged.drop_duplicates(subset=["datetime", "code"], keep="last")
             merged = merged.sort_values("datetime").reset_index(drop=True)
+
+            # 1) 用 get_dominant_future 计算换月 schedule(交易日从分钟数据日盘推断)
+            merged["_dt"] = pd.to_datetime(merged["datetime"])
+            day_mask = merged["_dt"].dt.hour < 20
+            trade_days = sorted(pd.unique(merged.loc[day_mask, "_dt"].dt.normalize()))
+            merged = merged.drop(columns=["_dt"])
+            sched = build_dominant_schedule(root, trade_days)
+            if sched.empty:
+                print(f"    [警告] {code} get_dominant_future 返回空, 换月字段缺失")
+            else:
+                n_roll = int(sched["is_rollover"].sum())
+                print(f"    换月日 {n_roll} 个")
+
+            # 2) 打交易日标签并 merge 换月字段
+            if not sched.empty:
+                merged["datetime"] = pd.to_datetime(merged["datetime"])
+                merged["td"] = assign_trading_day_local(merged["datetime"], sched["td"])
+                sched_map = sched.rename(columns={"td": "td"})
+                merged = merged.merge(sched_map, on="td", how="left")
+                for c in ["symbol", "weighted_factor", "cur_weighted_factor"]:
+                    if c in merged.columns:
+                        merged[c] = merged[c].ffill()
+                if "is_rollover" in merged.columns:
+                    merged["is_rollover"] = merged["is_rollover"].fillna(False).astype(bool)
+                else:
+                    merged["is_rollover"] = False
+                # 移除 td 辅助列
+                merged = merged.drop(columns=["td"], errors="ignore")
+
             merged.to_csv(os.path.join(OUT_DIR, f"{code}.csv"), index=False)
-            print(f"    完成: {code} | {len(merged)} 行 "
-                  f"| {merged['datetime'].min()} ~ {merged['datetime'].max()}")
+            print(f"    完成: {code} | {len(merged)} 行 | 列: {list(merged.columns)}")
         else:
-            print(f"    [警告] {code} 未拉到任何数据。可能免费权限无该品种分钟数据, "
-                  f"或合约代码无效。")
+            print(f"    [警告] {code} 未拉到任何数据。")
 
     print("\n" + "=" * 70)
     print("全部完成。请到研究环境左侧文件树中打开 data/fut_min/ 目录下载 CSV。")
-    print("提示: 若某品种数据缺失, 通常是免费研究版权限限制, 可缩短 START_DATE 或开通研究版。")
+    print("CSV 含换月字段: symbol / is_rollover / weighted_factor / cur_weighted_factor")
 
 
 if __name__ == "__main__":

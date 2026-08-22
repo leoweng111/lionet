@@ -24,7 +24,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from import_c0_1min_to_db import assign_trading_day  # noqa: E402
+from data.futures import assign_trading_day_1min  # noqa: E402
 from mongo.mongify import get_data  # noqa: E402
 
 CSV_PATH = "/Users/wenglongao/Downloads/C9999.XDCE.csv"
@@ -45,7 +45,7 @@ def main():
     # ---- CSV ----
     csv = pd.read_csv(args.csv, parse_dates=["datetime"])
     csv = csv.dropna(subset=["datetime"]).sort_values("datetime").reset_index(drop=True)
-    csv["td"] = assign_trading_day(csv["datetime"])
+    csv["td"] = assign_trading_day_1min(csv["datetime"])
     csv_td = csv[csv["td"] == td].copy()
     print(f"CSV td={td.date()} (前一交易日20:59~当日15:00): {len(csv_td)} 根")
 
@@ -54,7 +54,7 @@ def main():
     db = db.copy()
     db["time"] = pd.to_datetime(db["time"], errors="coerce")
     db = db.dropna(subset=["time"]).sort_values("time").reset_index(drop=True)
-    db["td"] = assign_trading_day(db["time"])
+    db["td"] = assign_trading_day_1min(db["time"])
     db_td = db[db["td"] == td].copy()
     print(f"数据库 td={td.date()}: {len(db_td)} 根")
 

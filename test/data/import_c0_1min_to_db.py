@@ -125,29 +125,71 @@ def main():
     # 1) 读取并合并两个 CSV
     df = read_and_merge_csvs(main_csv, fix_csv)
 
-    # 2) 交易日归属(基于聚宽数据自身)
+    # 2) 交易日归属
     df["td"] = assign_trading_day_1min(df["datetime"])
     print(f"{df['td'].nunique()} 个交易日")
 
-    # 3) 基于聚宽分钟数据自身检测换月日 + 计算后复权因子链
-    schedule = detect_rollover_from_minute_df(
-        df,
-        gap_threshold=GAP_THRESHOLD,
-        oi_chg_threshold=OI_CHG_THRESHOLD,
-    )
-    schedule["symbol"] = f"KQ.m@{INSTRUMENT_ID[0]}"  # 聚宽主连, symbol 用主连标识
-    roll_days = schedule.loc[schedule["is_rollover"], "td"].tolist()
-    print(f"检测到换月日: {len(roll_days)} 个")
-    if roll_days:
-        print(f"  换月日示例: {[pd.Timestamp(t).date().isoformat() for t in roll_days[:10]]} ...")
-
-    # 4) 构建分钟 DataFrame
-    out = build_minute_continuous_df_from_edb(
-        df, schedule, INSTRUMENT_ID,
-        symbol=f"KQ.m@{INSTRUMENT_ID[0]}",
-        mark_first_only=MARK_ROLLOVER_FIRST_MINUTE_ONLY,
-    )
-    out["source"] = SOURCE
+    # 3) 换月字段: 优先用 CSV 中已有的(聚宽 get_dominant_future 导出); 否则回退到分钟数据自身检测
+    if "is_rollover" in df.columns and "weighted_factor" in df.columns:
+        print("[信息] 使用 CSV 中已有的换月字段(symbol/is_rollover/weighted_factor)")
+        out = df.rename(columns={"datetime": "time", "open_interest": "position"})
+        out["instrument_id"] = INSTRUMENT_ID
+        out["settle"] = out["close"]
+        out["time"] = pd.to_datetime(out["time"], errors="coerce")
+        # 按交易日填充换月字段: 主 CSV 提供每个交易日的值; fix 补充的 NaN bar 也按交易日取值
+        out["td"] = assign_trading_day_1min(out["time"])
+        _valid = out.dropna(subset=["weighted_factor"])
+        if _valid.empty:
+            _map = pd.DataFrame(columns=["td", "symbol", "is_rollover", "weighted_factor", "cur_weighted_factor"])
+        else:
+            _map = _valid.groupby("td").agg({
+                "symbol": "last",
+                "is_rollover": "max",
+                "weighted_factor": "last",
+                "cur_weighted_factor": "last",
+            }).reset_index()
+        out = out.merge(_map, on="td", how="left", suffixes=("", "_m"))
+        for _c in ["symbol", "is_rollover", "weighted_factor", "cur_weighted_factor"]:
+            _mc = f"{_c}_m"
+            if _mc in out.columns:
+                out[_c] = out[_c].fillna(out[_mc])
+                out = out.drop(columns=[_mc])
+        out = out.drop(columns=["td"])
+        out["is_rollover"] = out["is_rollover"].fillna(False).astype(bool)
+        out["weighted_factor"] = pd.to_numeric(out["weighted_factor"], errors="coerce").fillna(1.0)
+        out["cur_weighted_factor"] = pd.to_numeric(out["cur_weighted_factor"], errors="coerce").fillna(1.0)
+        cols = ["time", "instrument_id", "symbol", "open", "high", "low", "close", "settle",
+                "volume", "position", "money", "weighted_factor", "cur_weighted_factor", "is_rollover"]
+        for c in cols:
+            if c not in out.columns:
+                out[c] = 0.0 if c in ("volume", "position", "money") else ("" if c == "symbol" else np.nan)
+        for c in ["open", "high", "low", "close", "settle", "volume", "position", "money"]:
+            out[c] = pd.to_numeric(out[c], errors="coerce")
+        out = out[cols].dropna(subset=["time", "open", "high", "low", "close"]).sort_values("time").reset_index(drop=True)
+        out["settle"] = out["settle"].fillna(out["close"])
+        out["volume"] = out["volume"].fillna(0.0)
+        out["position"] = out["position"].fillna(0.0)
+        out["money"] = out["money"].fillna(0.0)
+        out["source"] = SOURCE
+        out = out.drop_duplicates(subset=["time", "instrument_id"], keep="last").reset_index(drop=True)
+    else:
+        print("[信息] CSV 无换月字段, 回退到基于分钟数据自身检测换月(gap+持仓量跳变)")
+        schedule = detect_rollover_from_minute_df(
+            df,
+            gap_threshold=GAP_THRESHOLD,
+            oi_chg_threshold=OI_CHG_THRESHOLD,
+        )
+        schedule["symbol"] = f"KQ.m@{INSTRUMENT_ID[0]}"  # 聚宽主连, symbol 用主连标识
+        roll_days = schedule.loc[schedule["is_rollover"], "td"].tolist()
+        print(f"检测到换月日: {len(roll_days)} 个")
+        if roll_days:
+            print(f"  换月日示例: {[pd.Timestamp(t).date().isoformat() for t in roll_days[:10]]} ...")
+        out = build_minute_continuous_df_from_edb(
+            df, schedule, INSTRUMENT_ID,
+            symbol=f"KQ.m@{INSTRUMENT_ID[0]}",
+            mark_first_only=MARK_ROLLOVER_FIRST_MINUTE_ONLY,
+        )
+        out["source"] = SOURCE
     print(f"\n构建完成: {len(out)} 行 x {len(out.columns)} 列")
     print(f"  时间范围: {out['time'].min()} ~ {out['time'].max()}")
     print(f"  换月点分钟数: {int(out['is_rollover'].sum())}")
