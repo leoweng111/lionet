@@ -1,0 +1,10 @@
+{
+  "enabled": true,
+  "instrument_id": [
+    "C0"
+  ],
+  "method": "bulk_write_update",
+  "schedule_time": "21:00",
+  "source": "tqsdk_edb",
+  "wait_time": 0.5
+}

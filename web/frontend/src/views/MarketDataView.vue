@@ -62,6 +62,7 @@
               <el-select v-model="priceParams.source" style="width:100%;">
                 <el-option label="akshare" value="akshare" />
                 <el-option label="joinquant" value="joinquant" />
+                <el-option label="tqsdk_edb（天勤）" value="tqsdk_edb" />
               </el-select>
             </el-form-item>
             <el-form-item label="合约（可多选）">
@@ -114,6 +115,7 @@
               <el-select v-model="scheduleParams.source" :disabled="!scheduleParams.enabled" style="width:100%;">
                 <el-option label="akshare" value="akshare" />
                 <el-option label="joinquant" value="joinquant" />
+                <el-option label="tqsdk_edb（天勤）" value="tqsdk_edb" />
               </el-select>
             </el-form-item>
             <el-form-item label="自动更新时间">
@@ -182,7 +184,15 @@
       <!-- ═══ Tab 2b: 分钟频价格数据更新 ═══ -->
       <el-tab-pane label="分钟频价格数据更新" name="price-update-1min">
         <el-card shadow="never">
-          <template #header><span style="font-weight:600;">更新连续合约分钟价格（天勤 EDB 免费接口，近1年分钟线）</span></template>
+          <template #header>
+            <div style="display:flex;align-items:center;justify-content:space-between;">
+              <span style="font-weight:600;">更新连续合约分钟价格（天勤 EDB 免费接口，近1年分钟线）</span>
+              <div style="display:flex;align-items:center;gap:12px;">
+                <span style="font-size:12px;color:#909399;">每日自动更新</span>
+                <el-switch v-model="schedule1minParams.enabled" />
+              </div>
+            </div>
+          </template>
           <el-form :model="price1minParams" label-width="160px" size="small" style="max-width:600px;">
             <el-form-item label="来源">
               <el-select v-model="price1minParams.source" style="width:100%;">
@@ -223,6 +233,46 @@
               >停止</el-button>
             </el-form-item>
           </el-form>
+
+          <el-divider content-position="left">自动价格更新配置（T日更新T日）</el-divider>
+          <el-form :model="schedule1minParams" label-width="160px" size="small" style="max-width:600px;">
+            <el-form-item label="来源">
+              <el-select v-model="schedule1minParams.source" :disabled="!schedule1minParams.enabled" style="width:100%;">
+                <el-option label="tqsdk_edb（天勤）" value="tqsdk_edb" />
+              </el-select>
+            </el-form-item>
+            <el-form-item label="自动更新时间">
+              <el-time-picker
+                v-model="schedule1minTimeDisplay"
+                format="HH:mm"
+                value-format="HH:mm"
+                :clearable="false"
+                :disabled="!schedule1minParams.enabled"
+                style="width:100%;"
+                @change="onSchedule1minTimeChange"
+              />
+            </el-form-item>
+            <el-form-item label="自动更新合约（可多选）">
+              <el-select
+                v-model="schedule1minParams.instrument_id"
+                multiple filterable allow-create clearable
+                placeholder="默认C0"
+                :disabled="!schedule1minParams.enabled"
+                style="width:100%;"
+              >
+                <el-option v-for="id in instrumentIds" :key="`m1m_auto_${id}`" :label="id" :value="id" />
+              </el-select>
+            </el-form-item>
+            <el-form-item label="请求间隔(秒)">
+              <el-input-number v-model="schedule1minParams.wait_time" :min="0" :max="10" :step="0.1" :precision="1" :disabled="!schedule1minParams.enabled" style="width:100%;" />
+            </el-form-item>
+            <el-form-item label="更新方式(method)">
+              <el-select v-model="schedule1minParams.method" :disabled="!schedule1minParams.enabled" style="width:100%;">
+                <el-option v-for="m in updateMethods" :key="`m1m_method_${m}`" :label="m" :value="m" />
+              </el-select>
+            </el-form-item>
+          </el-form>
+
           <el-alert
             type="info" :closable="false" show-icon style="margin-top:8px;"
             title="数据源：天勤 EDB 免费接口，可获取近1年主力连续分钟线；换月因子复用日频库，按 time+instrument_id upsert 幂等写入。"
@@ -469,6 +519,8 @@ import {
   deleteMarketData,
   getScheduledStatus,
   updateScheduledConfig,
+  getScheduledStatus1min,
+  updateScheduledConfig1min,
 } from '../api'
 
 defineOptions({ name: 'MarketDataView' })
@@ -508,6 +560,7 @@ onMounted(() => {
   loadInstrumentIds()
   loadMarketDataConfig()
   loadScheduleStatus()
+  loadSchedule1minStatus()
   loadOperationLogs()
 })
 
@@ -569,7 +622,7 @@ let scheduleSaveTimer = null
 let scheduleStatusTimer = null
 const scheduleParams = reactive({
   enabled: true,
-  schedule_time: '20:00',
+  schedule_time: '21:00',
   instrument_id: ['C0'],
   load_prev_weighted_factor: true,
   wait_time: 2.0,
@@ -579,7 +632,7 @@ const scheduleParams = reactive({
 })
 const scheduleTimeDisplay = ref(scheduleParams.schedule_time)
 const onScheduleTimeChange = (val) => {
-  const newVal = val || '20:00'
+  const newVal = val || '21:00'
   if (newVal < '20:00') {
     ElMessageBox.confirm(
       '设置的时间早于 20:00，当天数据源可能尚未更新，确定要修改吗？',
@@ -613,7 +666,7 @@ const loadScheduleStatus = async () => {
     const { data } = await getScheduledStatus()
     scheduleSyncingFromServer.value = true
     scheduleParams.enabled = !!data.enabled
-    scheduleParams.schedule_time = data.schedule_time || '20:00'
+    scheduleParams.schedule_time = data.schedule_time || '21:00'
     scheduleTimeDisplay.value = scheduleParams.schedule_time
     scheduleParams.instrument_id = Array.isArray(data.instrument_id) && data.instrument_id.length
       ? data.instrument_id
@@ -760,6 +813,69 @@ const handleStopPrice1minUpdate = async () => {
     price1minStopping.value = false
   }
 }
+
+// ── Tab 2b: 分钟频每日自动更新配置 ──
+const schedule1minConfigReady = ref(false)
+const schedule1minSyncingFromServer = ref(false)
+let schedule1minSaveTimer = null
+let schedule1minStatusTimer = null
+const schedule1minParams = reactive({
+  enabled: true,
+  schedule_time: '20:30',
+  instrument_id: ['C0'],
+  wait_time: 0.5,
+  method: 'bulk_write_update',
+  source: 'tqsdk_edb',
+})
+const schedule1minTimeDisplay = ref(schedule1minParams.schedule_time)
+const onSchedule1minTimeChange = (val) => {
+  const newVal = val || '20:30'
+  schedule1minParams.schedule_time = newVal
+  schedule1minTimeDisplay.value = newVal
+}
+const loadSchedule1minStatus = async () => {
+  try {
+    const { data } = await getScheduledStatus1min()
+    schedule1minSyncingFromServer.value = true
+    schedule1minParams.enabled = !!data.enabled
+    schedule1minParams.schedule_time = data.schedule_time || '20:30'
+    schedule1minTimeDisplay.value = schedule1minParams.schedule_time
+    schedule1minParams.instrument_id = Array.isArray(data.instrument_id) && data.instrument_id.length
+      ? data.instrument_id
+      : ['C0']
+    schedule1minParams.wait_time = Number.isFinite(Number(data.wait_time)) ? Number(data.wait_time) : 0.5
+    schedule1minParams.method = data.method || 'bulk_write_update'
+    schedule1minParams.source = data.source || 'tqsdk_edb'
+    schedule1minConfigReady.value = true
+  } catch { /* ignore */ }
+  finally {
+    schedule1minSyncingFromServer.value = false
+  }
+}
+const saveSchedule1minConfig = async () => {
+  try {
+    await updateScheduledConfig1min({
+      enabled: schedule1minParams.enabled,
+      schedule_time: schedule1minParams.schedule_time,
+      instrument_id: schedule1minParams.instrument_id,
+      wait_time: schedule1minParams.wait_time,
+      method: schedule1minParams.method,
+      source: schedule1minParams.source,
+    })
+  } catch (err) {
+    ElMessage.error('保存失败: ' + (err.response?.data?.detail || err.message))
+  }
+}
+const queueSaveSchedule1minConfig = () => {
+  if (schedule1minSaveTimer) clearTimeout(schedule1minSaveTimer)
+  schedule1minSaveTimer = setTimeout(() => {
+    saveSchedule1minConfig()
+  }, 300)
+}
+watch(schedule1minParams, () => {
+  if (!schedule1minConfigReady.value || schedule1minSyncingFromServer.value) return
+  queueSaveSchedule1minConfig()
+}, { deep: true })
 
 const pollMarketTask = (taskId, logsRef, onDone) => {
   const timer = setInterval(async () => {
@@ -948,12 +1064,17 @@ onMounted(() => {
     if (activeTab.value === 'price-update') {
       loadScheduleStatus()
     }
+    if (activeTab.value === 'price-update-1min') {
+      loadSchedule1minStatus()
+    }
   }, 5000)
 })
 
 onUnmounted(() => {
   if (scheduleSaveTimer) clearTimeout(scheduleSaveTimer)
   if (scheduleStatusTimer) clearInterval(scheduleStatusTimer)
+  if (schedule1minSaveTimer) clearTimeout(schedule1minSaveTimer)
+  if (schedule1minStatusTimer) clearInterval(schedule1minStatusTimer)
 })
 
 // ── Tab 6: Delete ──

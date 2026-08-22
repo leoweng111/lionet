@@ -82,5 +82,8 @@ export const deleteMarketData = (data) => api.post('/api/market-data/delete', da
 export const getScheduledStatus = () => api.get('/api/market-data/scheduled-status')
 export const updateScheduledConfig = (data) => api.post('/api/market-data/schedule-config', data)
 export const toggleSchedule = (enabled) => api.post(`/api/market-data/toggle-schedule?enabled=${enabled}`)
+export const getScheduledStatus1min = () => api.get('/api/market-data/scheduled-status-1min')
+export const updateScheduledConfig1min = (data) => api.post('/api/market-data/schedule-config-1min', data)
+export const toggleSchedule1min = (enabled) => api.post(`/api/market-data/toggle-schedule-1min?enabled=${enabled}`)
 
 export default api

@@ -119,7 +119,7 @@ def _task_collection(task_type: Optional[str]) -> str:
 def _default_market_schedule_config() -> Dict[str, Any]:
     default_cfg = {
         "enabled": True,
-        "schedule_time": "20:00",
+        "schedule_time": "21:00",
         "instrument_id": ["C0"],
         "load_prev_weighted_factor": True,
         "wait_time": 2.0,
@@ -1196,6 +1196,42 @@ def _load_market_schedule_config_from_db() -> Dict[str, Any]:
 
 def _save_market_schedule_config_to_db() -> None:
     save_json_config("market_data_schedule_config.json", dict(_daily_schedule_config))
+
+
+# ── Scheduled minute(1min) update config ──────────────────────────────
+def _default_min_market_schedule_config() -> Dict[str, Any]:
+    default_cfg = {
+        "enabled": True,
+        "schedule_time": "20:30",
+        "instrument_id": ["C0"],
+        "wait_time": 0.5,
+        "method": "bulk_write_update",
+        "source": "tqsdk_edb",
+    }
+    raw = load_json_config("market_data_schedule_config_1min.json", default_cfg)
+    if not isinstance(raw, dict):
+        return default_cfg
+    merged = dict(default_cfg)
+    merged.update(raw)
+    return merged
+
+
+_min_schedule_config: Dict[str, Any] = _default_min_market_schedule_config()
+
+
+def _reload_min_schedule_config_from_file() -> Dict[str, Any]:
+    latest = _default_min_market_schedule_config()
+    _min_schedule_config.clear()
+    _min_schedule_config.update(latest)
+    return dict(_min_schedule_config)
+
+
+def _load_min_market_schedule_config_from_db() -> Dict[str, Any]:
+    return dict(_default_min_market_schedule_config())
+
+
+def _save_min_market_schedule_config_to_db() -> None:
+    save_json_config("market_data_schedule_config_1min.json", dict(_min_schedule_config))
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -3117,13 +3153,23 @@ class UpdatePrice1minParams(BaseModel):
 
 class ScheduleConfigParams(BaseModel):
     enabled: bool = True
-    schedule_time: str = "18:00"
+    schedule_time: str = "21:00"
     instrument_id: Optional[List[str]] = Field(default_factory=lambda: ["C0"])
     load_prev_weighted_factor: bool = True
     wait_time: float = 2.0
     method: str = "bulk_write_update"
     only_update_new: bool = True
-    source: str = "akshare"   # akshare=原akshare日频; joinquant=从分钟库聚合日频
+    source: str = "akshare"   # akshare=原akshare日频; joinquant/tqsdk_edb=从分钟库聚合日频
+
+
+class MinScheduleConfigParams(BaseModel):
+    """分钟频每日自动更新配置。"""
+    enabled: bool = True
+    schedule_time: str = "20:30"
+    instrument_id: Optional[List[str]] = Field(default_factory=lambda: ["C0"])
+    wait_time: float = 0.5
+    method: str = "bulk_write_update"
+    source: str = "tqsdk_edb"
 
 
 class DeleteDataParams(BaseModel):
@@ -3134,6 +3180,7 @@ class DeleteDataParams(BaseModel):
 
 # ── Scheduled daily update ────────────────────────────────────────────
 _daily_update_thread: Optional[threading.Thread] = None
+_min_update_thread: Optional[threading.Thread] = None
 
 
 class _MarketDataLogHandler(logging.Handler):
@@ -3190,14 +3237,14 @@ def _run_daily_price_update():
             f"wait_time={cfg.get('wait_time', 2.0)}, method={cfg.get('method', 'bulk_write_update')}, "
             f"only_update_new={cfg.get('only_update_new', True)}"
         )
-        if src == "joinquant":
-            # 定时从分钟库聚合 joinquant 日频
+        if src in ("joinquant", "tqsdk_edb"):
+            # 定时从分钟库聚合日频(joinquant 或天勤 tqsdk_edb), 不覆盖 akshare
             update_futures_continuous_contract_price_from_minute(
                 instrument_id=instrument_id,
                 start_date=target_day,
                 end_date=target_day,
                 method=str(cfg.get("method") or "bulk_write_update"),
-                source="joinquant",
+                source=src,
             )
         else:
             update_futures_continuous_contract_price(
@@ -3231,11 +3278,11 @@ def _daily_scheduler_loop():
             _time.sleep(5)
             continue
         now = datetime.now()
-        schedule_time = str(_daily_schedule_config.get("schedule_time") or "18:00")
+        schedule_time = str(_daily_schedule_config.get("schedule_time") or "21:00")
         try:
             target_hour, target_minute = [int(x) for x in schedule_time.split(":", 1)]
         except Exception:
-            target_hour, target_minute = 18, 0
+            target_hour, target_minute = 21, 0
         target = now.replace(hour=target_hour, minute=target_minute, second=0, microsecond=0)
         if now >= target:
             target += timedelta(days=1)
@@ -3251,11 +3298,96 @@ def _daily_scheduler_loop():
                 pass
 
 
+def _run_min_price_update():
+    """Background: daily minute-frequency update with persisted 1min schedule params."""
+    cfg = dict(_min_schedule_config)
+    target_day = datetime.now().strftime("%Y%m%d")
+    instrument_id = cfg.get("instrument_id")
+    if not instrument_id:
+        instrument_id = None
+    src = str(cfg.get("source") or "tqsdk_edb")
+    task_id = f"scheduled1min_{uuid.uuid4().hex[:8]}"
+    market_data_tasks[task_id] = {
+        "type": "update-price-1min", "status": "running",
+        "started_at": datetime.now().isoformat(), "logs": [],
+        "params": {
+            "instrument_id": instrument_id,
+            "start_date": target_day,
+            "end_date": target_day,
+            "wait_time": float(cfg.get("wait_time", 0.5)),
+            "method": str(cfg.get("method") or "bulk_write_update"),
+            "source": src,
+            "scheduled": True,
+        },
+    }
+    _save_market_data_task_to_db(task_id)
+    from utils.logging import log as lionet_logger
+    handler = _MarketDataLogHandler(task_id)
+    lionet_logger.addHandler(handler)
+    try:
+        lionet_logger.info(f"定时分钟更新启动: source={src}, date={target_day}, instrument_id={instrument_id}")
+        update_futures_continuous_contract_price_1min(
+            instrument_id=instrument_id,
+            start_date=target_day,
+            end_date=target_day,
+            wait_time=float(cfg.get("wait_time", 0.5)),
+            method=str(cfg.get("method") or "bulk_write_update"),
+            source=src,
+        )
+        lionet_logger.info('定时分钟更新完成')
+        market_data_tasks[task_id]["status"] = "completed"
+    except Exception as e:
+        market_data_tasks[task_id]["status"] = "failed"
+        market_data_tasks[task_id]["error"] = str(e)
+        lionet_logger.error(f'定时分钟更新失败: {e}')
+    finally:
+        market_data_tasks[task_id]["finished_at"] = datetime.now().isoformat()
+        _save_market_data_task_to_db(task_id)
+        lionet_logger.removeHandler(handler)
+
+
+def _min_scheduler_loop():
+    import time as _time
+    from datetime import timedelta
+
+    while True:
+        _reload_min_schedule_config_from_file()
+        if not bool(_min_schedule_config.get("enabled", True)):
+            _time.sleep(5)
+            continue
+        now = datetime.now()
+        schedule_time = str(_min_schedule_config.get("schedule_time") or "20:30")
+        try:
+            target_hour, target_minute = [int(x) for x in schedule_time.split(":", 1)]
+        except Exception:
+            target_hour, target_minute = 20, 30
+        target = now.replace(hour=target_hour, minute=target_minute, second=0, microsecond=0)
+        if now >= target:
+            target += timedelta(days=1)
+        wait_seconds = (target - now).total_seconds()
+        while wait_seconds > 0 and bool(_min_schedule_config.get("enabled", True)):
+            sleep_s = min(wait_seconds, 30)
+            _time.sleep(sleep_s)
+            wait_seconds -= sleep_s
+        if bool(_min_schedule_config.get("enabled", True)):
+            try:
+                _run_min_price_update()
+            except Exception:
+                pass
+
+
 @app.on_event("startup")
 async def _start_daily_scheduler():
     global _daily_update_thread
     _daily_update_thread = threading.Thread(target=_daily_scheduler_loop, daemon=True)
     _daily_update_thread.start()
+
+
+@app.on_event("startup")
+async def _start_min_scheduler():
+    global _min_update_thread
+    _min_update_thread = threading.Thread(target=_min_scheduler_loop, daemon=True)
+    _min_update_thread.start()
 
 
 @app.get("/api/market-data/instrument-ids")
@@ -3338,15 +3470,15 @@ async def api_update_price(params: UpdatePriceParams):
                 f'wait_time={params.wait_time}, method={params.method}, '
                 f'only_update_new={params.only_update_new}'
             )
-            if params.source == "joinquant":
-                # 从分钟频库(joinquant)聚合为日频写入日频库, 不覆盖 akshare
+            if params.source in ("joinquant", "tqsdk_edb"):
+                # 从分钟频库(joinquant 或天勤 tqsdk_edb)聚合为日频写入日频库, 不覆盖 akshare
                 update_futures_continuous_contract_price_from_minute(
                     instrument_id=params.instrument_id,
                     start_date=params.start_date,
                     end_date=params.end_date,
                     method=params.method,
                     cancel_event=cancel_event,
-                    source="joinquant",
+                    source=params.source,
                 )
             else:
                 # 原 akshare 日频更新
@@ -3917,7 +4049,7 @@ async def api_scheduled_status():
     _reload_market_schedule_config_from_file()
     return {
         "enabled": bool(_daily_schedule_config.get("enabled", True)),
-        "schedule_time": str(_daily_schedule_config.get("schedule_time") or "20:00"),
+        "schedule_time": str(_daily_schedule_config.get("schedule_time") or "21:00"),
         "instrument_id": list(_daily_schedule_config.get("instrument_id") or []),
         "load_prev_weighted_factor": bool(_daily_schedule_config.get("load_prev_weighted_factor", True)),
         "wait_time": float(_daily_schedule_config.get("wait_time", 2.0)),
@@ -3933,7 +4065,7 @@ async def api_update_schedule_config(params: ScheduleConfigParams):
     _reload_market_schedule_config_from_file()
     _daily_schedule_config.update({
         "enabled": bool(params.enabled),
-        "schedule_time": str(params.schedule_time or "20:00"),
+        "schedule_time": str(params.schedule_time or "21:00"),
         "instrument_id": params.instrument_id or [],
         "load_prev_weighted_factor": bool(params.load_prev_weighted_factor),
         "wait_time": float(params.wait_time),
@@ -3959,6 +4091,52 @@ async def api_toggle_schedule(enabled: bool = True):
         _daily_update_thread = threading.Thread(target=_daily_scheduler_loop, daemon=True)
         _daily_update_thread.start()
     return {"enabled": bool(_daily_schedule_config.get("enabled", True)), "message": "已开启定时更新" if enabled else "已关闭定时更新"}
+
+
+@app.get("/api/market-data/scheduled-status-1min")
+async def api_scheduled_status_1min():
+    """Return full minute-frequency scheduled update config."""
+    _reload_min_schedule_config_from_file()
+    return {
+        "enabled": bool(_min_schedule_config.get("enabled", True)),
+        "schedule_time": str(_min_schedule_config.get("schedule_time") or "20:30"),
+        "instrument_id": list(_min_schedule_config.get("instrument_id") or []),
+        "wait_time": float(_min_schedule_config.get("wait_time", 0.5)),
+        "method": str(_min_schedule_config.get("method") or "bulk_write_update"),
+        "source": str(_min_schedule_config.get("source") or "tqsdk_edb"),
+    }
+
+
+@app.post("/api/market-data/schedule-config-1min")
+async def api_update_schedule_config_1min(params: MinScheduleConfigParams):
+    """Update minute-frequency scheduled market-data config and persist it."""
+    _reload_min_schedule_config_from_file()
+    _min_schedule_config.update({
+        "enabled": bool(params.enabled),
+        "schedule_time": str(params.schedule_time or "20:30"),
+        "instrument_id": params.instrument_id or [],
+        "wait_time": float(params.wait_time),
+        "method": str(params.method),
+        "source": str(params.source or "tqsdk_edb"),
+    })
+    _save_min_market_schedule_config_to_db()
+    return {
+        "message": "分钟定时更新配置已保存",
+        "config": dict(_min_schedule_config),
+    }
+
+
+@app.post("/api/market-data/toggle-schedule-1min")
+async def api_toggle_schedule_1min(enabled: bool = True):
+    """Toggle minute-frequency scheduled update."""
+    global _min_update_thread
+    _reload_min_schedule_config_from_file()
+    _min_schedule_config["enabled"] = bool(enabled)
+    _save_min_market_schedule_config_to_db()
+    if enabled and (_min_update_thread is None or not _min_update_thread.is_alive()):
+        _min_update_thread = threading.Thread(target=_min_scheduler_loop, daemon=True)
+        _min_update_thread.start()
+    return {"enabled": bool(_min_schedule_config.get("enabled", True)), "message": "已开启分钟定时更新" if enabled else "已关闭分钟定时更新"}
 
 
 # ── Entry point ───────────────────────────────────────────────────────
