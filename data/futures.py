@@ -140,7 +140,14 @@ def get_futures_continuous_contract_price(instrument_id: Union[str, List, None] 
                                           from_database: bool = True,
                                           load_prev_weighted_factor: bool = True,
                                           wait_time: float = 2.0,
-                                          cancel_event=None):
+                                          cancel_event=None,
+                                          source: Optional[Union[str, List[str]]] = 'akshare'):
+    """Get futures continuous contract daily price with optional filters.
+
+    source: 数据来源过滤, 支持单个字符串或列表。默认 'akshare' 只读 akshare 日频
+            (兼容无 source 旧记录); 传 None/'' 表示不过滤(返回全部来源, 注意可能多行);
+            传列表如 ['akshare','joinquant'] 表示同时读取多个来源。
+    """
     """
     Get futures continuous contract daily price with optional filters.
 
@@ -205,6 +212,15 @@ def get_futures_continuous_contract_price(instrument_id: Union[str, List, None] 
                 {'time': {'$lte': pd.Timestamp(end_date)}},
                 {'instrument_id': {"$in": instrument_id}}
             ]}
+        # 按 source 过滤(默认 akshare), 避免 joinquant/tqsdk_edb 日频混入重复
+        if isinstance(source, (list, tuple)):
+            src_list = [s for s in source if s]
+        elif source:
+            src_list = [source]
+        else:
+            src_list = None
+        if src_list:
+            mongo_operator['$and'].append({'source': {'$in': src_list + [None]}})
         df_futures_price = get_data(database='futures',
                                     collection='continuous_contract_price_daily',
                                     mongo_operator=mongo_operator)
@@ -709,6 +725,7 @@ def _load_prev_weighted_factor(continuous_instrument_id: str,
         '$and': [
             {'instrument_id': continuous_instrument_id},
             {'time': {'$lt': pd.Timestamp(start_date)}},
+            {'source': {'$in': [SOURCE_AKSHARE, None]}},
         ]
     }
     df_prev = get_data(

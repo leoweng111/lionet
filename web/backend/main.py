@@ -3843,15 +3843,22 @@ async def api_get_price(
     instrument_id: str,
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
+    source: Optional[str] = None,
 ):
-    """Get price data for one instrument, for table display and K-line chart."""
+    """Get price data for one instrument, for table display and K-line chart.
+
+    source: 逗号分隔的多来源, 如 'akshare' / 'akshare,joinquant' / 'joinquant,tqsdk_edb';
+            留空默认 akshare。返回结果含 source 列以区分来源。
+    """
 
     def _query():
+        sources = [s.strip() for s in source.split(",") if s.strip()] if source else None
         df = get_futures_continuous_contract_price(
             instrument_id=instrument_id,
             start_date=start_date or "20000101",
             end_date=end_date or None,
             from_database=True,
+            source=sources or 'akshare',
         )
         if df is None or df.empty:
             return {"rows": [], "columns": []}
@@ -3898,11 +3905,19 @@ async def api_get_price_1min(
     instrument_id: str,
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
+    source: Optional[str] = None,
 ):
-    """获取分钟连续合约价格(continuous_contract_price_1min), 用于表格展示和K线图。"""
+    """获取分钟连续合约价格(continuous_contract_price_1min), 用于表格展示和K线图。
+
+    source: 逗号分隔的多来源, 如 'joinquant' / 'joinquant,tqsdk_edb'; 留空返回全部来源。
+            返回结果含 source 列以区分来源。
+    """
 
     def _query():
         op = {"instrument_id": instrument_id}
+        sources = [s.strip() for s in source.split(",") if s.strip()] if source else None
+        if sources:
+            op["source"] = {"$in": sources}
         ts_start = pd.Timestamp(start_date) if start_date else None
         ts_end = pd.Timestamp(end_date) if end_date else None
         if ts_start is not None and ts_end is not None:

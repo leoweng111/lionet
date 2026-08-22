@@ -382,6 +382,13 @@
                 <el-option label="分钟频" value="min" />
               </el-select>
             </el-form-item>
+            <el-form-item label="来源">
+              <el-select v-model="detailParams.source" multiple filterable clearable placeholder="日频默认akshare" style="width:220px;">
+                <el-option label="akshare" value="akshare" />
+                <el-option label="joinquant" value="joinquant" />
+                <el-option label="tqsdk_edb（天勤）" value="tqsdk_edb" />
+              </el-select>
+            </el-form-item>
             <el-form-item label="合约">
               <el-select v-model="detailParams.instrument_id" filterable placeholder="选择合约" style="width:140px;">
                 <el-option v-for="id in instrumentIds" :key="id" :label="id" :value="id" />
@@ -931,7 +938,18 @@ const detailColumns = ref([])
 const showKline = ref(false)
 const klineContainer = ref(null)
 let klineChart = null
-const detailParams = reactive({ freq: 'daily', instrument_id: '', start_date: '', end_date: '' })
+const detailParams = reactive({
+  freq: 'daily',
+  source: ['akshare'],
+  instrument_id: '',
+  start_date: '',
+  end_date: '',
+})
+
+// 切换频率时给来源设置合理默认
+watch(() => detailParams.freq, (val) => {
+  detailParams.source = val === 'min' ? ['joinquant', 'tqsdk_edb'] : ['akshare']
+})
 
 const loadDetail = async () => {
   if (!detailParams.instrument_id) { ElMessage.warning('请选择合约'); return }
@@ -942,6 +960,7 @@ const loadDetail = async () => {
       instrument_id: detailParams.instrument_id,
       start_date: detailParams.start_date || undefined,
       end_date: detailParams.end_date || undefined,
+      source: detailParams.source && detailParams.source.length ? detailParams.source.join(',') : undefined,
     }
     const { data } = detailParams.freq === 'min'
       ? await getMarketDataPrice1min(common)
