@@ -3,6 +3,7 @@
   "instrument_id": [
     "C0"
   ],
+  "load_prev_weighted_factor": true,
   "method": "bulk_write_update",
   "schedule_time": "21:00",
   "source": "tqsdk_edb",

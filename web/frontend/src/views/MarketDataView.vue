@@ -206,10 +206,16 @@
               </el-select>
             </el-form-item>
             <el-form-item label="开始日期">
-              <el-input v-model="price1minParams.start_date" placeholder="留空=最近90天" clearable />
+              <el-input v-model="price1minParams.start_date" placeholder="留空=最近90天" clearable @change="onPrice1minStartDateChange" />
             </el-form-item>
             <el-form-item label="结束日期">
               <el-input v-model="price1minParams.end_date" :placeholder="todayStr" clearable />
+            </el-form-item>
+            <el-form-item label="继续后复权因子">
+              <el-switch v-model="price1minParams.load_prev_weighted_factor" />
+              <span style="margin-left:8px;color:#909399;font-size:12px;">
+                开启=接续数据库已有因子链；关闭=从1.0重新开始
+              </span>
             </el-form-item>
             <el-form-item label="请求间隔(秒)">
               <el-input-number v-model="price1minParams.wait_time" :min="0" :max="10" :step="0.1" :precision="1" style="width:100%;" />
@@ -262,6 +268,9 @@
               >
                 <el-option v-for="id in instrumentIds" :key="`m1m_auto_${id}`" :label="id" :value="id" />
               </el-select>
+            </el-form-item>
+            <el-form-item label="继续后复权因子">
+              <el-switch v-model="schedule1minParams.load_prev_weighted_factor" :disabled="!schedule1minParams.enabled" />
             </el-form-item>
             <el-form-item label="请求间隔(秒)">
               <el-input-number v-model="schedule1minParams.wait_time" :min="0" :max="10" :step="0.1" :precision="1" :disabled="!schedule1minParams.enabled" style="width:100%;" />
@@ -778,7 +787,16 @@ const price1minParams = reactive({
   wait_time: 0.5,
   method: 'bulk_write_update',
   source: 'tqsdk_edb',
+  load_prev_weighted_factor: true,
 })
+const onPrice1minStartDateChange = (val) => {
+  if (val && val.trim()) {
+    ElMessageBox.confirm(
+      `修改分钟频开始日期可能导致后复权因子不统一。建议使用「继续后复权因子」保持因子链连续，确认继续吗？`,
+      '警告', { type: 'warning', confirmButtonText: '确认', cancelButtonText: '恢复默认' }
+    ).catch(() => { price1minParams.start_date = '' })
+  }
+}
 const handleUpdatePrice1min = async () => {
   price1minLoading.value = true
   price1minStopping.value = false
@@ -792,6 +810,7 @@ const handleUpdatePrice1min = async () => {
       wait_time: price1minParams.wait_time,
       method: price1minParams.method,
       source: price1minParams.source,
+      load_prev_weighted_factor: price1minParams.load_prev_weighted_factor,
     }
     const { data } = await updateContractPrice1min(payload)
     currentPrice1minTaskId.value = data.task_id || ''
@@ -833,6 +852,7 @@ const schedule1minParams = reactive({
   wait_time: 0.5,
   method: 'bulk_write_update',
   source: 'tqsdk_edb',
+  load_prev_weighted_factor: true,
 })
 const schedule1minTimeDisplay = ref(schedule1minParams.schedule_time)
 const onSchedule1minTimeChange = (val) => {
@@ -853,6 +873,7 @@ const loadSchedule1minStatus = async () => {
     schedule1minParams.wait_time = Number.isFinite(Number(data.wait_time)) ? Number(data.wait_time) : 0.5
     schedule1minParams.method = data.method || 'bulk_write_update'
     schedule1minParams.source = data.source || 'tqsdk_edb'
+    schedule1minParams.load_prev_weighted_factor = data.load_prev_weighted_factor !== false
     schedule1minConfigReady.value = true
   } catch { /* ignore */ }
   finally {
@@ -868,6 +889,7 @@ const saveSchedule1minConfig = async () => {
       wait_time: schedule1minParams.wait_time,
       method: schedule1minParams.method,
       source: schedule1minParams.source,
+      load_prev_weighted_factor: schedule1minParams.load_prev_weighted_factor,
     })
   } catch (err) {
     ElMessage.error('保存失败: ' + (err.response?.data?.detail || err.message))

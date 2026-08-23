@@ -1197,14 +1197,20 @@ def detect_rollover_from_minute_df(df: pd.DataFrame,
     daily['is_rollover'] = ((daily['gap_ret'].abs() > gap_threshold)
                             | (daily['oi_chg'].abs() > oi_chg_threshold))
 
+    # 与日频 _build_roll_adjusted_continuous_from_panel 语义一致:
+    #   weighted_factor 累乘; cur_weighted_factor 换月日=换月比例, 非换月日沿用上一次值。
     wf = float(initial_weighted_factor)
+    cur_cwf = 1.0
     wfs = []
+    cwfs = []
     for t, row in daily.iterrows():
         if bool(row['is_rollover']) and pd.notna(row['prev_close']) and abs(row['open']) > 1e-12:
-            wf *= float(row['prev_close'] / row['open'])
+            cur_cwf = float(row['prev_close'] / row['open'])
+            wf *= cur_cwf
         wfs.append(wf)
+        cwfs.append(cur_cwf)
     daily['weighted_factor'] = wfs
-    daily['cur_weighted_factor'] = 1.0
+    daily['cur_weighted_factor'] = cwfs
     daily['symbol'] = ''
     return daily.reset_index()[['td', 'symbol', 'weighted_factor', 'cur_weighted_factor', 'is_rollover']]
 
@@ -1282,13 +1288,15 @@ def update_futures_continuous_contract_price_1min(
     method: str = 'bulk_write_update',
     cancel_event=None,
     source: str = SOURCE_EDB,
+    load_prev_weighted_factor: bool = True,
 ) -> None:
     """从天勤 EDB 免费接口获取主力连续合约的近期分钟线, 写入 continuous_contract_price_1min。
 
     - 数据源: 天勤 EDB 免费接口, **免费额度为近 1 年分钟线**(period=60)。默认取最近 90 天。
     - 换月日/后复权因子: **基于分钟数据自身检测**(隔夜跳空 + 持仓量跳变),
       保证分钟数据内部自洽; 与日频库换月日相互独立, 不依赖日频数据。
-    - 增量更新: 以数据库已有最新 weighted_factor 锚定, 保证 wf 链连续。
+    - load_prev_weighted_factor=True: 以数据库已有最新 weighted_factor 锚定, 保证 wf 链连续(默认);
+      =False: 从 1.0 重新开始(类似日频的"不继续后复权因子")。
     - 写入唯一键含 source(默认 tqsdk_edb), 与 joinquant 分钟数据并存。
     - 注意: 若 start_date 早于近 1 年, EDB 免费接口可能取不到, 请使用付费专业版。
     """
@@ -1340,7 +1348,11 @@ def update_futures_continuous_contract_price_1min(
 
         # 2) 交易日归属 + 基于聚宽分钟数据自身检测换月日 + 计算后复权因子链
         edb_df['td'] = assign_trading_day_1min(edb_df['datetime'])
-        initial_wf = _load_latest_wf_1min(ins_id)   # 增量锚定: 接续数据库已有 wf 链
+        # 增量锚定: load_prev_weighted_factor=True 时接续数据库已有 wf 链; False 从 1.0 开始
+        if load_prev_weighted_factor:
+            initial_wf = _load_latest_wf_1min(ins_id)
+        else:
+            initial_wf = 1.0
         schedule = detect_rollover_from_minute_df(edb_df, initial_weighted_factor=initial_wf)
         schedule['symbol'] = edb_symbol
         out = build_minute_continuous_df_from_edb(edb_df, schedule, ins_id, symbol=edb_symbol)

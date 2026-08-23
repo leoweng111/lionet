@@ -1207,6 +1207,7 @@ def _default_min_market_schedule_config() -> Dict[str, Any]:
         "wait_time": 0.5,
         "method": "bulk_write_update",
         "source": "tqsdk_edb",
+        "load_prev_weighted_factor": True,
     }
     raw = load_json_config("market_data_schedule_config_1min.json", default_cfg)
     if not isinstance(raw, dict):
@@ -3149,6 +3150,7 @@ class UpdatePrice1minParams(BaseModel):
     wait_time: float = 0.5
     method: str = "bulk_write_update"
     source: str = "tqsdk_edb"   # 天勤 EDB 来源标识
+    load_prev_weighted_factor: bool = True   # True=继续后复权因子(默认); False=从1.0重新开始
 
 
 class ScheduleConfigParams(BaseModel):
@@ -3170,6 +3172,7 @@ class MinScheduleConfigParams(BaseModel):
     wait_time: float = 0.5
     method: str = "bulk_write_update"
     source: str = "tqsdk_edb"
+    load_prev_weighted_factor: bool = True
 
 
 class DeleteDataParams(BaseModel):
@@ -3317,6 +3320,7 @@ def _run_min_price_update():
             "wait_time": float(cfg.get("wait_time", 0.5)),
             "method": str(cfg.get("method") or "bulk_write_update"),
             "source": src,
+            "load_prev_weighted_factor": bool(cfg.get("load_prev_weighted_factor", True)),
             "scheduled": True,
         },
     }
@@ -3325,7 +3329,8 @@ def _run_min_price_update():
     handler = _MarketDataLogHandler(task_id)
     lionet_logger.addHandler(handler)
     try:
-        lionet_logger.info(f"定时分钟更新启动: source={src}, date={target_day}, instrument_id={instrument_id}")
+        lionet_logger.info(f"定时分钟更新启动: source={src}, date={target_day}, instrument_id={instrument_id}, "
+                           f"load_prev_weighted_factor={cfg.get('load_prev_weighted_factor', True)}")
         update_futures_continuous_contract_price_1min(
             instrument_id=instrument_id,
             start_date=target_day,
@@ -3333,6 +3338,7 @@ def _run_min_price_update():
             wait_time=float(cfg.get("wait_time", 0.5)),
             method=str(cfg.get("method") or "bulk_write_update"),
             source=src,
+            load_prev_weighted_factor=bool(cfg.get("load_prev_weighted_factor", True)),
         )
         lionet_logger.info('定时分钟更新完成')
         market_data_tasks[task_id]["status"] = "completed"
@@ -3546,6 +3552,7 @@ async def api_update_price_1min(params: UpdatePrice1minParams):
                 method=params.method,
                 cancel_event=cancel_event,
                 source=params.source,
+                load_prev_weighted_factor=params.load_prev_weighted_factor,
             )
             if market_data_tasks[task_id].get("status") == "terminated":
                 lionet_logger.warning('分钟价格数据更新任务已被终止')
@@ -4119,6 +4126,7 @@ async def api_scheduled_status_1min():
         "wait_time": float(_min_schedule_config.get("wait_time", 0.5)),
         "method": str(_min_schedule_config.get("method") or "bulk_write_update"),
         "source": str(_min_schedule_config.get("source") or "tqsdk_edb"),
+        "load_prev_weighted_factor": bool(_min_schedule_config.get("load_prev_weighted_factor", True)),
     }
 
 
@@ -4133,6 +4141,7 @@ async def api_update_schedule_config_1min(params: MinScheduleConfigParams):
         "wait_time": float(params.wait_time),
         "method": str(params.method),
         "source": str(params.source or "tqsdk_edb"),
+        "load_prev_weighted_factor": bool(params.load_prev_weighted_factor),
     })
     _save_min_market_schedule_config_to_db()
     return {
