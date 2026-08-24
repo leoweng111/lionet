@@ -525,6 +525,7 @@ import {
   updateContractInfo,
   updateContractPrice,
   updateContractPrice1min,
+  checkMarketDataPrevData,
   getMarketDataTaskStatus,
   terminateMarketDataTask,
   getMarketDataLogs,
@@ -723,13 +724,40 @@ const queueSaveScheduleConfig = () => {
   }, 300)
 }
 
-const onStartDateChange = (val) => {
-  if (val && val !== researchStartDate.value && val.trim()) {
+const onStartDateChange = async (val) => {
+  if (!val || val === researchStartDate.value || !val.trim()) return
+  const warnDefault = () => {
     ElMessageBox.confirm(
       `修改 start_date 可能导致后复权因子不统一。目前后复权的起始日期默认为 ${researchStartDate.value}，确认继续吗？`,
       '警告', { type: 'warning', confirmButtonText: '确认', cancelButtonText: '恢复默认' }
     ).catch(() => { priceParams.start_date = '' })
   }
+  // 已勾选「继续后复权因子」: 允许修改开始日期, 但必须保证开始日期的前一个交易日数据库中有可接续的后复权因子数据
+  if (priceParams.load_prev_weighted_factor) {
+    try {
+      const { data } = await checkMarketDataPrevData({
+        instrument_id: priceParams.instrument_id.length ? priceParams.instrument_id : null,
+        start_date: val,
+        freq: 'daily',
+        source: priceParams.source,
+      })
+      if (data.error) {
+        warnDefault()
+      } else if (data.has_prev_data === false) {
+        const prevTd = data.prev_trading_day || '前一个交易日'
+        ElMessageBox.confirm(
+          `前一个交易日 ${prevTd} 数据库中无价格数据，无法接续已有后复权因子链。确认继续吗？`,
+          '警告', { type: 'warning', confirmButtonText: '确认', cancelButtonText: '恢复默认' }
+        ).catch(() => { priceParams.start_date = '' })
+      }
+    } catch (err) {
+      // 检查接口失败时, 回退到原有提醒逻辑
+      warnDefault()
+    }
+    return
+  }
+  // 未勾选「继续后复权因子」: 修改开始日期会使后复权因子从新日期重新开始, 保持原有提醒
+  warnDefault()
 }
 const handleUpdatePrice = async () => {
   priceLoading.value = true
@@ -789,13 +817,38 @@ const price1minParams = reactive({
   source: 'tqsdk_edb',
   load_prev_weighted_factor: true,
 })
-const onPrice1minStartDateChange = (val) => {
-  if (val && val.trim()) {
+const onPrice1minStartDateChange = async (val) => {
+  if (!val || !val.trim()) return
+  const warnDefault = () => {
     ElMessageBox.confirm(
       `修改分钟频开始日期可能导致后复权因子不统一。建议使用「继续后复权因子」保持因子链连续，确认继续吗？`,
       '警告', { type: 'warning', confirmButtonText: '确认', cancelButtonText: '恢复默认' }
     ).catch(() => { price1minParams.start_date = '' })
   }
+  // 已勾选「继续后复权因子」: 允许修改开始日期, 但必须保证开始日期的前一个交易日数据库中有可接续的后复权因子数据
+  if (price1minParams.load_prev_weighted_factor) {
+    try {
+      const { data } = await checkMarketDataPrevData({
+        instrument_id: price1minParams.instrument_id.length ? price1minParams.instrument_id : null,
+        start_date: val,
+        freq: '1min',
+        source: price1minParams.source,
+      })
+      if (data.error) {
+        warnDefault()
+      } else if (data.has_prev_data === false) {
+        const prevTd = data.prev_trading_day || '前一个交易日'
+        ElMessageBox.confirm(
+          `前一个交易日 ${prevTd} 数据库中无分钟价格数据，无法接续已有后复权因子链。确认继续吗？`,
+          '警告', { type: 'warning', confirmButtonText: '确认', cancelButtonText: '恢复默认' }
+        ).catch(() => { price1minParams.start_date = '' })
+      }
+    } catch (err) {
+      warnDefault()
+    }
+    return
+  }
+  warnDefault()
 }
 const handleUpdatePrice1min = async () => {
   price1minLoading.value = true

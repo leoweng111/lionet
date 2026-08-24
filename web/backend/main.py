@@ -30,6 +30,7 @@ if PROJECT_ROOT not in sys.path:
 from data.factor_data import get_factor_formula_records
 from mongo.mongify import get_data, delete_data, list_collection_names, update_one_data, update_many_data
 from data.futures import (
+    SOURCE_AKSHARE,
     get_futures_continuous_contract_info,
     get_futures_continuous_contract_price,
     get_trading_days,
@@ -3181,6 +3182,21 @@ class DeleteDataParams(BaseModel):
     end_date: Optional[str] = None
 
 
+class CheckPrevDataParams(BaseModel):
+    """检查「开始日期前一天数据库中是否有可接续的后复权因子数据」。
+
+    - instrument_id: None=全部合约。
+    - start_date: 要检查的开始日期(YYYYMMDD)。
+    - freq: 'daily' 或 '1min'。
+    - source: 数据来源。日频 akshare 走 daily 集合; joinquant/tqsdk_edb 的日频由分钟聚合而来,
+      因子链存在于分钟集合。
+    """
+    instrument_id: Optional[List[str]] = None
+    start_date: str = RESEARCH_START_DATE
+    freq: str = "daily"
+    source: Optional[str] = None
+
+
 # ── Scheduled daily update ────────────────────────────────────────────
 _daily_update_thread: Optional[threading.Thread] = None
 _min_update_thread: Optional[threading.Thread] = None
@@ -3575,6 +3591,102 @@ async def api_update_price_1min(params: UpdatePrice1minParams):
 
     threading.Thread(target=_run, daemon=True).start()
     return {"task_id": task_id, "message": "分钟价格数据更新任务已启动"}
+
+
+def _prev_trading_day(start_date: str, lookback_days: int = 20) -> Optional[str]:
+    """返回 start_date 之前的最近一个交易日(YYYYMMDD)。
+
+    复用 data.futures.get_trading_days(基于 chinese_calendar 判断工作日)。
+    向前回看 lookback_days 天, 以覆盖国庆/春节等法定长假。
+    找不到(极端情况)返回 None。
+    """
+    start_ts = pd.Timestamp(str(start_date))
+    end_ts = start_ts - pd.Timedelta(days=1)
+    begin_ts = end_ts - pd.Timedelta(days=lookback_days)
+    try:
+        tds = get_trading_days(
+            start_date=begin_ts.strftime('%Y%m%d'),
+            end_date=end_ts.strftime('%Y%m%d'),
+        )
+    except Exception:
+        return None
+    if not tds:
+        return None
+    return tds[-1].strftime('%Y%m%d')
+
+
+@app.post("/api/market-data/check-prev-data")
+async def api_check_prev_data(params: CheckPrevDataParams):
+    """检查 start_date 的「前一个交易日」数据库中是否有价格数据(用于判断能否接续后复权因子链)。
+
+    前端在「继续后复权因子」勾选时修改 start_date, 需要保证 start_date 之前的
+    最近一个交易日数据库中有该合约数据, 否则无法接续已有 weighted_factor 链。
+    此接口按合约返回检查结果。
+
+    - freq='daily' 且 source=akshare/None: 检查日频库 continuous_contract_price_daily(与
+      _load_prev_weighted_factor 相同的 source 过滤)。
+    - freq='daily' 且 source=joinquant/tqsdk_edb: 日频由分钟聚合而来, 因子链在分钟库。
+    - freq='1min': 检查分钟库 continuous_contract_price_1min(_load_latest_wf_1min 不区分 source)。
+    """
+    start_str = str(params.start_date or '').strip()
+    if not start_str:
+        return {"has_prev_data": False, "prev_trading_day": None, "detail": [], "error": "start_date 为空"}
+    try:
+        start_ts = pd.Timestamp(start_str)
+    except Exception:
+        return {"has_prev_data": False, "prev_trading_day": None, "detail": [], "error": f"无法解析 start_date: {start_str}"}
+
+    # 计算 start_date 之前的最近一个交易日
+    prev_td_str = _prev_trading_day(start_str)
+    if prev_td_str is None:
+        return {"has_prev_data": False, "prev_trading_day": None, "detail": [], "error": f"无法计算 {start_str} 之前的交易日"}
+    prev_td_ts = pd.Timestamp(prev_td_str)
+
+    freq = (params.freq or "daily").strip().lower()
+    source = (params.source or "").strip() or None
+
+    # 确定要检查的集合与 source 过滤
+    if freq == "1min":
+        collection = "continuous_contract_price_1min"
+        source_filter = None   # _load_latest_wf_1min 不区分 source
+    elif source in ("joinquant", "tqsdk_edb"):
+        # 日频由分钟聚合而来, 因子链存在于分钟集合
+        collection = "continuous_contract_price_1min"
+        source_filter = [source]
+    else:
+        collection = "continuous_contract_price_daily"
+        source_filter = [SOURCE_AKSHARE, None]
+
+    if params.instrument_id:
+        ins_list = [str(x) for x in params.instrument_id]
+    else:
+        info_df = get_futures_continuous_contract_info(from_database=True)
+        if info_df is None or info_df.empty:
+            return {"has_prev_data": False, "prev_trading_day": prev_td_str, "detail": [], "error": "数据库中无合约信息"}
+        ins_list = sorted(info_df["instrument_id"].dropna().unique().tolist())
+
+    if not ins_list:
+        return {"has_prev_data": False, "prev_trading_day": prev_td_str, "detail": [], "error": "无合约可检查"}
+
+    detail: List[Dict[str, Any]] = []
+    has_prev = True
+    for ins in ins_list:
+        # 检查「前一个交易日」当天是否有数据(前一个交易日 0:00 ~ start_date 0:00)
+        mongo_operator = {
+            "$and": [
+                {"instrument_id": str(ins)},
+                {"time": {"$gte": prev_td_ts, "$lt": start_ts}},
+            ]
+        }
+        if source_filter is not None:
+            mongo_operator["$and"].append({"source": {"$in": source_filter}})
+        df_prev = get_data(database="futures", collection=collection, mongo_operator=mongo_operator)
+        ins_has = isinstance(df_prev, pd.DataFrame) and not df_prev.empty
+        detail.append({"instrument_id": str(ins), "has_prev_data": ins_has})
+        if not ins_has:
+            has_prev = False
+
+    return {"has_prev_data": has_prev, "prev_trading_day": prev_td_str, "detail": detail, "error": None}
 
 
 @app.post("/api/market-data/terminate/{task_id}")

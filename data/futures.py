@@ -1317,8 +1317,6 @@ def update_futures_continuous_contract_price_1min(
 
     log.info(f'[1min] 更新 {len(instrument_id)} 个合约分钟数据: {start_dt.date()} ~ {end_dt.date()}')
 
-    from mongo.mongify import update_data
-
     for idx, ins_id in enumerate(instrument_id, 1):
         _raise_if_cancelled(cancel_event)
         root = _to_root_instrument(ins_id)
@@ -1462,7 +1460,6 @@ def update_futures_continuous_contract_price_from_minute(
     start_dt = pd.Timestamp(start_date) if start_date else pd.Timestamp(RESEARCH_START_DATE)
 
     log.info(f'[min2daily] 将分钟(source={source})聚合成日频: {start_dt.date()} ~ {end_dt.date()}, instruments={instrument_id}')
-    from mongo.mongify import update_data
 
     for idx, ins_id in enumerate(instrument_id, 1):
         _raise_if_cancelled(cancel_event)
