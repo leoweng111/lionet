@@ -137,6 +137,37 @@
               </el-col>
 
               <el-col :xs="24" :sm="24" :md="12" :lg="12" :xl="12">
+            <div class="param-section"><el-divider content-position="center">日内分钟特征</el-divider>
+              <el-form-item label="特征选择">
+                <el-select
+                  v-model="intradayFeatureSettings.selected"
+                  multiple
+                  collapse-tags
+                  collapse-tags-tooltip
+                  filterable
+                  placeholder="空 = 不启用分钟特征"
+                  style="width:100%"
+                >
+                  <el-option-group
+                    v-for="(features, category) in intradayFeatureSettings.categories"
+                    :key="category"
+                    :label="category"
+                  >
+                    <el-option v-for="feat in features" :key="feat" :label="feat" :value="feat" />
+                  </el-option-group>
+                </el-select>
+              </el-form-item>
+              <div style="margin-bottom:8px;">
+                <el-button size="small" @click="intradayFeatureSettings.selected = [...intradayFeatureSettings.available]">全选</el-button>
+                <el-button size="small" @click="intradayFeatureSettings.selected = []">清空</el-button>
+              </div>
+              <div style="font-size:12px;color:#909399;line-height:1.5;">
+                从 continuous_contract_price_1min 分钟bar实时计算日频特征，作为GP叶子字段。夜盘(≥20点)归次日交易日。需DB有对应分钟数据。
+              </div>
+            </div>
+              </el-col>
+
+              <el-col :xs="24" :sm="24" :md="12" :lg="12" :xl="12">
             <div class="param-section"><el-divider content-position="center">适应度权重</el-divider>
               <div v-for="indicator in supportedIndicators" :key="`fitness-${indicator}`" class="indicator-row">
                 <span class="indicator-label">{{ indicator }}</span>
@@ -346,7 +377,7 @@
 <script setup>
 import { ref, reactive, computed, onMounted, onUnmounted, watch } from 'vue'
 import { ElMessage } from 'element-plus'
-import { startMining, getMiningStatus, getTasks, getMiningIndicatorOptions, getMiningAutoConfig, updateMiningAutoConfig, getMiningAutoSchedulerStatus, runMiningAutoSchedulerTick, savePageConfig, getPageConfig, resetPageConfig } from '../api'
+import { startMining, getMiningStatus, getTasks, getMiningIndicatorOptions, getMiningIntradayFeatures, getMiningAutoConfig, updateMiningAutoConfig, getMiningAutoSchedulerStatus, runMiningAutoSchedulerTick, savePageConfig, getPageConfig, resetPageConfig } from '../api'
 import NavChart from '../components/NavChart.vue'
 
 const MINING_TAB_KEY = 'GP_MINING_ACTIVE_TAB'
@@ -354,6 +385,13 @@ const AUTO_SETTINGS_CACHE_KEY = 'GP_MINING_AUTO_SETTINGS'
 
 const supportedIndicators = ref(['Net Return', 'Net Sharpe', 'TS IC'])
 const indicatorDirection = ref({ 'Net Return': 1, 'Net Sharpe': 1, 'TS IC': 1 })
+
+// Intraday-derived daily features (computed from minute bars on-the-fly)
+const intradayFeatureSettings = reactive({
+  available: [],
+  categories: {},
+  selected: [],
+})
 const differentiableFitnessIndicators = new Set(['TS IC', 'TS ICIR', 'Gross Return', 'Net Return', 'Gross Sharpe', 'Net Sharpe', 'Gross Volatility', 'Net Volatility', 'Turnover'])
 const serverDefaultFitnessWeight = ref({})
 const serverDefaultFilterIndicatorDict = ref({})
@@ -657,15 +695,21 @@ onMounted(async () => {
     _loadSchedulerStatus()
   }, 5000)
   try {
-    const [{ data: indicatorData }, { data: autoConfig }, { data: manualConfig }] = await Promise.all([
+    const [{ data: indicatorData }, { data: autoConfig }, { data: manualConfig }, { data: featData }] = await Promise.all([
       getMiningIndicatorOptions(),
       getMiningAutoConfig(),
       getPageConfig('gp_mining_start'),
+      getMiningIntradayFeatures(),
     ])
     supportedIndicators.value = indicatorData.supported_indicator || supportedIndicators.value
     indicatorDirection.value = indicatorData.indicator_direction || indicatorDirection.value
     serverDefaultFitnessWeight.value = indicatorData.default_fitness_indicator_weight || {}
     serverDefaultFilterIndicatorDict.value = indicatorData.default_filter_indicator_dict || {}
+
+    // Load intraday feature options (default: all selected)
+    intradayFeatureSettings.available = featData?.all_features || []
+    intradayFeatureSettings.categories = featData?.categories || {}
+    intradayFeatureSettings.selected = [...intradayFeatureSettings.available]
 
     _loadManualParams(manualConfig?.saved || {})
 
@@ -759,6 +803,7 @@ const _buildMiningPayload = () => {
     random_seed: params.random_seed || null,
     fitness_indicator_dict: fitnessIndicatorDict,
     filter_indicator_dict: filterIndicatorDict,
+    intraday_features: intradayFeatureSettings.selected?.length ? [...intradayFeatureSettings.selected] : null,
   }
 }
 

@@ -386,6 +386,10 @@ class GPMiningParams(BaseModel):
     outsample_ratio: float = 0.0
     outsample_start_time: Optional[str] = None
     outsample_end_time: Optional[str] = None
+    # Intraday-derived daily features to compute from minute bars and
+    # expose as additional GP leaf fields.  None or empty list = disabled.
+    # Use ["all"] to enable every available feature.
+    intraday_features: Optional[List[str]] = None
 
 
 class MiningConfigUpdateParams(BaseModel):
@@ -1402,6 +1406,19 @@ async def get_mining_indicator_options():
     }
 
 
+@app.get('/api/mining/intraday-features')
+async def get_mining_intraday_features():
+    """Return available intraday-derived daily features and their categories."""
+    from factors.factor_intraday_features import (
+        ALL_FEATURE_NAMES, FEATURE_CATEGORIES, FEATURE_TYPE_MAP,
+    )
+    return {
+        'all_features': list(ALL_FEATURE_NAMES),
+        'categories': {k: list(v) for k, v in FEATURE_CATEGORIES.items()},
+        'type_map': dict(FEATURE_TYPE_MAP),
+    }
+
+
 def _normalize_fitness_weight_for_save(raw_weight: Dict[str, Optional[float]]) -> Dict[str, float]:
     _refresh_gp_runtime_configs_from_files()
     out: Dict[str, float] = {}
@@ -1962,6 +1979,7 @@ def _execute_mining(params: GPMiningParams, task_id: str, cancel_event: threadin
             outsample_ratio=params.outsample_ratio,
             outsample_start_time=params.outsample_start_time,
             outsample_end_time=params.outsample_end_time,
+            intraday_features=params.intraday_features,
         )
 
         # Attach cancel_event so GP evolution can be interrupted

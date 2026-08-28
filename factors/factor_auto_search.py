@@ -1547,7 +1547,8 @@ class GeneticFactorGenerator(FactorGenerator):
                  gradient_window_neighbor_radius: int = 4,
                  outsample_ratio: float = 0.0,
                  outsample_start_time: Optional[str] = None,
-                 outsample_end_time: Optional[str] = None):
+                 outsample_end_time: Optional[str] = None,
+                 intraday_features: Optional[Sequence[str]] = None):
         """遗传规划因子生成器。
 
         参数说明（中文）：
@@ -1710,11 +1711,87 @@ class GeneticFactorGenerator(FactorGenerator):
         # GP 阶段将滚动标准化固化到公式 OpRollNorm 中，避免后续流程重复标准化。
         self.apply_formula_rolling_norm = bool(apply_rolling_norm)
 
+        # Intraday-derived daily features (e.g. rv, bpv, oi_flow, ...).
+        # When set, load_base_data() computes these from minute bars and
+        # extends self.base_col_list so GP can use them as leaf nodes.
+        self.intraday_features = list(intraday_features) if intraday_features else None
+
         self.factor_tree_map: Dict[str, Any] = {}
         self.cancel_event = None  # threading.Event, set externally to cancel GP
 
+    def load_base_data(self) -> None:
+        """Override to also load minute bars and compute intraday features."""
+        super().load_base_data()
+        if self.intraday_features:
+            self.insample_data = self._merge_intraday_features(
+                self.insample_data, self.start_time, self.end_time)
+            if self.outsample_data is not None:
+                self.outsample_data = self._merge_intraday_features(
+                    self.outsample_data,
+                    self.outsample_start_time, self.outsample_end_time)
+
+    def _merge_intraday_features(self, df: pd.DataFrame,
+                                 start_time: Optional[str],
+                                 end_time: Optional[str]) -> pd.DataFrame:
+        """Load minute bars, compute intraday features, merge into daily df.
+
+        Also extends self.base_col_list with the new feature column names
+        so that _prepare_df_for_gp and run_gp_evolution treat them as
+        available leaf fields.
+        """
+        from data.futures import get_futures_continuous_contract_price_1min
+        from factors.factor_intraday_features import (
+            compute_intraday_daily_features,
+        )
+
+        if df is None or df.empty:
+            return df
+
+        minute_df = get_futures_continuous_contract_price_1min(
+            instrument_id=self.instrument_id_list,
+            start_date=start_time,
+            end_date=end_time,
+            source=self.source,
+        )
+        if minute_df is None or minute_df.empty:
+            log.warning(
+                f'[intraday_features] No minute data (source={self.source}, '
+                f'instruments={self.instrument_id_list}, range=[{start_time}, {end_time}]). '
+                f'Intraday features will be NaN.'
+            )
+            return df
+
+        feature_df = compute_intraday_daily_features(
+            minute_df=minute_df,
+            feature_names=self.intraday_features,
+            instrument_id_list=self.instrument_id_list,
+        )
+        if feature_df is None or feature_df.empty:
+            log.warning('[intraday_features] Feature computation produced no results.')
+            return df
+
+        # Normalize time columns for merge (both must be midnight-normalized dates)
+        df = df.copy()
+        df['time'] = pd.to_datetime(df['time'], errors='coerce').dt.normalize()
+        feature_df['time'] = pd.to_datetime(feature_df['time'], errors='coerce').dt.normalize()
+
+        merged = df.merge(feature_df, on=['time', 'instrument_id'], how='left')
+
+        # Extend base_col_list with new feature columns
+        new_cols = [c for c in feature_df.columns
+                    if c not in ('time', 'instrument_id')
+                    and c not in self.base_col_list]
+        self.base_col_list = list(self.base_col_list) + new_cols
+
+        log.info(
+            f'[intraday_features] Computed {len(new_cols)} features from minute bars, '
+            f'extended base_col_list to {len(self.base_col_list)} fields: {new_cols}'
+        )
+        return merged
+
     def _prepare_df_for_gp(self, df: pd.DataFrame) -> pd.DataFrame:
-        base_cols = ['time', 'instrument_id', 'open', 'high', 'low', 'close', 'volume', 'position']
+        # Use self.base_col_list so intraday-derived feature columns are kept.
+        base_cols = ['time', 'instrument_id'] + self.base_col_list
         for col in base_cols:
             if col not in df.columns:
                 raise ValueError(f'Missing required column for GP: {col}')

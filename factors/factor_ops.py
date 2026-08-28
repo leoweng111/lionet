@@ -33,6 +33,29 @@ _BASE_FIELD_TYPE_MAP: Dict[str, FactorDataType] = {
     'volume': FactorDataType.VOLUME,
     'position': FactorDataType.OI,
     'oi': FactorDataType.OI,
+    # ── Intraday-derived daily features (see factor_intraday_features.py) ──
+    # A. Realized volatility & return moments
+    'rv': FactorDataType.VOLATILITY,
+    'bpv': FactorDataType.VOLATILITY,
+    'jump': FactorDataType.VOLATILITY,
+    'rv_neg': FactorDataType.VOLATILITY,
+    'rv_pos': FactorDataType.VOLATILITY,
+    'medrv': FactorDataType.VOLATILITY,
+    'rskew': FactorDataType.RATIO,
+    'rkurt': FactorDataType.RATIO,
+    # B. Range-based volatility estimators
+    'pk': FactorDataType.VOLATILITY,
+    'gk': FactorDataType.VOLATILITY,
+    'rs_vol': FactorDataType.VOLATILITY,
+    'yz': FactorDataType.VOLATILITY,
+    # C. Intraday momentum & time-segment (ret_* auto-typed as RETURN by prefix)
+    # D. Microstructure & order flow
+    'oi_flow': FactorDataType.RETURN,
+    'cvd': FactorDataType.RETURN,
+    'vwap_dev': FactorDataType.RATIO,
+    'amihud_min': FactorDataType.RATIO,
+    'vr_k': FactorDataType.RATIO,
+    'kyle_lambda': FactorDataType.RATIO,
 }
 
 

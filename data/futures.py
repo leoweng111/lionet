@@ -1408,6 +1408,77 @@ def update_futures_continuous_contract_price_1min(
     log.info('[1min] 分钟价格更新全部完成')
 
 
+def get_futures_continuous_contract_price_1min(
+    instrument_id: Union[str, List, None] = None,
+    start_date: str = None,
+    end_date: str = None,
+    source: Optional[Union[str, List[str]]] = SOURCE_JOINQUANT,
+) -> pd.DataFrame:
+    """Get futures continuous contract **minute** price from database.
+
+    Reads from the ``futures.continuous_contract_price_1min`` collection.
+
+    The query range is automatically extended 5 days backward so that
+    night-session bars (hour >= 20) belonging to the first requested
+    trading day are included (night bars are attributed to the *next*
+    trading day by :func:`assign_trading_day_1min`).
+
+    Parameters
+    ----------
+    instrument_id : str or list of str
+        Continuous-contract identifiers, e.g. ``'C0'`` or ``['C0', 'RB0']``.
+        ``None`` loads all instruments in the collection.
+    start_date, end_date : str
+        Date range (``'YYYYMMDD'`` or similar).
+    source : str or list of str or None
+        Minute data source filter (``'joinquant'``, ``'tqsdk_edb'``).
+        ``None`` loads all sources (may produce duplicates).
+
+    Returns
+    -------
+    pd.DataFrame
+        Minute bars sorted by ``['instrument_id', 'time']`` with columns:
+        ``time, instrument_id, symbol, open, high, low, close, settle,
+        volume, position, money, weighted_factor, cur_weighted_factor,
+        is_rollover, source``.
+    """
+    if isinstance(instrument_id, str):
+        instrument_id = [instrument_id]
+    elif instrument_id is not None:
+        instrument_id = list(instrument_id)
+
+    # Extend range backward so night bars belonging to the first td are included.
+    start_ts = pd.Timestamp(start_date) - pd.Timedelta(days=5) if start_date else None
+    end_ts = pd.Timestamp(end_date) + pd.Timedelta(days=1) if end_date else None
+
+    conditions: List[Dict[str, object]] = []
+    if start_ts is not None:
+        conditions.append({'time': {'$gte': start_ts}})
+    if end_ts is not None:
+        conditions.append({'time': {'$lte': end_ts}})
+    if instrument_id is not None:
+        conditions.append({'instrument_id': {'$in': instrument_id}})
+    if isinstance(source, (list, tuple)):
+        src_list = [s for s in source if s]
+        if src_list:
+            conditions.append({'source': {'$in': src_list + [None]}})
+    elif source:
+        conditions.append({'source': {'$in': [source, None]}})
+
+    mongo_op: Dict[str, object] = {'$and': conditions} if len(conditions) > 1 else conditions[0]
+    df = get_data(database='futures',
+                  collection='continuous_contract_price_1min',
+                  mongo_operator=mongo_op)
+
+    if not isinstance(df, pd.DataFrame) or df.empty:
+        return pd.DataFrame()
+
+    df = df.copy()
+    df['time'] = pd.to_datetime(df['time'], errors='coerce')
+    df = df.dropna(subset=['time']).sort_values(['instrument_id', 'time']).reset_index(drop=True)
+    return df
+
+
 def _is_holiday_normal(td, trading_days) -> bool:
     """判断某交易日是否因「前一交易日是节前最后交易日(法定节假日前夜盘暂停)」而无夜盘(属正常)。"""
     try:
