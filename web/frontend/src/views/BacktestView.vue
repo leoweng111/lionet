@@ -26,6 +26,12 @@
 
             <div class="param-section"><el-divider content-position="left">基础参数</el-divider>
               <el-form-item label="合约"><el-input v-model="p.instrument_id_list" /></el-form-item>
+              <el-form-item label="来源">
+                <el-select v-model="p.source" style="width:100%">
+                  <el-option label="joinquant" value="joinquant" />
+                  <el-option label="akshare" value="akshare" />
+                </el-select>
+              </el-form-item>
               <el-row :gutter="12"><el-col :span="12"><el-form-item label="因子频率"><el-select v-model="p.fc_freq" style="width:100%"><el-option label="1d" value="1d" /><el-option label="5m" value="5m" /><el-option label="1m" value="1m" /></el-select></el-form-item></el-col><el-col :span="12"><el-form-item label="调仓频率"><el-select v-model="p.portfolio_adjust_method" style="width:100%"><el-option label="1D" value="1D" /><el-option label="1M" value="1M" /><el-option label="1Q" value="1Q" /><el-option label="min" value="min" /></el-select></el-form-item></el-col></el-row>
               <el-row :gutter="12"><el-col :span="12"><el-form-item label="利息方式"><el-select v-model="p.interest_method" style="width:100%"><el-option label="simple" value="simple" /><el-option label="compound" value="compound" /></el-select></el-form-item></el-col><el-col :span="12"><el-form-item label="并行数"><el-input-number v-model="p.n_jobs" :min="1" :max="32" style="width:100%" /></el-form-item></el-col></el-row>
               <el-row :gutter="12"><el-col :span="8"><el-form-item label="基准"><el-switch v-model="p.calculate_baseline" /></el-form-item></el-col><el-col :span="8"><el-form-item label="无风险"><el-switch v-model="p.risk_free_rate" /></el-form-item></el-col><el-col :span="8"><el-form-item label="复权"><el-switch v-model="p.apply_weighted_price" /></el-form-item></el-col></el-row>
@@ -103,7 +109,7 @@ let configSaveTimer = null
 const p = reactive({
   version: '', fc_name_list: [], collection: 'genetic_programming', instrument_type: 'futures_continuous_contract',
   instrument_id_list: 'C0', fc_freq: '1d', start_time: '20200101', end_time: '20241231', portfolio_adjust_method: '1D',
-  interest_method: 'simple', risk_free_rate: false, calculate_baseline: true, apply_weighted_price: true, n_jobs: 5,
+  interest_method: 'simple', risk_free_rate: false, calculate_baseline: true, apply_weighted_price: true, source: 'joinquant', n_jobs: 5,
 })
 
 const _buildPersistState = () => ({
@@ -159,7 +165,7 @@ const resetParams = async () => {
   const localDefaults = {
     version: '', fc_name_list: [], collection: 'genetic_programming', instrument_type: 'futures_continuous_contract',
     instrument_id_list: 'C0', fc_freq: '1d', start_time: '20200101', end_time: '20241231', portfolio_adjust_method: '1D',
-    interest_method: 'simple', risk_free_rate: false, calculate_baseline: true, apply_weighted_price: true, n_jobs: 5,
+    interest_method: 'simple', risk_free_rate: false, calculate_baseline: true, apply_weighted_price: true, source: 'joinquant', n_jobs: 5,
   }
   try {
     const { data } = await resetPageConfig('backtest')
@@ -186,7 +192,7 @@ const _applySavedConfig = (saved = {}) => {
   const localDefaults = {
     version: '', fc_name_list: [], collection: 'genetic_programming', instrument_type: 'futures_continuous_contract',
     instrument_id_list: 'C0', fc_freq: '1d', start_time: '20200101', end_time: '20241231', portfolio_adjust_method: '1D',
-    interest_method: 'simple', risk_free_rate: false, calculate_baseline: true, apply_weighted_price: true, n_jobs: 5,
+    interest_method: 'simple', risk_free_rate: false, calculate_baseline: true, apply_weighted_price: true, source: 'joinquant', n_jobs: 5,
   }
   Object.assign(p, { ...localDefaults, ...saved, version: saved.version || '', fc_name_list: saved.fc_name_list || [] })
   inputMode.value = saved.inputMode || saved.input_mode || 'db'

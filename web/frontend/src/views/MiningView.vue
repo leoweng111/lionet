@@ -87,6 +87,12 @@
                 <el-col :span="12"><el-form-item label="合约"><el-input v-model="params.instrument_id_list" /></el-form-item></el-col>
                 <el-col :span="12"><el-form-item label="版本号"><el-input v-model="params.version" /></el-form-item></el-col>
               </el-row>
+              <el-form-item label="来源">
+                <el-select v-model="params.source" style="width:100%">
+                  <el-option label="joinquant" value="joinquant" />
+                  <el-option label="akshare" value="akshare" />
+                </el-select>
+              </el-form-item>
               <el-row :gutter="12">
                 <el-col :span="12"><el-form-item label="开始日期"><el-input v-model="params.start_time" /></el-form-item></el-col>
                 <el-col :span="12"><el-form-item label="结束日期"><el-input v-model="params.end_time" /></el-form-item></el-col>
@@ -416,7 +422,7 @@ const defaultParams = () => ({
   start_time: '20200101', end_time: '20241231',
   version: new Date().toISOString().slice(0,10).replace(/-/g,'') + '_gp_test',
   portfolio_adjust_method: '1D', interest_method: 'simple', risk_free_rate: false,
-  calculate_baseline: true, apply_weighted_price: true, n_jobs: 5, max_factor_count: 50,
+  calculate_baseline: true, apply_weighted_price: true, source: 'joinquant', n_jobs: 5, max_factor_count: 50,
   min_window_size: 30,
   fitness_metric: 'ic',
   fitness_indicator_dict: {

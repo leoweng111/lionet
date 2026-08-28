@@ -41,6 +41,12 @@
                   <el-col :span="12"><el-form-item label="合约"><el-input v-model="p.instrument_id_list" /></el-form-item></el-col>
                   <el-col :span="12"><el-form-item label="频率"><el-select v-model="p.fc_freq" style="width:100%"><el-option label="1d" value="1d" /><el-option label="5m" value="5m" /><el-option label="1m" value="1m" /></el-select></el-form-item></el-col>
                 </el-row>
+                <el-form-item label="来源">
+                  <el-select v-model="p.source" style="width:100%">
+                    <el-option label="joinquant" value="joinquant" />
+                    <el-option label="akshare" value="akshare" />
+                  </el-select>
+                </el-form-item>
                 <el-row :gutter="12">
                   <el-col :span="12"><el-form-item label="开始日期"><el-input v-model="p.start_time" /></el-form-item></el-col>
                   <el-col :span="12"><el-form-item label="结束日期"><el-input v-model="p.end_time" /></el-form-item></el-col>
@@ -188,6 +194,7 @@ const defaults = () => ({
   interest_method: 'simple',
   risk_free_rate: false,
   apply_weighted_price: true,
+  source: 'joinquant',
   check_leakage_count: 20,
   check_relative: true,
   relative_threshold: 0.7,

@@ -18,6 +18,12 @@
             </div>
             <div class="param-section"><el-divider content-position="left">基础参数</el-divider>
               <el-form-item label="合约"><el-input v-model="sp.instrument_id" /></el-form-item>
+              <el-form-item label="来源">
+                <el-select v-model="sp.source" style="width:100%">
+                  <el-option label="joinquant" value="joinquant" />
+                  <el-option label="akshare" value="akshare" />
+                </el-select>
+              </el-form-item>
               <el-form-item label="数据库"><el-input v-model="sp.database" /></el-form-item>
             </div>
             <div class="param-section"><el-divider content-position="left">样本内区间</el-divider><el-row :gutter="8"><el-col :span="12"><el-form-item label="开始"><el-input v-model="sp.start_time" /></el-form-item></el-col><el-col :span="12"><el-form-item label="结束"><el-input v-model="sp.end_time" /></el-form-item></el-col></el-row></div>
@@ -117,7 +123,7 @@ const sp = reactive({
   start_time: '20200101', end_time: '20241231',
   database: 'factors', collection: 'genetic_programming',
   initial_capital: 1000000, margin_rate: 0.1, fee_per_lot: 2.0,
-  slippage: 1.0, apply_rolling_norm: true,
+  slippage: 1.0, apply_rolling_norm: true, source: 'joinquant',
   rolling_norm_window: 30, rolling_norm_min_periods: 20,
   rolling_norm_eps: 1e-8, rolling_norm_clip: 5.0,
   signal_delay_days: 1, min_open_ratio: 1.0,
@@ -186,6 +192,7 @@ const resetParams = async () => {
       fee_per_lot: serverDefaults.fee_per_lot ?? 2.0,
       slippage: serverDefaults.slippage ?? 1.0,
       apply_rolling_norm: serverDefaults.apply_rolling_norm ?? true,
+      source: serverDefaults.source || 'joinquant',
       rolling_norm_window: serverDefaults.rolling_norm_window || 30,
       rolling_norm_min_periods: serverDefaults.rolling_norm_min_periods || 20,
       rolling_norm_eps: serverDefaults.rolling_norm_eps ?? 1e-8,
@@ -204,7 +211,7 @@ const resetParams = async () => {
       start_time: '20200101', end_time: '20241231',
       database: 'factors', collection: kc,
       initial_capital: 1000000, margin_rate: 0.1, fee_per_lot: 2.0,
-      slippage: 1.0, apply_rolling_norm: true,
+      slippage: 1.0, apply_rolling_norm: true, source: 'joinquant',
       rolling_norm_window: 30, rolling_norm_min_periods: 20,
       rolling_norm_eps: 1e-8, rolling_norm_clip: 5.0,
       signal_delay_days: 1, min_open_ratio: 1.0,
@@ -231,6 +238,7 @@ const _applySavedConfig = (saved = {}) => {
     fee_per_lot: saved.fee_per_lot ?? 2.0,
     slippage: saved.slippage ?? 1.0,
     apply_rolling_norm: saved.apply_rolling_norm ?? true,
+    source: saved.source || 'joinquant',
     rolling_norm_window: saved.rolling_norm_window || 30,
     rolling_norm_min_periods: saved.rolling_norm_min_periods || 20,
     rolling_norm_eps: saved.rolling_norm_eps ?? 1e-8,

@@ -193,51 +193,161 @@
               </div>
             </div>
           </template>
-          <el-form :model="price1minParams" label-width="160px" size="small" style="max-width:600px;">
+          <el-form :model="price1minParams" label-width="160px" size="small" style="max-width:640px;">
             <el-form-item label="来源">
               <el-select v-model="price1minParams.source" style="width:100%;">
+                <el-option label="joinquant（聚宽 CSV 导入）" value="joinquant" />
                 <el-option label="tqsdk_edb（天勤）" value="tqsdk_edb" />
               </el-select>
             </el-form-item>
-            <el-form-item label="合约（可多选）">
-              <el-select v-model="price1minParams.instrument_id" multiple filterable allow-create clearable
-                placeholder="留空=更新全部" style="width:100%;">
-                <el-option v-for="id in instrumentIds" :key="`m_${id}`" :label="id" :value="id" />
-              </el-select>
-            </el-form-item>
-            <el-form-item label="开始日期">
-              <el-input v-model="price1minParams.start_date" placeholder="留空=最近90天" clearable @change="onPrice1minStartDateChange" />
-            </el-form-item>
-            <el-form-item label="结束日期">
-              <el-input v-model="price1minParams.end_date" :placeholder="todayStr" clearable />
-            </el-form-item>
-            <el-form-item label="继续后复权因子">
-              <el-switch v-model="price1minParams.load_prev_weighted_factor" />
-              <span style="margin-left:8px;color:#909399;font-size:12px;">
-                开启=接续数据库已有因子链；关闭=从1.0重新开始
-              </span>
-            </el-form-item>
-            <el-form-item label="请求间隔(秒)">
-              <el-input-number v-model="price1minParams.wait_time" :min="0" :max="10" :step="0.1" :precision="1" style="width:100%;" />
-            </el-form-item>
-            <el-form-item label="更新方式(method)">
-              <el-select v-model="price1minParams.method" style="width:100%;">
-                <el-option v-for="m in updateMethods" :key="`m_method_${m}`" :label="m" :value="m" />
-              </el-select>
-            </el-form-item>
-            <el-form-item>
-              <el-button type="primary" :loading="price1minLoading" @click="handleUpdatePrice1min">
-                <el-icon v-if="!price1minLoading"><Upload /></el-icon> {{ price1minLoading ? '更新中...' : '启动价格更新' }}
-              </el-button>
-              <el-button
-                type="danger"
-                plain
-                :loading="price1minStopping"
-                :disabled="!price1minLoading || !currentPrice1minTaskId"
-                @click="handleStopPrice1minUpdate"
-                style="margin-left:8px;"
-              >停止</el-button>
-            </el-form-item>
+
+            <!-- joinquant: 本机 CSV 路径导入 -->
+            <template v-if="price1minParams.source === 'joinquant'">
+              <el-steps :active="jqActiveStep" align-center style="margin-bottom:14px;">
+                <el-step title="① 聚宽导出主CSV" />
+                <el-step title="② 导入主CSV" />
+                <el-step title="③ 识别缺夜盘" />
+                <el-step title="④ 补拉夜盘" />
+                <el-step title="⑤ 导入补CSV" />
+              </el-steps>
+
+              <!-- 步骤①: 聚宽导出主 CSV -->
+              <el-card shadow="never" class="jq-script-card">
+                <template #header><span style="font-weight:600;">步骤 ①：在聚宽研究环境导出主 CSV</span></template>
+                <el-form label-width="80px" size="small">
+                  <el-row :gutter="12">
+                    <el-col :span="8">
+                      <el-form-item label="合约">
+                        <el-select v-model="price1minParams.csv_instrument_id" filterable allow-create clearable
+                          placeholder="如 C0" style="width:100%;">
+                          <el-option v-for="id in instrumentIds" :key="`m_csv_${id}`" :label="id" :value="id" />
+                        </el-select>
+                      </el-form-item>
+                    </el-col>
+                    <el-col :span="8">
+                      <el-form-item label="开始日期">
+                        <el-input v-model="price1minParams.csv_start_date" placeholder="20200101" clearable @change="onJqStartDateChange" />
+                      </el-form-item>
+                    </el-col>
+                    <el-col :span="8">
+                      <el-form-item label="结束日期">
+                        <el-input v-model="price1minParams.csv_end_date" :placeholder="todayStr" clearable />
+                      </el-form-item>
+                    </el-col>
+                  </el-row>
+                  <el-form-item label="继续后复权因子">
+                    <el-switch v-model="price1minParams.load_prev_weighted_factor" />
+                    <span style="margin-left:8px;color:#909399;font-size:12px;">开启=导入主/补 CSV 时接续库中同 source 的因子链；关闭=从 CSV 自身链/1.0 起算</span>
+                  </el-form-item>
+                  <el-form-item>
+                    <el-button type="primary" :loading="jqScriptLoading" @click="handleGenerateJoinquantScripts('export')">生成导出脚本</el-button>
+                    <el-button :disabled="!jqExportScript" @click="copyText(jqExportScript)">一键复制脚本</el-button>
+                    <span style="margin-left:8px;color:#909399;font-size:12px;">在聚宽研究环境新建 notebook，粘贴运行，到 data/fut_min/ 下载 CSV。</span>
+                  </el-form-item>
+                  <el-input v-if="jqExportScript" v-model="jqExportScript" type="textarea" :rows="10" readonly />
+                </el-form>
+              </el-card>
+
+              <!-- 步骤②: 导入主 CSV -->
+              <el-card shadow="never" class="jq-script-card" style="margin-top:12px;">
+                <template #header><span style="font-weight:600;">步骤 ②：导入主 CSV（本机路径）</span></template>
+                <el-form label-width="140px" size="small">
+                  <el-form-item label="主 CSV 路径">
+                    <el-input v-model="price1minParams.main_csv" placeholder="/Users/xxx/Downloads/C9999.XDCE.csv" clearable />
+                  </el-form-item>
+                  <el-form-item label="更新方式(method)">
+                    <el-select v-model="price1minParams.method" style="width:100%;">
+                      <el-option v-for="m in updateMethods" :key="`m_csv_method_${m}`" :label="m" :value="m" />
+                    </el-select>
+                  </el-form-item>
+                  <el-form-item>
+                    <el-button type="primary" :loading="price1minLoading" @click="handleUpdatePrice1minCsv">
+                      <el-icon v-if="!price1minLoading"><Upload /></el-icon> {{ price1minLoading ? '导入中...' : '启动 CSV 导入' }}
+                    </el-button>
+                    <el-button type="danger" plain :loading="price1minStopping" :disabled="!price1minLoading || !currentPrice1minTaskId" @click="handleStopPrice1minUpdate" style="margin-left:8px;">停止</el-button>
+                  </el-form-item>
+                </el-form>
+              </el-card>
+
+              <!-- 步骤③④: 识别缺夜盘 → 聚宽补拉 -->
+              <el-card shadow="never" class="jq-script-card" style="margin-top:12px;">
+                <template #header><span style="font-weight:600;">步骤 ③④：识别缺夜盘 → 聚宽补拉夜盘</span></template>
+                <el-form label-width="140px" size="small">
+                  <el-form-item label="MISSING_RANGES">
+                    <el-input v-model="missingRangesText" type="textarea" :rows="6"
+                      placeholder="步骤②导入完成后若检测到缺夜盘，会自动填入；也可手动粘贴缺夜盘列表" />
+                  </el-form-item>
+                  <el-form-item>
+                    <el-button :disabled="!missingRangesText" @click="copyText(missingRangesText)">复制 MISSING_RANGES</el-button>
+                    <el-button type="primary" :loading="jqScriptLoading" @click="handleGenerateJoinquantScripts('fix')">生成补夜盘脚本</el-button>
+                    <el-button :disabled="!jqFixScript" @click="copyText(jqFixScript)">一键复制补夜盘脚本</el-button>
+                  </el-form-item>
+                  <el-input v-if="jqFixScript" v-model="jqFixScript" type="textarea" :rows="10" readonly />
+                  <el-alert v-if="jqFixScript" type="info" :closable="false" show-icon style="margin-top:4px;"
+                    title="把补夜盘脚本粘贴到聚宽运行，到 data/fix_night/ 下载 CSV（文件名为 {合约代码}_fix_night.csv）。" />
+                </el-form>
+              </el-card>
+
+              <!-- 步骤⑤: 导入补夜盘 CSV -->
+              <el-card shadow="never" class="jq-script-card" style="margin-top:12px;">
+                <template #header><span style="font-weight:600;">步骤 ⑤：导入补夜盘 CSV（本机路径）</span></template>
+                <el-form label-width="140px" size="small">
+                  <el-form-item label="补夜盘 CSV 路径">
+                    <el-input v-model="price1minParams.fix_csv" placeholder="/Users/xxx/Downloads/C9999.XDCE_fix_night.csv" clearable />
+                  </el-form-item>
+                  <el-form-item>
+                    <el-button type="primary" :loading="price1minLoading" @click="handleUpdatePrice1minCsv">
+                      <el-icon v-if="!price1minLoading"><Upload /></el-icon> {{ price1minLoading ? '导入中...' : '启动导入（主+补合并）' }}
+                    </el-button>
+                    <el-button type="danger" plain :loading="price1minStopping" :disabled="!price1minLoading || !currentPrice1minTaskId" @click="handleStopPrice1minUpdate" style="margin-left:8px;">停止</el-button>
+                  </el-form-item>
+                  <el-alert type="info" :closable="false" show-icon title="导入按 time+instrument_id+source 幂等写入（source=joinquant），不会覆盖 tqsdk_edb。主、补 CSV 会自动合并去重，补 CSV 可单独导入。" />
+                </el-form>
+              </el-card>
+            </template>
+
+            <!-- tqsdk_edb: 天勤接口更新 -->
+            <template v-else>
+              <el-form-item label="合约（可多选）">
+                <el-select v-model="price1minParams.instrument_id" multiple filterable allow-create clearable
+                  placeholder="留空=更新全部" style="width:100%;">
+                  <el-option v-for="id in instrumentIds" :key="`m_${id}`" :label="id" :value="id" />
+                </el-select>
+              </el-form-item>
+              <el-form-item label="开始日期">
+                <el-input v-model="price1minParams.start_date" placeholder="留空=最近90天" clearable @change="onPrice1minStartDateChange" />
+              </el-form-item>
+              <el-form-item label="结束日期">
+                <el-input v-model="price1minParams.end_date" :placeholder="todayStr" clearable />
+              </el-form-item>
+              <el-form-item label="继续后复权因子">
+                <el-switch v-model="price1minParams.load_prev_weighted_factor" />
+                <span style="margin-left:8px;color:#909399;font-size:12px;">
+                  开启=接续数据库已有因子链；关闭=从1.0重新开始
+                </span>
+              </el-form-item>
+              <el-form-item label="请求间隔(秒)">
+                <el-input-number v-model="price1minParams.wait_time" :min="0" :max="10" :step="0.1" :precision="1" style="width:100%;" />
+              </el-form-item>
+              <el-form-item label="更新方式(method)">
+                <el-select v-model="price1minParams.method" style="width:100%;">
+                  <el-option v-for="m in updateMethods" :key="`m_method_${m}`" :label="m" :value="m" />
+                </el-select>
+              </el-form-item>
+              <el-form-item>
+                <el-button type="primary" :loading="price1minLoading" @click="handleUpdatePrice1min">
+                  <el-icon v-if="!price1minLoading"><Upload /></el-icon> {{ price1minLoading ? '更新中...' : '启动价格更新' }}
+                </el-button>
+                <el-button
+                  type="danger"
+                  plain
+                  :loading="price1minStopping"
+                  :disabled="!price1minLoading || !currentPrice1minTaskId"
+                  @click="handleStopPrice1minUpdate"
+                  style="margin-left:8px;"
+                >停止</el-button>
+              </el-form-item>
+            </template>
           </el-form>
 
           <el-divider content-position="left">自动价格更新配置（T日更新T日）</el-divider>
@@ -525,6 +635,8 @@ import {
   updateContractInfo,
   updateContractPrice,
   updateContractPrice1min,
+  updateContractPrice1minCsv,
+  generateJoinquantScripts,
   checkMarketDataPrevData,
   getMarketDataTaskStatus,
   terminateMarketDataTask,
@@ -816,6 +928,23 @@ const price1minParams = reactive({
   method: 'bulk_write_update',
   source: 'tqsdk_edb',
   load_prev_weighted_factor: true,
+  // joinquant CSV 导入
+  csv_instrument_id: 'C0',
+  main_csv: '',
+  fix_csv: '',
+  csv_start_date: researchStartDate.value || '20200101',
+  csv_end_date: todayStr,
+})
+const jqExportScript = ref('')
+const jqFixScript = ref('')
+const missingRangesText = ref('')
+const jqScriptLoading = ref(false)
+const jqActiveStep = computed(() => {
+  if (price1minParams.fix_csv?.trim()) return 4
+  if (missingRangesText.value) return 2
+  if (price1minParams.main_csv?.trim()) return 1
+  if (jqExportScript.value) return 0
+  return 0
 })
 const onPrice1minStartDateChange = async (val) => {
   if (!val || !val.trim()) return
@@ -832,7 +961,7 @@ const onPrice1minStartDateChange = async (val) => {
         instrument_id: price1minParams.instrument_id.length ? price1minParams.instrument_id : null,
         start_date: val,
         freq: '1min',
-        source: price1minParams.source,
+        source: null,   // 天勤锚定 _load_latest_wf_1min 不区分 source, 故检查也不区分
       })
       if (data.error) {
         warnDefault()
@@ -872,6 +1001,132 @@ const handleUpdatePrice1min = async () => {
       price1minLoading.value = false
       price1minStopping.value = false
       currentPrice1minTaskId.value = ''
+    })
+  } catch (err) {
+    ElMessage.error('启动失败: ' + (err.response?.data?.detail || err.message))
+    price1minLoading.value = false
+    price1minStopping.value = false
+    currentPrice1minTaskId.value = ''
+  }
+}
+const onJqStartDateChange = async (val) => {
+  if (!val || !val.trim()) return
+  // 仅当勾选「继续后复权因子」时, 检查开始日期的前一个交易日是否在库中(同 source=joinquant)
+  if (!price1minParams.load_prev_weighted_factor) return
+  try {
+    const { data } = await checkMarketDataPrevData({
+      instrument_id: price1minParams.csv_instrument_id || 'C0',
+      start_date: val,
+      freq: '1min',
+      source: 'joinquant',
+    })
+    if (data.error) {
+      ElMessage.warning('前一个交易日检查失败: ' + data.error)
+    } else if (data.has_prev_data === false) {
+      const prevTd = data.prev_trading_day || '前一个交易日'
+      ElMessageBox.confirm(
+        `前一个交易日 ${prevTd} 数据库中无 joinquant 分钟数据，无法接续已有后复权因子链。确认继续吗？`,
+        '警告', { type: 'warning', confirmButtonText: '确认', cancelButtonText: '取消' }
+      )
+    }
+  } catch (err) {
+    // 检查失败不阻塞操作
+  }
+}
+
+const copyText = async (text) => {
+  if (!text) return
+  try {
+    await navigator.clipboard.writeText(text)
+    ElMessage.success('已复制到剪贴板')
+  } catch (err) {
+    try {
+      const ta = document.createElement('textarea')
+      ta.value = text
+      ta.style.position = 'fixed'
+      ta.style.opacity = '0'
+      document.body.appendChild(ta)
+      ta.select()
+      document.execCommand('copy')
+      document.body.removeChild(ta)
+      ElMessage.success('已复制到剪贴板')
+    } catch (e2) {
+      ElMessage.error('复制失败，请手动选择复制')
+    }
+  }
+}
+
+const buildMissingRangesFromResult = (result) => {
+  const list = result && Array.isArray(result.missing_night_days) ? result.missing_night_days : null
+  if (!list || !list.length) {
+    missingRangesText.value = ''
+    return false
+  }
+  const lines = list.map(d => `    ('${d.td}', '${d.fetch_start}', '${d.fetch_end}'),`)
+  missingRangesText.value = '[\n' + lines.join('\n') + '\n]'
+  return true
+}
+
+const handleGenerateJoinquantScripts = async (mode) => {
+  if (!price1minParams.csv_instrument_id) {
+    ElMessage.error('请先选择合约')
+    return
+  }
+  jqScriptLoading.value = true
+  try {
+    const { data } = await generateJoinquantScripts({
+      instrument_id: price1minParams.csv_instrument_id,
+      start_date: price1minParams.csv_start_date || '20200101',
+      end_date: price1minParams.csv_end_date || todayStr,
+      missing_ranges: mode === 'fix' ? (missingRangesText.value || null) : null,
+    })
+    if (mode === 'fix') {
+      jqFixScript.value = data.fix_night_script || ''
+      ElMessage.success('补夜盘脚本已生成，请复制后到聚宽运行')
+    } else {
+      jqExportScript.value = data.export_script || ''
+      ElMessage.success('导出脚本已生成，请复制后到聚宽运行')
+    }
+  } catch (err) {
+    ElMessage.error('生成失败: ' + (err.response?.data?.detail || err.message))
+  } finally {
+    jqScriptLoading.value = false
+  }
+}
+
+const handleUpdatePrice1minCsv = async () => {
+  const mainCsv = price1minParams.main_csv?.trim() || ''
+  const fixCsv = price1minParams.fix_csv?.trim() || ''
+  if (!mainCsv && !fixCsv) {
+    ElMessage.error('请至少填写主 CSV 或补夜盘 CSV 路径')
+    return
+  }
+  price1minLoading.value = true
+  price1minStopping.value = false
+  currentPrice1minTaskId.value = ''
+  price1minLogs.value = []
+  try {
+    const payload = {
+      instrument_id: price1minParams.csv_instrument_id || 'C0',
+      main_csv: mainCsv,
+      fix_csv: fixCsv || null,
+      source: 'joinquant',
+      method: price1minParams.method,
+      load_prev_weighted_factor: price1minParams.load_prev_weighted_factor,
+    }
+    const { data } = await updateContractPrice1minCsv(payload)
+    currentPrice1minTaskId.value = data.task_id || ''
+    ElMessage.success(data.message)
+    pollMarketTask(data.task_id, price1minLogs, (statusData) => {
+      price1minLoading.value = false
+      price1minStopping.value = false
+      currentPrice1minTaskId.value = ''
+      const hasMissing = statusData && statusData.result && buildMissingRangesFromResult(statusData.result)
+      if (hasMissing) {
+        ElMessage.warning('导入完成，检测到缺夜盘交易日，请按下方第 4 步生成补夜盘脚本')
+      } else if (statusData && statusData.result && statusData.result.message) {
+        ElMessage.success(statusData.result.message)
+      }
     })
   } catch (err) {
     ElMessage.error('启动失败: ' + (err.response?.data?.detail || err.message))
@@ -970,7 +1225,7 @@ const pollMarketTask = (taskId, logsRef, onDone) => {
         else if (data.status === 'terminated') ElMessage.warning('任务已终止')
         else if (data.status === 'interrupted') ElMessage.warning('任务中断（服务重启）')
         else ElMessage.error('任务失败: ' + (data.error || ''))
-        if (onDone) onDone()
+        if (onDone) onDone(data)
       }
     } catch { /* keep polling */ }
   }, 2000)

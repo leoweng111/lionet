@@ -34,6 +34,7 @@ class BackTester:
                  risk_free_rate: bool = False,
                  calculate_baseline: bool = True,
                  apply_weighted_price: bool = True,
+                 source: str = 'joinquant',
                  n_jobs: int = 5,
                  formula: str = None):
         # todo: 数据频率，调仓频率和收益率计算频率三者相关
@@ -76,6 +77,7 @@ class BackTester:
         self.rfr = risk_free_rate
         self.calculate_baseline = calculate_baseline
         self.apply_weighted_price = apply_weighted_price
+        self.source = source
         self.n_jobs = n_jobs
         self.formula = formula
 
@@ -138,7 +140,8 @@ class BackTester:
                 self.data = get_futures_continuous_contract_price(instrument_id=self.instrument_id_list,
                                                                   start_date=self.start_time,
                                                                   end_date=self.end_time,
-                                                                  from_database=True)
+                                                                  from_database=True,
+                                                                  source=self.source)
             else:
                 raise ValueError(f'Does not support instrument type {self.instrument_type}.')
             self.is_preprocessed = False

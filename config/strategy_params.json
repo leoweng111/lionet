@@ -22,6 +22,7 @@
   "rolling_norm_window": 30,
   "signal_delay_days": 1,
   "slippage": 1,
+  "source": "joinquant",
   "start_time": "20200101",
   "version": "20260611_gp_test"
 }

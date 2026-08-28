@@ -87,6 +87,7 @@ class BaseModel:
                  interest_method: str = 'simple',
                  fee: float = 0.00025,
                  collection: Union[str, list] = 'genetic_programming',
+                 source: str = 'joinquant',
                  n_jobs: int = 5):
         """
         Params to be initialized for models.
@@ -142,6 +143,7 @@ class BaseModel:
         self.backtest = backtest
         self.interest_method = interest_method
         self.fee = fee
+        self.source = str(source).strip() or 'joinquant'
         self.n_jobs = n_jobs
 
         if self.search_type:
@@ -151,7 +153,8 @@ class BaseModel:
         self.split_date_list = None
         self.data = get_futures_continuous_contract_price(start_date=self.start_time,
                                                           end_date=self.end_time,
-                                                          from_database=True)
+                                                          from_database=True,
+                                                          source=self.source)
         self.data_cols = ['open', 'high', 'low', 'close', 'volume']
 
         self.is_preprocessed = False

@@ -44,7 +44,8 @@ class Strategy:
                  rolling_norm_eps: float = 1e-8,
                  rolling_norm_clip: float = 5.0,
                  signal_delay_days: int = 1,
-                 min_open_ratio: float = 1.0):
+                 min_open_ratio: float = 1.0,
+                 source: str = 'joinquant'):
         """Initialize strategy simulation settings.
 
         :param version: 因子版本号，用于在因子库中唯一定位公式。
@@ -95,6 +96,7 @@ class Strategy:
         self.rolling_norm_clip = float(rolling_norm_clip)
         self.signal_delay_days = int(signal_delay_days)
         self.min_open_ratio = float(min_open_ratio)
+        self.source = str(source).strip() or 'joinquant'
 
         self.performance_detail: Optional[pd.DataFrame] = None
         self.performance_summary: Optional[pd.DataFrame] = None
@@ -146,6 +148,7 @@ class Strategy:
             start_date=self.start_time,
             end_date=self.end_time,
             from_database=True,
+            source=self.source,
         )
         if not isinstance(df, pd.DataFrame) or df.empty:
             raise ValueError(
