@@ -1,9 +1,10 @@
 """
 This script is to get and deal with futures data based on akshare.
 """
+import os
 import time
 from datetime import date
-from typing import Dict, List, Optional, Sequence, Union
+from typing import Any, Dict, List, Optional, Sequence, Union
 import pandas as pd
 import numpy as np
 
@@ -141,11 +142,12 @@ def get_futures_continuous_contract_price(instrument_id: Union[str, List, None] 
                                           load_prev_weighted_factor: bool = True,
                                           wait_time: float = 2.0,
                                           cancel_event=None,
-                                          source: Optional[Union[str, List[str]]] = 'akshare'):
+                                          source: Optional[Union[str, List[str]]] = 'joinquant'):
     """Get futures continuous contract daily price with optional filters.
 
-    source: 数据来源过滤, 支持单个字符串或列表。默认 'akshare' 只读 akshare 日频
-            (兼容无 source 旧记录); 传 None/'' 表示不过滤(返回全部来源, 注意可能多行);
+    source: 数据来源过滤, 支持单个字符串或列表。默认 'joinquant' 只读 joinquant 日频
+            (由聚宽分钟聚合而来, 与分钟/回测口径一致; 兼容无 source 旧记录);
+            传 'akshare' 读取 akshare 日频; 传 None/'' 表示不过滤(返回全部来源, 注意可能多行);
             传列表如 ['akshare','joinquant'] 表示同时读取多个来源。
     """
     """
@@ -1280,6 +1282,39 @@ def _load_latest_wf_1min(instrument_id: str) -> float:
         return 1.0
 
 
+def _load_prev_wf_1min(instrument_id: str,
+                       before_time,
+                       source: Optional[str] = None) -> Optional[float]:
+    """读取分钟库中该品种在 before_time 之前的最后一条 weighted_factor。
+
+    用于 CSV 导入时「继续后复权因子」: 把 CSV 的 wf 链锚定到库中已有链上。
+    - source: 只锚定相同 source 的记录(如 'joinquant'), 避免混用其他来源(如 tqsdk_edb)。
+    - 无数据/无效返回 None(表示无法接续, 从 CSV 自身链或 1.0 起算)。
+    """
+    try:
+        mongo_filter: Dict[str, Any] = {
+            'instrument_id': str(instrument_id),
+            'time': {'$lt': pd.Timestamp(before_time)},
+        }
+        if source:
+            # 只接续同 source 的记录; 兼容历史无 source 的记录
+            mongo_filter['source'] = {'$in': [source, None]}
+        df = get_data('futures', 'continuous_contract_price_1min', mongo_filter)
+        if df is None or df.empty or 'weighted_factor' not in df.columns:
+            return None
+        df = df.copy()
+        df['time'] = pd.to_datetime(df['time'], errors='coerce')
+        df['weighted_factor'] = pd.to_numeric(df['weighted_factor'], errors='coerce')
+        df = df.dropna(subset=['time', 'weighted_factor'])
+        if df.empty:
+            return None
+        latest = df.loc[df['time'].idxmax(), 'weighted_factor']
+        wf = float(latest)
+        return wf if np.isfinite(wf) and wf > 0 else None
+    except Exception:
+        return None
+
+
 def update_futures_continuous_contract_price_1min(
     instrument_id: Union[str, List[str], None] = None,
     start_date: Optional[str] = None,
@@ -1508,3 +1543,758 @@ def update_futures_continuous_contract_price_from_minute(
             log.info(f'[min2daily] {ins_id} 写入 {min(i + 5000, total)}/{total}')
         log.info(f'[min2daily] {ins_id} 完成, 共写入 {total} 行')
     log.info('[min2daily] 全部完成')
+
+
+# ================== 分钟频 CSV 导入(聚宽/通用分钟 CSV) ==================
+# 允许导入任意格式正确、含必要字段的分钟 CSV(如聚宽导出的主 CSV + 补夜盘 CSV)。
+# - 优先使用 CSV 中已有的换月字段(symbol/is_rollover/weighted_factor/cur_weighted_factor,
+#   例如聚宽 get_dominant_future 导出); 否则回退到基于分钟数据自身检测换月(gap+持仓量跳变)。
+# - 写入唯一键含 source(默认 'joinquant'), 因此不会覆盖 tqsdk_edb 等其他来源的记录。
+
+CSV_DATETIME_COL = 'datetime'     # CSV 中分钟时间戳列名
+CSV_OI_COL = 'open_interest'      # CSV 中持仓量列名(导入时映射为 position)
+
+
+def read_and_merge_1min_csvs(main_csv: str,
+                             fix_csv: Optional[str] = None) -> pd.DataFrame:
+    """读取主 CSV 与补夜盘 CSV, 按分钟时间戳合并去重, 返回含 datetime 列的 DataFrame。
+
+    - 主 CSV 与补 CSV 可能重叠(补 CSV 含主 CSV 缺失的部分夜盘), 按 datetime 去重(保留后者)。
+    - 至少一个文件必须存在。
+    """
+    frames: List[pd.DataFrame] = []
+    for path in [main_csv, fix_csv]:
+        if path and os.path.exists(path):
+            df = pd.read_csv(path)
+            if CSV_DATETIME_COL not in df.columns:
+                # 兼容列名为 'time' 的 CSV
+                df = df.rename(columns={'time': CSV_DATETIME_COL})
+            if CSV_DATETIME_COL not in df.columns:
+                raise ValueError(f'CSV 缺少时间戳列, 需要包含 "{CSV_DATETIME_COL}" 或 "time": {path}')
+            df[CSV_DATETIME_COL] = pd.to_datetime(df[CSV_DATETIME_COL], errors='coerce')
+            df = df.dropna(subset=[CSV_DATETIME_COL])
+            frames.append(df)
+            log.info(f'[1min-csv] 读取 {path}: {len(df)} 行')
+        else:
+            log.info(f'[1min-csv] 跳过不存在的 CSV: {path}')
+    if not frames:
+        raise ValueError('没有可用的 CSV 文件(主 CSV 必须存在)。')
+
+    merged = pd.concat(frames, ignore_index=True)
+    merged = merged.drop_duplicates(subset=[CSV_DATETIME_COL], keep='last')
+    merged = merged.sort_values(CSV_DATETIME_COL).reset_index(drop=True)
+    log.info(f'[1min-csv] 合并后: {len(merged)} 行, '
+             f'范围 {merged[CSV_DATETIME_COL].min()} ~ {merged[CSV_DATETIME_COL].max()}')
+    return merged
+
+
+def _to_root_instrument_or_infer(instrument_id: str) -> str:
+    return _to_root_instrument(instrument_id)
+
+
+def build_minute_continuous_df_from_csv(main_csv: str,
+                                        fix_csv: Optional[str] = None,
+                                        instrument_id: str = 'C0',
+                                        source: str = 'joinquant',
+                                        load_prev_weighted_factor: bool = True,
+                                        mark_rollover_first_minute_only: bool = True,
+                                        gap_threshold: float = 0.01,
+                                        oi_chg_threshold: float = 0.15) -> pd.DataFrame:
+    """从分钟 CSV(主 + 可选补)构建待入库 DataFrame(含 source 列)。
+
+    - 若 CSV 含换月字段(is_rollover + weighted_factor), 优先使用(聚宽官方口径);
+    - 否则回退到基于分钟数据自身检测换月日(gap + 持仓量跳变)。
+    - load_prev_weighted_factor=True(默认): 若 CSV 起始日之前库中已有该品种数据,
+      则把 CSV 的 wf 链整体锚定到库中最新 wf 上, 保证「继续后复权因子」链连续;
+      =False: 从 CSV 自身链或 1.0 起算。
+    - 返回列: time, instrument_id, symbol, open, high, low, close, settle,
+      volume, position, money, weighted_factor, cur_weighted_factor, is_rollover, source。
+    """
+    df = read_and_merge_1min_csvs(main_csv, fix_csv)
+    if df.empty:
+        return _empty_continuous_price_df()
+    # 需要的 OHLC 列校验
+    required = ['open', 'high', 'low', 'close', 'volume']
+    missing = [c for c in required if c not in df.columns]
+    if missing:
+        raise ValueError(f'CSV 缺少必需列: {missing}')
+
+    # 继续后复权因子: 读取 CSV 起始日之前库中该品种最新 wf 作为锚点
+    anchor_wf: Optional[float] = None
+    if load_prev_weighted_factor:
+        csv_start_ts = df[CSV_DATETIME_COL].min()
+        anchor_wf = _load_prev_wf_1min(instrument_id, csv_start_ts, source=source)
+        if anchor_wf is not None:
+            log.info(f'[1min-csv] 继续后复权因子: 锚定库中已有链 wf={anchor_wf:.6f}')
+        else:
+            log.info('[1min-csv] 继续后复权因子: 库中 CSV 起始日之前无数据, 从 CSV 自身链起算')
+
+    df['td'] = assign_trading_day_1min(df[CSV_DATETIME_COL])
+
+    root = _to_root_instrument_or_infer(instrument_id)
+    main_symbol = f'KQ.m@{root}'
+
+    if 'is_rollover' in df.columns and 'weighted_factor' in df.columns:
+        log.info('[1min-csv] 使用 CSV 中已有的换月字段(symbol/is_rollover/weighted_factor)')
+        out = df.rename(columns={CSV_DATETIME_COL: 'time', CSV_OI_COL: 'position'})
+        out['instrument_id'] = instrument_id
+        out['settle'] = out['close']
+        out['time'] = pd.to_datetime(out['time'], errors='coerce')
+        out['td'] = assign_trading_day_1min(out['time'])
+        _valid = out.dropna(subset=['weighted_factor'])
+        if _valid.empty:
+            _map = pd.DataFrame(columns=['td', 'symbol', 'is_rollover', 'weighted_factor', 'cur_weighted_factor'])
+        else:
+            _map = _valid.groupby('td').agg({
+                'symbol': 'last',
+                'is_rollover': 'max',
+                'weighted_factor': 'last',
+                'cur_weighted_factor': 'last',
+            }).reset_index()
+        out = out.merge(_map, on='td', how='left', suffixes=('', '_m'))
+        for c in ['symbol', 'is_rollover', 'weighted_factor', 'cur_weighted_factor']:
+            mc = f'{c}_m'
+            if mc in out.columns:
+                out[c] = out[c].fillna(out[mc])
+                out = out.drop(columns=[mc])
+        out = out.drop(columns=['td'])
+        out['is_rollover'] = out['is_rollover'].fillna(False).astype(bool)
+        out['weighted_factor'] = pd.to_numeric(out['weighted_factor'], errors='coerce').fillna(1.0)
+        out['cur_weighted_factor'] = pd.to_numeric(out['cur_weighted_factor'], errors='coerce').fillna(1.0)
+        cols = ['time', 'instrument_id', 'symbol', 'open', 'high', 'low', 'close', 'settle',
+                'volume', 'position', 'money', 'weighted_factor', 'cur_weighted_factor', 'is_rollover']
+        for c in cols:
+            if c not in out.columns:
+                out[c] = 0.0 if c in ('volume', 'position', 'money') else ('' if c == 'symbol' else np.nan)
+        for c in ['open', 'high', 'low', 'close', 'settle', 'volume', 'position', 'money']:
+            out[c] = pd.to_numeric(out[c], errors='coerce')
+        out = out[cols].dropna(subset=['time', 'open', 'high', 'low', 'close']).sort_values('time').reset_index(drop=True)
+        out['settle'] = out['settle'].fillna(out['close'])
+        out['volume'] = out['volume'].fillna(0.0)
+        out['position'] = out['position'].fillna(0.0)
+        out['money'] = out['money'].fillna(0.0)
+        out['source'] = source
+        out = out.drop_duplicates(subset=['time', 'instrument_id'], keep='last').reset_index(drop=True)
+        if anchor_wf is not None:
+            # 把 CSV 自带链整体平移到库中已有链: new_wf = csv_wf * anchor_wf
+            out['weighted_factor'] = pd.to_numeric(out['weighted_factor'], errors='coerce') * anchor_wf
+        return out
+
+    log.info('[1min-csv] CSV 无换月字段, 回退到基于分钟数据自身检测换月(gap+持仓量跳变)')
+    schedule = detect_rollover_from_minute_df(
+        df,
+        initial_weighted_factor=(anchor_wf if anchor_wf is not None else 1.0),
+        gap_threshold=gap_threshold,
+        oi_chg_threshold=oi_chg_threshold,
+    )
+    schedule['symbol'] = main_symbol
+    roll_days = schedule.loc[schedule['is_rollover'], 'td'].tolist()
+    log.info(f'[1min-csv] 检测到换月日: {len(roll_days)} 个')
+    out = build_minute_continuous_df_from_edb(
+        df, schedule, instrument_id,
+        symbol=main_symbol,
+        mark_first_only=mark_rollover_first_minute_only,
+    )
+    out['source'] = source
+    return out
+
+
+def find_missing_night_days_in_csv(csv_path: str,
+                                   bar_threshold: int = 340,
+                                   lookback_days: int = 20) -> pd.DataFrame:
+    """从分钟 CSV 中识别「缺夜盘」的交易日(bar 数低于阈值)。
+
+    排除两类正常情况: CSV 首日(前一夜盘属更早日期)与节前最后交易日(法定节假日前夜盘暂停)。
+    返回列: td, bar_count, prev_td, fetch_start, fetch_end。
+    """
+    import chinese_calendar as cc
+
+    if not csv_path or not os.path.exists(csv_path):
+        raise ValueError(f'CSV 文件不存在: {csv_path}')
+    df = pd.read_csv(csv_path)
+    if CSV_DATETIME_COL not in df.columns:
+        df = df.rename(columns={'time': CSV_DATETIME_COL})
+    if CSV_DATETIME_COL not in df.columns:
+        raise ValueError(f'CSV 缺少时间戳列: {csv_path}')
+    df[CSV_DATETIME_COL] = pd.to_datetime(df[CSV_DATETIME_COL], errors='coerce')
+    df = df.dropna(subset=[CSV_DATETIME_COL]).sort_values(CSV_DATETIME_COL).reset_index(drop=True)
+    df['td'] = assign_trading_day_1min(df[CSV_DATETIME_COL])
+
+    cnt = df.groupby('td').agg(bar_count=('open', 'count')).sort_index()
+    tds = list(cnt.index)
+    missing = cnt[cnt['bar_count'] < bar_threshold].copy()
+
+    rows: List[Dict[str, object]] = []
+    first_td = tds[0] if tds else None
+    for i, t in enumerate(tds):
+        if t not in missing.index:
+            continue
+        prev_td = tds[i - 1] if i > 0 else None
+        if prev_td is None:
+            continue  # 首日, 前一夜盘不在 CSV 内
+        # 排除节前最后交易日(prev_td 与 t 之间有法定节假日)
+        cur = prev_td + pd.Timedelta(days=1)
+        holiday_between = False
+        while cur < t:
+            if cur.weekday() < 5 and cc.is_holiday(cur.date()):
+                holiday_between = True
+                break
+            cur += pd.Timedelta(days=1)
+        if holiday_between:
+            continue
+        fetch_start = prev_td.normalize().replace(hour=20, minute=59)
+        fetch_end = t.normalize().replace(hour=15, minute=0)
+        rows.append({
+            'td': t.date().isoformat(),
+            'bar_count': int(missing.loc[t, 'bar_count']),
+            'prev_td': prev_td.date().isoformat(),
+            'fetch_start': str(fetch_start),
+            'fetch_end': str(fetch_end),
+        })
+    return pd.DataFrame(rows)
+
+
+def import_1min_csv_to_db(main_csv: str,
+                          fix_csv: Optional[str] = None,
+                          instrument_id: str = 'C0',
+                          source: str = 'joinquant',
+                          load_prev_weighted_factor: bool = True,
+                          method: str = 'bulk_write_update',
+                          batch_size: int = 5000,
+                          log_step: int = 100,
+                          cancel_event=None) -> Dict[str, Any]:
+    """从分钟 CSV(主 + 可选补)导入到分钟库, 唯一键含 source, 不覆盖其他来源。
+
+    - load_prev_weighted_factor=True(默认): 接续库中已有后复权因子链;
+      =False: 从 CSV 自身链或 1.0 起算。
+    - 进度日志: 每写入 log_step(默认 100)条输出一次。
+    返回: {total, start_time, end_time, rollover_count, missing_night_days, message}
+    """
+    out = build_minute_continuous_df_from_csv(
+        main_csv, fix_csv, instrument_id, source=source,
+        load_prev_weighted_factor=load_prev_weighted_factor,
+    )
+    if out is None or out.empty:
+        raise ValueError('构建结果为空, 未写入任何数据。')
+
+    total = len(out)
+    batch_size = max(1, int(batch_size))
+    log_step = max(1, int(log_step))
+    n_batches = (total + batch_size - 1) // batch_size
+    log.info(f'[1min-csv] 开始写入 {total} 条(source={source})到 {instrument_id}, 共 {n_batches} 批...')
+
+    written = 0
+    next_log = log_step
+    for i in range(0, total, batch_size):
+        _raise_if_cancelled(cancel_event)
+        chunk = out.iloc[i:i + batch_size]
+        update_data(database='futures',
+                    collection='continuous_contract_price_1min',
+                    df=chunk,
+                    method=method,
+                    filter_column=['time', 'instrument_id', 'source'])
+        written += len(chunk)
+        # 每写入 log_step 条输出一次进度日志
+        while next_log <= written:
+            log.info(f'[1min-csv] {instrument_id} 已写入 {min(next_log, total)}/{total}')
+            next_log += log_step
+    # 末尾补一条完成日志(当 total 不是 log_step 整数倍时, 如 3675/100)
+    if written == total and next_log - log_step < total:
+        log.info(f'[1min-csv] {instrument_id} 已写入 {total}/{total} (完成)')
+
+    rollover_count = int(out['is_rollover'].sum()) if 'is_rollover' in out.columns else 0
+
+    # 提示缺夜盘交易日(基于合并后的主 CSV 分析)
+    missing_df = pd.DataFrame()
+    try:
+        if os.path.exists(main_csv):
+            missing_df = find_missing_night_days_in_csv(main_csv)
+    except Exception as e:
+        log.warning(f'[1min-csv] 缺夜盘识别失败(不影响导入): {e}')
+
+    if not missing_df.empty:
+        log.warning(f'[1min-csv] 检测到 {len(missing_df)} 个缺夜盘交易日, 可在聚宽补拉后再次导入:')
+        for _, r in missing_df.iterrows():
+            log.warning(
+                f'  td={r["td"]}, bar_count={r["bar_count"]}, '
+                f'fetch=[{r["fetch_start"]} ~ {r["fetch_end"]}]'
+            )
+
+    return {
+        'total': total,
+        'start_time': str(out['time'].min()) if 'time' in out.columns else None,
+        'end_time': str(out['time'].max()) if 'time' in out.columns else None,
+        'rollover_count': rollover_count,
+        'missing_night_days': missing_df.to_dict(orient='records') if not missing_df.empty else [],
+        'message': f'成功导入 {total} 条分钟数据(source={source})到 {instrument_id}',
+    }
+
+
+# ================== 聚宽研究环境脚本生成 ==================
+# 生成可直接粘贴到聚宽 Jupyter 运行的脚本文本(供前端展示/一键复制)。
+# 复用 _FUTURES_ROOT_TO_EXCHANGE 中的交易所映射, 生成对应的 9999 主力连续代码。
+
+# 交易所 -> 聚宽 9999 主力连续后缀
+_JQ_EXCHANGE_SUFFIX: Dict[str, str] = {
+    'SHFE': '.XSGE',
+    'DCE': '.XDCE',
+    'CZCE': '.XZCE',
+    'INE': '.XINE',
+    'GFEX': '.XGFEX',
+}
+
+
+def _to_joinquant_code(instrument_id: str) -> str:
+    """把本地合约(如 C0 / RB0)转成聚宽主力连续代码(如 C9999.XDCE / RB9999.XSGE)。"""
+    root = _to_root_instrument(instrument_id)
+    exch = _FUTURES_ROOT_TO_EXCHANGE.get(root)
+    if not exch:
+        raise ValueError(f'找不到品种 {root} 的交易所映射, 无法生成聚宽代码。')
+    suffix = _JQ_EXCHANGE_SUFFIX.get(exch)
+    if not suffix:
+        raise ValueError(f'交易所 {exch} 暂无聚宽代码后缀映射。')
+    return f'{root}9999{suffix}'
+
+
+def _to_dash_date(raw: Optional[str], default: str) -> str:
+    if not raw or not str(raw).strip():
+        return default
+    try:
+        return pd.Timestamp(str(raw).strip()).strftime('%Y-%m-%d')
+    except Exception:
+        return default
+
+
+_JQ_EXPORT_SCRIPT_TEMPLATE = '''# -*- coding: utf-8 -*-
+"""
+聚宽研究环境: 导出期货主力连续分钟数据 CSV(含换月字段 symbol/is_rollover/weighted_factor)。
+在 https://www.joinquant.com 研究环境新建 notebook, 把本脚本粘贴到单元格运行。
+运行结束后到左侧文件树 data/fut_min/ 目录下载 CSV。
+"""
+import os
+import time
+import datetime as dt
+
+import numpy as np
+import pandas as pd
+
+# ---- 解析 get_price / get_dominant_future ----
+try:
+    get_price  # noqa: F821
+except NameError:
+    try:
+        from jqdata import get_price, get_dominant_future
+    except ImportError:
+        from jqdatasdk import get_price, get_dominant_future
+try:
+    get_dominant_future  # noqa: F821
+except NameError:
+    try:
+        from jqdata import get_dominant_future
+    except ImportError:
+        from jqdatasdk import get_dominant_future
+
+# ================== 配置区 ==================
+FREQ = "1m"                 # 分钟周期: 1m / 5m / 15m / 30m / 60m
+START_DATE = "__START_DATE__"
+END_DATE = "__END_DATE__"
+FIELDS = ["open", "high", "low", "close", "volume", "money", "open_interest"]
+CHUNK_DAYS = 14             # 每窗口天数(1m 下 14 天约 2800 根, 稳妥)
+SLEEP_SEC = 0.3
+OUT_DIR = "data/fut_min"
+FUTURE_CODES = ["__JQ_CODE__"]
+
+END_DT = dt.datetime.strptime(END_DATE, "%Y-%m-%d").replace(hour=15)
+FLAG_ROOT = os.path.join(OUT_DIR, "_flags")
+
+
+def _root_from_code(code):
+    sym = str(code).split(".")[0]
+    return sym.rstrip("0123456789")
+
+
+def _get_day_open(contract, date):
+    try:
+        df = get_price(contract, start_date=str(date), end_date=str(date), frequency="daily", fields=["open"])
+        if df is not None and not df.empty:
+            df = df.reset_index()
+            return float(pd.to_numeric(df["open"], errors="coerce").iloc[-1])
+    except Exception:
+        pass
+    return None
+
+
+def get_dominant_series_compat(root, trade_days):
+    trade_days = sorted(set(pd.Timestamp(d) for d in trade_days))
+    if not trade_days:
+        return pd.Series(dtype=object)
+    try:
+        dom = get_dominant_future(root, str(trade_days[0].date()), end_date=str(trade_days[-1].date()))
+        if dom is not None and len(dom) > 0:
+            return dom
+    except Exception:
+        pass
+    series = {}
+    for d in trade_days:
+        try:
+            series[pd.Timestamp(d)] = str(get_dominant_future(root, str(d.date())))
+        except Exception as e:
+            print(f"    [警告] {d.date()} 主力获取失败: {e}")
+    return pd.Series(series).sort_index()
+
+
+def build_dominant_schedule(root, trade_days):
+    dom = get_dominant_series_compat(root, trade_days)
+    if dom is None or len(dom) == 0:
+        return pd.DataFrame()
+    items = dom.items() if isinstance(dom, pd.Series) else dom.iteritems()
+    rows, wf, cur_cwf, prev_symbol = [], 1.0, 1.0, None
+    for d, symbol in items:
+        symbol = str(symbol)
+        is_roll = (prev_symbol is not None and symbol != prev_symbol)
+        if is_roll and prev_symbol is not None:
+            old_open = _get_day_open(prev_symbol, d)
+            new_open = _get_day_open(symbol, d)
+            if old_open and new_open and abs(new_open) > 1e-12:
+                cur_cwf = old_open / new_open
+                wf *= cur_cwf
+        rows.append({"td": pd.Timestamp(d).normalize(), "symbol": symbol, "is_rollover": is_roll,
+                     "weighted_factor": wf, "cur_weighted_factor": cur_cwf})
+        prev_symbol = symbol
+    df = pd.DataFrame(rows).drop_duplicates(subset="td", keep="last").sort_values("td")
+    return df
+
+
+def assign_trading_day_local(datetime_series, trading_days):
+    tds = np.array(sorted(pd.to_datetime(list(trading_days)).normalize()), dtype="datetime64[D]")
+    tds = np.unique(tds)
+    night = datetime_series.dt.hour >= 20
+    cal = datetime_series.dt.normalize().values.astype("datetime64[D]")
+    out = pd.Series(pd.NaT, index=datetime_series.index, dtype="datetime64[ns]")
+    if tds.size == 0:
+        return out
+    day_pos = np.minimum(np.searchsorted(tds, cal[~night], side="left"), tds.size - 1)
+    out.loc[~night] = pd.to_datetime(tds[day_pos])
+    night_pos = np.minimum(np.searchsorted(tds, cal[night], side="right"), tds.size - 1)
+    out.loc[night] = pd.to_datetime(tds[night_pos])
+    return out
+
+
+def gen_windows(start_dt, end_dt, chunk_days):
+    windows, cur = [], start_dt
+    while cur < end_dt:
+        win_end = min(cur + dt.timedelta(days=chunk_days), end_dt).replace(hour=15)
+        windows.append((cur, win_end))
+        cur = win_end.replace(hour=0) + dt.timedelta(days=1)
+    return windows
+
+
+def fetch_chunk(code, start, end, depth=0):
+    try:
+        return get_price(code, start_date=str(start), end_date=str(end), frequency=FREQ, fields=FIELDS)
+    except Exception:
+        days = (end - start).days
+        if days > 1 and depth < 4:
+            mid = (start + dt.timedelta(days=days // 2)).replace(hour=15)
+            left = fetch_chunk(code, start, mid, depth + 1)
+            right = fetch_chunk(code, mid.replace(hour=0) + dt.timedelta(days=1), end, depth + 1)
+            if left is None or right is None:
+                return None
+            return pd.concat([left, right])
+        print(f"      [警告] 窗口 {start}~{end} 拉取失败")
+        return None
+
+
+def normalize(df, code):
+    if df is None or df.empty:
+        return pd.DataFrame()
+    df = df.reset_index()
+    cols = list(df.columns)
+    time_col = next((c for c in cols if str(c).lower() in ("time", "datetime", "index")), cols[0])
+    df = df.rename(columns={time_col: "datetime"})
+    if "code" not in df.columns:
+        df.insert(1, "code", code)
+    df["datetime"] = df["datetime"].astype(str)
+    return df
+
+
+def load_existing(code):
+    path = os.path.join(OUT_DIR, f"{code}.csv")
+    if os.path.exists(path):
+        try:
+            return pd.read_csv(path)
+        except Exception:
+            return pd.DataFrame()
+    return pd.DataFrame()
+
+
+def main():
+    os.makedirs(OUT_DIR, exist_ok=True)
+    os.makedirs(FLAG_ROOT, exist_ok=True)
+    start_dt = dt.datetime.strptime(START_DATE, "%Y-%m-%d")
+    windows = gen_windows(start_dt, END_DT, CHUNK_DAYS)
+    print(f"聚宽研究环境 | 导出 {len(FUTURE_CODES)} 个品种 {FREQ} 分钟数据")
+    print(f"时间范围: {START_DATE} ~ {END_DATE} | 总窗口: {len(windows)}")
+    for code in FUTURE_CODES:
+        root = _root_from_code(code)
+        flag_dir = os.path.join(FLAG_ROOT, code)
+        os.makedirs(flag_dir, exist_ok=True)
+        done = set(f.split(".")[0] for f in os.listdir(flag_dir))
+        todo = [w for w in windows if w[0].strftime("%Y%m%d") not in done]
+        parts = []
+        existing = load_existing(code)
+        if len(existing) > 0:
+            parts.append(existing)
+        for i, (ws, we) in enumerate(todo, 1):
+            df = fetch_chunk(code, ws, we)
+            time.sleep(SLEEP_SEC)
+            if df is not None:
+                nd = normalize(df, code)
+                if not nd.empty:
+                    parts.append(nd)
+                open(os.path.join(flag_dir, ws.strftime("%Y%m%d") + ".done"), "w").close()
+            if i % 10 == 0 or i == len(todo):
+                print(f"    {code} 进度 {i}/{len(todo)} 窗口")
+        if parts:
+            merged = pd.concat(parts, ignore_index=True)
+            merged = merged.drop_duplicates(subset=["datetime", "code"], keep="last").sort_values("datetime").reset_index(drop=True)
+            merged["_dt"] = pd.to_datetime(merged["datetime"])
+            day_mask = merged["_dt"].dt.hour < 20
+            trade_days = sorted(pd.unique(merged.loc[day_mask, "_dt"].dt.normalize()))
+            merged = merged.drop(columns=["_dt"])
+            sched = build_dominant_schedule(root, trade_days)
+            if sched.empty:
+                print(f"    [警告] {code} get_dominant_future 返回空, 换月字段缺失")
+            else:
+                merged["datetime"] = pd.to_datetime(merged["datetime"])
+                merged["td"] = assign_trading_day_local(merged["datetime"], sched["td"])
+                merged = merged.merge(sched.rename(columns={"td": "td"}), on="td", how="left")
+                for c in ["symbol", "weighted_factor", "cur_weighted_factor"]:
+                    if c in merged.columns:
+                        merged[c] = merged[c].ffill()
+                merged["is_rollover"] = merged["is_rollover"].fillna(False).astype(bool)
+                merged = merged.drop(columns=["td"], errors="ignore")
+            merged.to_csv(os.path.join(OUT_DIR, f"{code}.csv"), index=False)
+            print(f"    完成: {code} | {len(merged)} 行 | 列: {list(merged.columns)}")
+    print()
+    print("全部完成。请到研究环境左侧文件树 data/fut_min/ 目录下载 CSV。")
+
+
+if __name__ == "__main__":
+    main()
+'''
+
+
+_JQ_FIX_SCRIPT_TEMPLATE = '''# -*- coding: utf-8 -*-
+"""
+聚宽研究环境: 对「缺夜盘」的交易日补拉完整分钟数据(夜盘+日盘), 导出 CSV 供本地导入。
+把下方 MISSING_RANGES 替换为本地识别出的缺夜盘交易日列表后运行。
+运行结束后到左侧文件树 data/fix_night/ 目录下载 CSV。
+"""
+import os
+import datetime as dt
+
+import numpy as np
+import pandas as pd
+
+# ---- 解析 get_price / get_dominant_future ----
+try:
+    get_price  # noqa: F821
+except NameError:
+    try:
+        from jqdata import get_price
+    except ImportError:
+        try:
+            from jqdata import *
+        except ImportError:
+            from jqdatasdk import get_price
+try:
+    get_dominant_future  # noqa: F821
+except NameError:
+    try:
+        from jqdata import get_dominant_future
+    except ImportError:
+        from jqdatasdk import get_dominant_future
+
+# ================== 配置区 ==================
+FUTURE_CODE = "__JQ_CODE__"
+FREQ = "1m"
+FIELDS = ["open", "high", "low", "close", "volume", "money", "open_interest"]
+OUT_DIR = "data/fix_night"
+
+
+def _root_from_code(code):
+    sym = str(code).split(".")[0]
+    return sym.rstrip("0123456789")
+
+
+def _get_day_open(contract, date):
+    try:
+        df = get_price(contract, start_date=str(date), end_date=str(date), frequency="daily", fields=["open"])
+        if df is not None and not df.empty:
+            df = df.reset_index()
+            return float(pd.to_numeric(df["open"], errors="coerce").iloc[-1])
+    except Exception:
+        pass
+    return None
+
+
+def get_dominant_series_compat(root, trade_days):
+    trade_days = sorted(set(pd.Timestamp(d) for d in trade_days))
+    if not trade_days:
+        return pd.Series(dtype=object)
+    try:
+        dom = get_dominant_future(root, str(trade_days[0].date()), end_date=str(trade_days[-1].date()))
+        if dom is not None and len(dom) > 0:
+            return dom
+    except Exception:
+        pass
+    series = {}
+    for d in trade_days:
+        try:
+            series[pd.Timestamp(d)] = str(get_dominant_future(root, str(d.date())))
+        except Exception as e:
+            print(f"    [警告] {d.date()} 主力获取失败: {e}")
+    return pd.Series(series).sort_index()
+
+
+def build_dominant_schedule(root, trade_days):
+    dom = get_dominant_series_compat(root, trade_days)
+    if dom is None or len(dom) == 0:
+        return pd.DataFrame()
+    items = dom.items() if isinstance(dom, pd.Series) else dom.iteritems()
+    rows, wf, cur_cwf, prev_symbol = [], 1.0, 1.0, None
+    for d, symbol in items:
+        symbol = str(symbol)
+        is_roll = (prev_symbol is not None and symbol != prev_symbol)
+        if is_roll and prev_symbol is not None:
+            old_open = _get_day_open(prev_symbol, d)
+            new_open = _get_day_open(symbol, d)
+            if old_open and new_open and abs(new_open) > 1e-12:
+                cur_cwf = old_open / new_open
+                wf *= cur_cwf
+        rows.append({"td": pd.Timestamp(d).normalize(), "symbol": symbol, "is_rollover": is_roll,
+                     "weighted_factor": wf, "cur_weighted_factor": cur_cwf})
+        prev_symbol = symbol
+    df = pd.DataFrame(rows).drop_duplicates(subset="td", keep="last").sort_values("td")
+    return df
+
+
+def assign_trading_day_local(datetime_series, trading_days):
+    tds = np.array(sorted(pd.to_datetime(list(trading_days)).normalize()), dtype="datetime64[D]")
+    tds = np.unique(tds)
+    night = datetime_series.dt.hour >= 20
+    cal = datetime_series.dt.normalize().values.astype("datetime64[D]")
+    out = pd.Series(pd.NaT, index=datetime_series.index, dtype="datetime64[ns]")
+    if tds.size == 0:
+        return out
+    day_pos = np.minimum(np.searchsorted(tds, cal[~night], side="left"), tds.size - 1)
+    out.loc[~night] = pd.to_datetime(tds[day_pos])
+    night_pos = np.minimum(np.searchsorted(tds, cal[night], side="right"), tds.size - 1)
+    out.loc[night] = pd.to_datetime(tds[night_pos])
+    return out
+
+
+# 把本地 find_missing_night_days 识别出的列表粘贴到这里 (td, fetch_start, fetch_end)
+MISSING_RANGES = __MISSING_RANGES__
+
+
+def main():
+    os.makedirs(OUT_DIR, exist_ok=True)
+    if not MISSING_RANGES:
+        print("[提示] MISSING_RANGES 为空, 请先粘贴缺夜盘交易日列表。")
+        return
+    frames = []
+    for td, start, end in MISSING_RANGES:
+        print(f">>> 拉取交易日 {td}: {start} ~ {end} ...")
+        try:
+            df = get_price(FUTURE_CODE, start_date=start, end_date=end, frequency=FREQ, fields=FIELDS)
+        except Exception as e:
+            print(f"    [失败] {type(e).__name__}: {e}")
+            continue
+        if df is None or df.empty:
+            print("    [警告] 该时段无数据")
+            continue
+        df = df.reset_index()
+        df = df.rename(columns={df.columns[0]: "datetime"})
+        if "code" not in df.columns:
+            df.insert(1, "code", FUTURE_CODE)
+        df["datetime"] = pd.to_datetime(df["datetime"]).astype(str)
+        for f in FIELDS:
+            if f not in df.columns:
+                df[f] = float("nan")
+        df = df[["datetime", "code"] + FIELDS]
+        print(f"    得到 {len(df)} 根 bar")
+        frames.append(df)
+    if not frames:
+        print("未拉到任何数据。")
+        return
+    out = pd.concat(frames, ignore_index=True)
+    out = out.drop_duplicates(subset=["datetime", "code"], keep="last").sort_values("datetime")
+    root = _root_from_code(FUTURE_CODE)
+    out["_dt"] = pd.to_datetime(out["datetime"])
+    trade_days = sorted(pd.unique(out.loc[out["_dt"].dt.hour < 20, "_dt"].dt.normalize()))
+    out = out.drop(columns=["_dt"])
+    sched = build_dominant_schedule(root, trade_days)
+    if not sched.empty:
+        out["datetime"] = pd.to_datetime(out["datetime"])
+        out["td"] = assign_trading_day_local(out["datetime"], sched["td"])
+        out = out.merge(sched, on="td", how="left")
+        for c in ["symbol", "weighted_factor", "cur_weighted_factor"]:
+            if c in out.columns:
+                out[c] = out[c].ffill()
+        out["is_rollover"] = out["is_rollover"].fillna(False).astype(bool)
+        out = out.drop(columns=["td"], errors="ignore")
+    path = f"{OUT_DIR}/{FUTURE_CODE}_fix_night.csv"
+    out.to_csv(path, index=False)
+    print(f"完成: 共 {len(out)} 行 -> {path}")
+    print("请下载该 CSV, 然后在本地前端「分钟频价格更新」的补夜盘 CSV 路径中导入。")
+
+
+if __name__ == "__main__":
+    main()
+'''
+
+
+def _normalize_missing_ranges_text(raw: Optional[str]) -> str:
+    """把用户粘贴的 MISSING_RANGES 文本规范成可嵌入脚本的 Python 列表文本。"""
+    if not raw or not str(raw).strip():
+        return '[]'
+    text = str(raw).strip()
+    # 若带了 MISSING_RANGES = [...] 整段, 提取方括号内容
+    if '=' in text and text.lstrip().startswith('MISSING_RANGES'):
+        text = text.split('=', 1)[1].strip()
+    if not text.startswith('['):
+        start = text.find('[')
+        end = text.rfind(']')
+        if start >= 0 and end > start:
+            text = text[start:end + 1]
+        else:
+            return '[]'
+    # 去掉可能多余的分号
+    if text.endswith(';'):
+        text = text[:-1]
+    return text
+
+
+def generate_joinquant_export_script(instrument_id: str = 'C0',
+                                     start_date: Optional[str] = None,
+                                     end_date: Optional[str] = None) -> str:
+    """生成聚宽导出主 CSV 的脚本(供前端展示/一键复制)。"""
+    jq_code = _to_joinquant_code(instrument_id)
+    start = _to_dash_date(start_date, '2020-01-01')
+    end = _to_dash_date(end_date, date.today().strftime('%Y-%m-%d'))
+    return (_JQ_EXPORT_SCRIPT_TEMPLATE
+            .replace('__JQ_CODE__', jq_code)
+            .replace('__START_DATE__', start)
+            .replace('__END_DATE__', end))
+
+
+def generate_joinquant_fix_script(instrument_id: str = 'C0',
+                                  missing_ranges: Optional[str] = None) -> str:
+    """生成聚宽补夜盘脚本(供前端展示/一键复制)。"""
+    jq_code = _to_joinquant_code(instrument_id)
+    ranges_text = _normalize_missing_ranges_text(missing_ranges)
+    return (_JQ_FIX_SCRIPT_TEMPLATE
+            .replace('__JQ_CODE__', jq_code)
+            .replace('__MISSING_RANGES__', ranges_text))

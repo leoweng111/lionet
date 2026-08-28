@@ -51,6 +51,7 @@
     "genetic_programming"
   ],
   "selected_versions": [],
+  "source": "joinquant",
   "start_time": "20200101",
   "use_version_dict": {
     "genetic_programming": []

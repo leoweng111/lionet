@@ -16,6 +16,7 @@
   "rolling_norm_window": 30,
   "signal_delay_days": 1,
   "slippage": 1,
+  "source": "joinquant",
   "trading_start_time": "20250101",
   "version": "20260417_factor_fusion_test"
 }

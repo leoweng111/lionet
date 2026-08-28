@@ -62,6 +62,7 @@ class FactorGenerator:
                  risk_free_rate: bool = False,
                  calculate_baseline: bool = True,
                  apply_weighted_price: bool = True,
+                 source: str = 'joinquant',
                  n_jobs: int = 5,
                  base_col_list: Optional[Sequence[str]] = None,
                  min_window_size: int = 30,
@@ -90,6 +91,7 @@ class FactorGenerator:
         self.risk_free_rate = risk_free_rate
         self.calculate_baseline = calculate_baseline
         self.apply_weighted_price = bool(apply_weighted_price)
+        self.source = str(source).strip() or 'joinquant'
         self.n_jobs = n_jobs
 
         self.base_col_list = list(base_col_list) if base_col_list else ['open', 'high', 'low', 'close', 'volume', 'position']
@@ -146,6 +148,7 @@ class FactorGenerator:
                 start_date=start_time,
                 end_date=end_time,
                 from_database=True,
+                source=self.source,
             )
 
         optional_cols = [c for c in ['weighted_factor', 'cur_weighted_factor', 'is_rollover', 'symbol'] if c in df.columns]
@@ -1197,6 +1200,7 @@ class LLMPromptFactorGenerator(FactorGenerator):
                  risk_free_rate: bool = False,
                  calculate_baseline: bool = True,
                  apply_weighted_price: bool = True,
+                 source: str = 'joinquant',
                  n_jobs: int = 5,
                  base_col_list: Optional[Sequence[str]] = None,
                  min_window_size: int = 30,
@@ -1264,6 +1268,7 @@ class LLMPromptFactorGenerator(FactorGenerator):
             risk_free_rate=risk_free_rate,
             calculate_baseline=calculate_baseline,
             apply_weighted_price=apply_weighted_price,
+            source=source,
             n_jobs=n_jobs,
             base_col_list=base_col_list,
             min_window_size=min_window_size,
@@ -1486,6 +1491,7 @@ class GeneticFactorGenerator(FactorGenerator):
                  risk_free_rate: bool = False,
                  calculate_baseline: bool = True,
                  apply_weighted_price: bool = True,
+                 source: str = 'joinquant',
                  n_jobs: int = 5,
                  base_col_list: Optional[Sequence[str]] = None,
                  min_window_size: int = 30,
@@ -1616,6 +1622,7 @@ class GeneticFactorGenerator(FactorGenerator):
             risk_free_rate=risk_free_rate,
             calculate_baseline=calculate_baseline,
             apply_weighted_price=apply_weighted_price,
+            source=source,
             n_jobs=n_jobs,
             base_col_list=base_col_list,
             min_window_size=min_window_size,
@@ -1872,6 +1879,7 @@ class FactorFusioner:
         interest_method: str = 'simple',
         risk_free_rate: bool = False,
         apply_weighted_price: bool = True,
+        source: str = 'joinquant',
         check_leakage_count: int = 20,
         check_relative: bool = True,
         relative_threshold: float = 0.7,
@@ -1916,6 +1924,7 @@ class FactorFusioner:
         self.interest_method = interest_method
         self.risk_free_rate = bool(risk_free_rate)
         self.apply_weighted_price = bool(apply_weighted_price)
+        self.source = str(source).strip() or 'joinquant'
         self.check_leakage_count = int(check_leakage_count)
         self.check_relative = bool(check_relative)
         self.relative_threshold = float(relative_threshold)
@@ -2089,6 +2098,7 @@ class FactorFusioner:
                 start_date=self.start_time,
                 end_date=self._effective_end_time,
                 from_database=True,
+                source=self.source,
             )
 
         optional_cols = [c for c in ['weighted_factor', 'cur_weighted_factor', 'is_rollover', 'symbol'] if c in df.columns]

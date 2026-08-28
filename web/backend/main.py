@@ -39,6 +39,9 @@ from data.futures import (
     update_futures_continuous_contract_price_1min,
     update_futures_continuous_contract_price_from_minute,
     assign_trading_day_1min,
+    import_1min_csv_to_db,
+    generate_joinquant_export_script,
+    generate_joinquant_fix_script,
     UpdateCancelledError,
 )
 from factors.factor_auto_search import GeneticFactorGenerator, FactorFusioner, LLMPromptFactorGenerator
@@ -310,6 +313,7 @@ class GPMiningParams(BaseModel):
     risk_free_rate: bool = False
     calculate_baseline: bool = True
     apply_weighted_price: bool = True
+    source: str = "joinquant"
     n_jobs: int = 5
     max_factor_count: int = 50
     min_window_size: int = 30
@@ -406,6 +410,7 @@ class BacktestParams(BaseModel):
     risk_free_rate: bool = False
     calculate_baseline: bool = True
     apply_weighted_price: bool = True
+    source: str = "joinquant"
     n_jobs: int = 5
 
 
@@ -421,6 +426,7 @@ class FusionParams(BaseModel):
     interest_method: str = 'simple'
     risk_free_rate: bool = False
     apply_weighted_price: bool = True
+    source: str = 'joinquant'
     check_leakage_count: int = 20
     check_relative: bool = True
     relative_threshold: float = 0.7
@@ -447,6 +453,7 @@ class LLMMiningParams(BaseModel):
     risk_free_rate: bool = False
     calculate_baseline: bool = True
     apply_weighted_price: bool = True
+    source: str = "joinquant"
     n_jobs: int = 5
     max_factor_count: int = 20
     min_window_size: int = 30
@@ -487,6 +494,7 @@ class StrategyBatchParams(BaseModel):
     rolling_norm_clip: float = 5.0
     signal_delay_days: int = 1
     min_open_ratio: float = 1.0
+    source: str = "joinquant"
 
 
 class StrategyMonitorParams(BaseModel):
@@ -507,6 +515,7 @@ class StrategyMonitorParams(BaseModel):
     rolling_norm_clip: float = 5.0
     signal_delay_days: int = 1
     min_open_ratio: float = 1.0
+    source: str = "joinquant"
 
     # Monitor-specific options.
     price_update_start_date: Optional[str] = None
@@ -972,6 +981,7 @@ def _run_strategy_monitor_generate(params: StrategyMonitorParams) -> Dict[str, A
         rolling_norm_clip=params.rolling_norm_clip,
         signal_delay_days=params.signal_delay_days,
         min_open_ratio=params.min_open_ratio,
+        source=params.source,
     )
     strat.backtest()
 
@@ -1899,6 +1909,7 @@ def _execute_mining(params: GPMiningParams, task_id: str, cancel_event: threadin
             risk_free_rate=params.risk_free_rate,
             calculate_baseline=params.calculate_baseline,
             apply_weighted_price=params.apply_weighted_price,
+            source=params.source,
             n_jobs=params.n_jobs,
             max_factor_count=params.max_factor_count,
             min_window_size=params.min_window_size,
@@ -2176,6 +2187,7 @@ def _execute_llm_mining(params: LLMMiningParams, task_id: str, cancel_event: thr
         risk_free_rate=params.risk_free_rate,
         calculate_baseline=params.calculate_baseline,
         apply_weighted_price=params.apply_weighted_price,
+        source=params.source,
         n_jobs=params.n_jobs,
         max_factor_count=params.max_factor_count,
         min_window_size=params.min_window_size,
@@ -2253,7 +2265,8 @@ async def run_backtest(params: BacktestParams):
             portfolio_adjust_method=params.portfolio_adjust_method,
             interest_method=params.interest_method, risk_free_rate=params.risk_free_rate,
             calculate_baseline=params.calculate_baseline,
-            apply_weighted_price=params.apply_weighted_price, n_jobs=params.n_jobs,
+            apply_weighted_price=params.apply_weighted_price, source=params.source,
+            n_jobs=params.n_jobs,
         )
         if params.formula:
             bt_kwargs["formula"] = params.formula
@@ -2318,6 +2331,7 @@ def _execute_fusion(params: FusionParams, task_id: Optional[str] = None) -> Dict
             interest_method=params.interest_method,
             risk_free_rate=params.risk_free_rate,
             apply_weighted_price=params.apply_weighted_price,
+            source=params.source,
             check_leakage_count=params.check_leakage_count,
             check_relative=params.check_relative,
             relative_threshold=params.relative_threshold,
@@ -2355,6 +2369,7 @@ def _execute_fusion(params: FusionParams, task_id: Optional[str] = None) -> Dict
                 risk_free_rate=params.risk_free_rate,
                 calculate_baseline=True,
                 apply_weighted_price=params.apply_weighted_price,
+                source=params.source,
                 n_jobs=params.n_jobs,
                 formula=fusion_formula,
                 version=params.version or '__formula__',
@@ -2591,6 +2606,7 @@ async def run_strategy(params: StrategyBatchParams):
                 rolling_norm_clip=params.rolling_norm_clip,
                 signal_delay_days=params.signal_delay_days,
                 min_open_ratio=params.min_open_ratio,
+                source=params.source,
             )
             loop = asyncio.get_event_loop()
             await loop.run_in_executor(None, strat.backtest)
@@ -3182,6 +3198,36 @@ class DeleteDataParams(BaseModel):
     end_date: Optional[str] = None
 
 
+class UpdatePrice1minCsvParams(BaseModel):
+    """分钟频 CSV 导入参数(如聚宽导出的主 CSV + 补夜盘 CSV)。
+
+    - instrument_id: 目标合约, 如 'C0'。
+    - main_csv: 主 CSV 在本机的路径(必填)。
+    - fix_csv: 补夜盘 CSV 路径(可选)。
+    - source: 写入的来源标识, 默认 'joinquant'。唯一键含 source, 不会覆盖其他来源。
+    - method: 写入方式。
+    """
+    instrument_id: str = "C0"
+    main_csv: str
+    fix_csv: Optional[str] = None
+    source: str = "joinquant"
+    method: str = "bulk_write_update"
+    load_prev_weighted_factor: bool = True
+
+
+class JoinquantScriptsParams(BaseModel):
+    """生成可粘贴到聚宽 Jupyter 运行的脚本(导出主 CSV / 补夜盘 CSV)。
+
+    - instrument_id: 合约, 如 'C0'。
+    - start_date / end_date: 导出主 CSV 的时间范围(YYYYMMDD 或 YYYY-MM-DD)。
+    - missing_ranges: 缺夜盘列表文本(MISSING_RANGES 方块内容), 用于生成补夜盘脚本。
+    """
+    instrument_id: str = "C0"
+    start_date: Optional[str] = None
+    end_date: Optional[str] = None
+    missing_ranges: Optional[str] = None
+
+
 class CheckPrevDataParams(BaseModel):
     """检查「开始日期前一天数据库中是否有可接续的后复权因子数据」。
 
@@ -3593,6 +3639,99 @@ async def api_update_price_1min(params: UpdatePrice1minParams):
     return {"task_id": task_id, "message": "分钟价格数据更新任务已启动"}
 
 
+@app.post("/api/market-data/update-price-1min-csv")
+async def api_update_price_1min_csv(params: UpdatePrice1minCsvParams):
+    """从分钟 CSV(主 + 可选补)导入到分钟库(异步任务)。
+
+    允许任意格式正确、含必要字段的分钟 CSV(如聚宽导出的主 CSV + 补夜盘 CSV)。
+    唯一键含 source, 不会覆盖其他来源(如 tqsdk_edb)的记录。
+    """
+    import os as _os
+    main_csv = str(params.main_csv or '').strip()
+    fix_csv = str(params.fix_csv or '').strip()
+    if not main_csv and not fix_csv:
+        raise HTTPException(status_code=400, detail="主 CSV 与补 CSV 至少提供一个路径")
+    if main_csv and not _os.path.exists(main_csv):
+        raise HTTPException(status_code=400, detail=f"主 CSV 不存在: {main_csv}")
+    if fix_csv and not _os.path.exists(fix_csv):
+        raise HTTPException(status_code=400, detail=f"补 CSV 不存在: {fix_csv}")
+
+    task_id = f"price1mincsv_{uuid.uuid4().hex[:8]}"
+    market_data_tasks[task_id] = {
+        "type": "update-price-1min-csv", "status": "running",
+        "started_at": datetime.now().isoformat(), "logs": [],
+        "params": params.dict(),
+        "cancel_event": threading.Event(),
+    }
+    _save_market_data_task_to_db(task_id)
+
+    def _run():
+        from utils.logging import log as lionet_logger
+        handler = _MarketDataLogHandler(task_id)
+        lionet_logger.addHandler(handler)
+        try:
+            cancel_event = market_data_tasks[task_id].get("cancel_event")
+            lionet_logger.info(
+                f'分钟 CSV 导入任务启动: instrument_id={params.instrument_id}, '
+                f'source={params.source}, main_csv={params.main_csv}, '
+                f'fix_csv={params.fix_csv}, '
+                f'load_prev_weighted_factor={params.load_prev_weighted_factor}'
+            )
+            result = import_1min_csv_to_db(
+                main_csv=params.main_csv,
+                fix_csv=params.fix_csv,
+                instrument_id=params.instrument_id,
+                source=params.source,
+                method=params.method,
+                load_prev_weighted_factor=params.load_prev_weighted_factor,
+                cancel_event=cancel_event,
+            )
+            if market_data_tasks[task_id].get("status") == "terminated":
+                lionet_logger.warning('分钟 CSV 导入任务已被终止')
+                return
+            market_data_tasks[task_id]["status"] = "completed"
+            market_data_tasks[task_id]["result"] = result
+            lionet_logger.info(f'分钟 CSV 导入完成: {result.get("message", "")}')
+        except UpdateCancelledError as e:
+            market_data_tasks[task_id]["status"] = "terminated"
+            market_data_tasks[task_id]["error"] = str(e)
+            lionet_logger.warning(f'分钟 CSV 导入任务已终止: {e}')
+        except Exception as e:
+            market_data_tasks[task_id]["status"] = "failed"
+            market_data_tasks[task_id]["error"] = str(e)
+            lionet_logger.error(f'分钟 CSV 导入任务失败: {e}')
+            traceback.print_exc()
+        finally:
+            market_data_tasks[task_id]["finished_at"] = datetime.now().isoformat()
+            _save_market_data_task_to_db(task_id)
+            lionet_logger.removeHandler(handler)
+
+    threading.Thread(target=_run, daemon=True).start()
+    return {"task_id": task_id, "message": "分钟 CSV 导入任务已启动"}
+
+
+@app.post("/api/market-data/joinquant-scripts")
+async def api_joinquant_scripts(params: JoinquantScriptsParams):
+    """生成可粘贴到聚宽 Jupyter 运行的脚本(导出主 CSV / 补夜盘 CSV), 供前端展示与一键复制。"""
+    try:
+        export_script = generate_joinquant_export_script(
+            instrument_id=params.instrument_id,
+            start_date=params.start_date,
+            end_date=params.end_date,
+        )
+        fix_script = generate_joinquant_fix_script(
+            instrument_id=params.instrument_id,
+            missing_ranges=params.missing_ranges,
+        )
+        return {
+            "export_script": export_script,
+            "fix_night_script": fix_script,
+            "instrument_id": params.instrument_id,
+        }
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
 def _prev_trading_day(start_date: str, lookback_days: int = 20) -> Optional[str]:
     """返回 start_date 之前的最近一个交易日(YYYYMMDD)。
 
@@ -3626,7 +3765,7 @@ async def api_check_prev_data(params: CheckPrevDataParams):
     - freq='daily' 且 source=akshare/None: 检查日频库 continuous_contract_price_daily(与
       _load_prev_weighted_factor 相同的 source 过滤)。
     - freq='daily' 且 source=joinquant/tqsdk_edb: 日频由分钟聚合而来, 因子链在分钟库。
-    - freq='1min': 检查分钟库 continuous_contract_price_1min(_load_latest_wf_1min 不区分 source)。
+    - freq='1min': 检查分钟库 continuous_contract_price_1min; 传了 source 则只检查该 source。
     """
     start_str = str(params.start_date or '').strip()
     if not start_str:
@@ -3648,7 +3787,8 @@ async def api_check_prev_data(params: CheckPrevDataParams):
     # 确定要检查的集合与 source 过滤
     if freq == "1min":
         collection = "continuous_contract_price_1min"
-        source_filter = None   # _load_latest_wf_1min 不区分 source
+        # 分钟频也按 source 过滤(如检查 joinquant 前一个交易日是否有数据)
+        source_filter = [source] if source else None
     elif source in ("joinquant", "tqsdk_edb"):
         # 日频由分钟聚合而来, 因子链存在于分钟集合
         collection = "continuous_contract_price_1min"
@@ -3751,6 +3891,7 @@ async def api_market_data_task_status(task_id: str):
         "finished_at": t.get("finished_at"),
         "error": t.get("error"),
         "logs": t.get("logs", [])[-500:],
+        "result": t.get("result"),
     }
 
 
@@ -3890,6 +4031,7 @@ async def api_market_data_overview():
                         start_date="20000101",
                         end_date="20991231",
                         from_database=True,
+                        source=None,  # 概览页展示全部来源(akshare+joinquant)的合并覆盖
                     )
                     if df is None or df.empty:
                         result.append({

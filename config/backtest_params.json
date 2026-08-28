@@ -18,6 +18,7 @@
   "real_oos_end": "20260330",
   "real_oos_start": "20260101",
   "risk_free_rate": false,
+  "source": "joinquant",
   "start_time": "20200101",
   "version": ""
 }

@@ -130,6 +130,7 @@
   "rolling_norm_min_periods": 20,
   "rolling_norm_window": 30,
   "schedule_time": "18:00",
+  "source": "joinquant",
   "start_time": "20200101",
   "task_count": 1,
   "version": "20260517_llm_test"
