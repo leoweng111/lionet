@@ -190,13 +190,42 @@ class BackTester:
         # BackTester must do the same to guarantee identical results.
         self.data = self.data.sort_values(['instrument_id', 'time']).reset_index(drop=True)
 
+        # Pre-compute intraday features if formulas reference intraday operators.
+        # This transparently bridges standalone BackTester with formulas that
+        # contain operators like RV(close), OIFlow(close), etc.
+        formulas_to_check = []
         if self.formula:
-            # Compute factor values from formula expression
+            formulas_to_check = [self.formula]
+        else:
+            from data import get_factor_formula_map_by_version
+            try:
+                formula_map = get_factor_formula_map_by_version(
+                    fc_name_list=self.fc_name_list,
+                    version=self.version,
+                    collections=self.collection,
+                )
+                formulas_to_check = list(formula_map.values()) if formula_map else []
+            except Exception:
+                formulas_to_check = []
+
+        if formulas_to_check:
+            from factors.factor_intraday_features import ensure_intraday_features_in_df
+            self.data = ensure_intraday_features_in_df(
+                df=self.data,
+                formulas=formulas_to_check,
+                instrument_id_list=self.instrument_id_list,
+                source=self.source,
+                start_date=self.start_time,
+                end_date=self.end_time,
+            )
+
+        if self.formula:
+            # Compute factor values from formula expression.
+            # data_fields defaults to the extended set (raw fields + intraday columns).
             from factors.factor_ops import calc_formula_series
-            data_fields = ['open', 'high', 'low', 'close', 'volume', 'position']
             fc_name = self.fc_name_list[0]
             self.data[fc_name] = calc_formula_series(
-                self.data, formula=self.formula, data_fields=data_fields,
+                self.data, formula=self.formula,
             )
         else:
             self.data = get_factor_value(

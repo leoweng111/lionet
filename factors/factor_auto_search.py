@@ -1919,6 +1919,7 @@ class GeneticFactorGenerator(FactorGenerator):
             gradient_window_soft_temperature=self.gradient_window_soft_temperature,
             gradient_window_neighbor_radius=self.gradient_window_neighbor_radius,
             n_jobs=self.n_jobs,
+            intraday_features=self.intraday_features,
         )
 
         if not candidates:

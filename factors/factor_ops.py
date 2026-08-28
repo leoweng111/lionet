@@ -6,7 +6,7 @@ backtest can share the same operator space.
 
 import ast
 from enum import Enum
-from typing import Any, Dict, Optional, Sequence, Tuple, Type
+from typing import Any, Dict, List, Optional, Sequence, Tuple, Type
 
 import numpy as np
 import pandas as pd
@@ -433,6 +433,17 @@ def infer_node_type(node: FactorNode) -> FactorDataType:
         # any input -> ratio (dimensionless statistical moments)
         _ = infer_node_type(node.child)
         node.data_type = FactorDataType.RATIO
+        return node.data_type
+
+    if isinstance(node, OpIntradayFeature):
+        # Intraday-derived feature: child must match REQUIRED_INPUT_TYPE,
+        # output type is OUTPUT_TYPE (defined per subclass).
+        t = infer_node_type(node.child)
+        if t != node.REQUIRED_INPUT_TYPE:
+            raise TypeError(
+                f'{type(node).__name__} requires {node.REQUIRED_INPUT_TYPE} input, got {t}.'
+            )
+        node.data_type = node.OUTPUT_TYPE
         return node.data_type
 
     raise TypeError(f'Unsupported node type for semantic typing: {type(node).__name__}')
@@ -1486,7 +1497,159 @@ class OpTsKurt(FactorNode):
         return f"TsKurt({self.child}, {self.window})"
 
 
+# ---------------------------------------------------------------------------
+# Intraday-derived daily feature operators
+# ---------------------------------------------------------------------------
+# These operators read **pre-computed** columns from df (computed by
+# compute_intraday_daily_features() from minute bars before GP / backtest).
+# The child node is for type/formula consistency only (like OpBodyRatio);
+# the actual value comes from df[FEATURE_COLUMN].
+# Formula example: OpRollNorm(RV(close), 30, 20, 1e-8, 5)
+# ---------------------------------------------------------------------------
+
+class OpIntradayFeature(FactorNode):
+    """Base class for pre-computed intraday-derived daily features.
+
+    Subclasses define:
+      FEATURE_COLUMN     — the df column name to read
+      OUTPUT_TYPE        — the FactorDataType of the result
+      REQUIRED_INPUT_TYPE — the type the child must have (for type checking)
+    """
+
+    FEATURE_COLUMN: str = ''
+    OUTPUT_TYPE: FactorDataType = FactorDataType.GENERIC
+    REQUIRED_INPUT_TYPE: FactorDataType = FactorDataType.PRICE
+
+    def __init__(self, child: FactorNode):
+        self.child = child
+
+    def calc(self, df: pd.DataFrame) -> pd.Series:
+        if self.FEATURE_COLUMN in df.columns:
+            return pd.to_numeric(df[self.FEATURE_COLUMN], errors='coerce')
+        raise KeyError(
+            f'Intraday feature `{self.FEATURE_COLUMN}` is not in df. '
+            f'Call compute_intraday_daily_features() or '
+            f'ensure_intraday_features_in_df() before formula evaluation.'
+        )
+
+    def to_formula(self) -> str:
+        name = type(self).__name__.removeprefix('Op')
+        return f"{name}({self.child})"
+
+
+# A. Realized volatility & return moments
+class OpRV(OpIntradayFeature):
+    FEATURE_COLUMN = 'rv'
+    OUTPUT_TYPE = FactorDataType.VOLATILITY
+
+class OpBPV(OpIntradayFeature):
+    FEATURE_COLUMN = 'bpv'
+    OUTPUT_TYPE = FactorDataType.VOLATILITY
+
+class OpJump(OpIntradayFeature):
+    FEATURE_COLUMN = 'jump'
+    OUTPUT_TYPE = FactorDataType.VOLATILITY
+
+class OpRVNeg(OpIntradayFeature):
+    FEATURE_COLUMN = 'rv_neg'
+    OUTPUT_TYPE = FactorDataType.VOLATILITY
+
+class OpRVPos(OpIntradayFeature):
+    FEATURE_COLUMN = 'rv_pos'
+    OUTPUT_TYPE = FactorDataType.VOLATILITY
+
+class OpRSkew(OpIntradayFeature):
+    FEATURE_COLUMN = 'rskew'
+    OUTPUT_TYPE = FactorDataType.RATIO
+
+class OpRKurt(OpIntradayFeature):
+    FEATURE_COLUMN = 'rkurt'
+    OUTPUT_TYPE = FactorDataType.RATIO
+
+class OpMedRV(OpIntradayFeature):
+    FEATURE_COLUMN = 'medrv'
+    OUTPUT_TYPE = FactorDataType.VOLATILITY
+
+# B. Range-based volatility estimators
+class OpPK(OpIntradayFeature):
+    FEATURE_COLUMN = 'pk'
+    OUTPUT_TYPE = FactorDataType.VOLATILITY
+
+class OpGK(OpIntradayFeature):
+    FEATURE_COLUMN = 'gk'
+    OUTPUT_TYPE = FactorDataType.VOLATILITY
+
+class OpRSVol(OpIntradayFeature):
+    FEATURE_COLUMN = 'rs_vol'
+    OUTPUT_TYPE = FactorDataType.VOLATILITY
+
+class OpYZ(OpIntradayFeature):
+    FEATURE_COLUMN = 'yz'
+    OUTPUT_TYPE = FactorDataType.VOLATILITY
+
+# C. Intraday momentum & time-segment returns
+class OpRetOpen30(OpIntradayFeature):
+    FEATURE_COLUMN = 'ret_open30'
+    OUTPUT_TYPE = FactorDataType.RETURN
+
+class OpRetClose30(OpIntradayFeature):
+    FEATURE_COLUMN = 'ret_close30'
+    OUTPUT_TYPE = FactorDataType.RETURN
+
+class OpRetOvernight(OpIntradayFeature):
+    FEATURE_COLUMN = 'ret_overnight'
+    OUTPUT_TYPE = FactorDataType.RETURN
+
+class OpRetIntraday(OpIntradayFeature):
+    FEATURE_COLUMN = 'ret_intraday'
+    OUTPUT_TYPE = FactorDataType.RETURN
+
+# D. Microstructure & order flow
+class OpOIFlow(OpIntradayFeature):
+    FEATURE_COLUMN = 'oi_flow'
+    OUTPUT_TYPE = FactorDataType.RETURN
+
+class OpCVD(OpIntradayFeature):
+    FEATURE_COLUMN = 'cvd'
+    OUTPUT_TYPE = FactorDataType.RETURN
+
+class OpVWAPDev(OpIntradayFeature):
+    FEATURE_COLUMN = 'vwap_dev'
+    OUTPUT_TYPE = FactorDataType.RATIO
+
+class OpAmihudMin(OpIntradayFeature):
+    FEATURE_COLUMN = 'amihud_min'
+    OUTPUT_TYPE = FactorDataType.RATIO
+
+class OpVRK(OpIntradayFeature):
+    FEATURE_COLUMN = 'vr_k'
+    OUTPUT_TYPE = FactorDataType.RATIO
+
+class OpKyleLambda(OpIntradayFeature):
+    FEATURE_COLUMN = 'kyle_lambda'
+    OUTPUT_TYPE = FactorDataType.RATIO
+
+
+INTRADAY_FEATURE_OPS: List[Type[OpIntradayFeature]] = [
+    OpRV, OpBPV, OpJump, OpRVNeg, OpRVPos, OpRSkew, OpRKurt, OpMedRV,
+    OpPK, OpGK, OpRSVol, OpYZ,
+    OpRetOpen30, OpRetClose30, OpRetOvernight, OpRetIntraday,
+    OpOIFlow, OpCVD, OpVWAPDev, OpAmihudMin, OpVRK, OpKyleLambda,
+]
+
+# Map: operator name (as it appears in formulas) → feature column name
+INTRADAY_FEATURE_OP_MAP: Dict[str, str] = {
+    cls.__name__.removeprefix('Op'): cls.FEATURE_COLUMN
+    for cls in INTRADAY_FEATURE_OPS
+}
+
+# All intraday feature column names (for data_fields default extension)
+INTRADAY_FEATURE_COLUMNS: List[str] = [cls.FEATURE_COLUMN for cls in INTRADAY_FEATURE_OPS]
+
+
 BINARY_OPS = [OpAdd, OpSub, OpMul, OpDiv, OpMax, OpMin, OpLt, OpGt, OpOiTrendConviction]
+# UNARY_OPS does NOT include INTRADAY_FEATURE_OPS — those are added dynamically
+# via get_unary_ops(intraday_features) so that only selected features enter GP tree generation.
 UNARY_OPS = [
     OpSqrtAbs,
     OpAbs,
@@ -1533,11 +1696,42 @@ BINARY_TS_OPS = [OpTsCorr, OpTsRankCorr, OpTsCov, OpTsBeta, OpVpDivergence, OpAm
 TERNARY_WINDOW_TS_OPS = [OpMaRibbon]
 TERNARY_CHILD_OPS = [OpIfElse]
 
-UNARY_CHILD_OPS = tuple(UNARY_OPS + UNARY_TS_OPS + [OpNeg])
+# UNARY_CHILD_OPS includes ALL unary ops (base + intraday + TS) for isinstance checks
+# in tree traversal/depth calculation.  This is distinct from UNARY_OPS which
+# excludes intraday ops — the latter are added dynamically via get_unary_ops().
+UNARY_CHILD_OPS = tuple(UNARY_OPS + INTRADAY_FEATURE_OPS + UNARY_TS_OPS + [OpNeg])
 BINARY_CHILD_OPS = tuple(BINARY_OPS + BINARY_TS_OPS)
 
+
+def get_unary_ops(intraday_features: Optional[Sequence[str]] = None) -> List[Type[FactorNode]]:
+    """Return the unary operator pool for GP tree generation.
+
+    Always includes the base UNARY_OPS (OpSqrtAbs, OpBodyRatio, etc.).
+    When *intraday_features* is provided, also includes the intraday
+    feature operators whose FEATURE_COLUMN is in the list.
+
+    This ensures that only **selected** intraday features can appear
+    in GP-generated trees — unselected features' operators are excluded
+    from the pool so GP cannot pick them (and thus cannot try to read
+    un-pre-computed columns).
+
+    Parameters
+    ----------
+    intraday_features : list of str or None
+        Feature column names that have been pre-computed (e.g.
+        ``['rv', 'oi_flow']``).  None or empty means no intraday
+        operators are added.
+    """
+    base = list(UNARY_OPS)
+    if intraday_features:
+        feat_set = set(intraday_features)
+        for cls in INTRADAY_FEATURE_OPS:
+            if cls.FEATURE_COLUMN in feat_set:
+                base.append(cls)
+    return base
+
 OP_CLASS_BY_NAME: Dict[str, Type[Any]] = {
-    cls.__name__.replace('Op', ''): cls
+    cls.__name__.removeprefix('Op'): cls
     for cls in (BINARY_OPS + UNARY_OPS + UNARY_TS_OPS + BINARY_TS_OPS + TERNARY_WINDOW_TS_OPS + TERNARY_CHILD_OPS + [OpNeg])
 }
 OP_CLASS_BY_NAME['OpRollNorm'] = OpRollNorm
@@ -1581,12 +1775,12 @@ OP_ALIAS_BY_NAME: Dict[str, Type[Any]] = {
 
 
 def available_operator_prompt_text() -> str:
-    binary = ', '.join(cls.__name__.replace('Op', '') for cls in BINARY_OPS)
-    unary = ', '.join(cls.__name__.replace('Op', '') for cls in UNARY_OPS + [OpNeg])
-    unary_ts = ', '.join(cls.__name__.replace('Op', '') for cls in UNARY_TS_OPS)
-    binary_ts = ', '.join(cls.__name__.replace('Op', '') for cls in BINARY_TS_OPS)
-    ternary_ts = ', '.join(cls.__name__.replace('Op', '') for cls in TERNARY_WINDOW_TS_OPS)
-    ternary_child = ', '.join(cls.__name__.replace('Op', '') for cls in TERNARY_CHILD_OPS)
+    binary = ', '.join(cls.__name__.removeprefix('Op') for cls in BINARY_OPS)
+    unary = ', '.join(cls.__name__.removeprefix('Op') for cls in UNARY_OPS + [OpNeg])
+    unary_ts = ', '.join(cls.__name__.removeprefix('Op') for cls in UNARY_TS_OPS)
+    binary_ts = ', '.join(cls.__name__.removeprefix('Op') for cls in BINARY_TS_OPS)
+    ternary_ts = ', '.join(cls.__name__.removeprefix('Op') for cls in TERNARY_WINDOW_TS_OPS)
+    ternary_child = ', '.join(cls.__name__.removeprefix('Op') for cls in TERNARY_CHILD_OPS)
     alias_text = 'ema, ts_decay_exp, ts_cov, ts_beta, vp_divergence, amihud, oi_trend_conviction, ma_ribbon, if_else, ts_residual, ts_entropy, ts_skew, ts_kurt'
     return (
         f"可用二元算子(2参数): {binary}\n"
@@ -1634,7 +1828,8 @@ def parse_formula_to_node(formula: str,
     if not isinstance(formula, str) or not formula.strip():
         raise ValueError('formula must be a non-empty string.')
 
-    fields = set(data_fields or ['open', 'high', 'low', 'close', 'volume', 'position'])
+    _default_fields = ['open', 'high', 'low', 'close', 'volume', 'position'] + INTRADAY_FEATURE_COLUMNS
+    fields = set(data_fields or _default_fields)
     if 'position' in fields:
         fields.add('oi')
     if 'oi' in fields:

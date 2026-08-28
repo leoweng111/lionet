@@ -218,6 +218,21 @@ class Strategy:
         # Factor must be calculated on weighted(adjusted) prices.
         factor_input = get_weighted_price(raw_df)
         factor_formula = self._resolve_factor_formula()
+
+        # Pre-compute intraday features if the formula references intraday
+        # operators (e.g. RV(close), OIFlow(close)).  This transparently
+        # loads minute bars and merges the needed feature columns so that
+        # calc_formula_series can evaluate the formula.
+        from factors.factor_intraday_features import ensure_intraday_features_in_df
+        main_id = self._main_instrument(self.instrument_id)
+        factor_input = ensure_intraday_features_in_df(
+            df=factor_input,
+            formulas=[factor_formula],
+            instrument_id_list=[main_id],
+            start_date=self.start_time,
+            end_date=self.end_time,
+        )
+
         factor_input[self.factor_name] = pd.to_numeric(
             calc_formula_series(df=factor_input, formula=factor_formula),
             errors='coerce',

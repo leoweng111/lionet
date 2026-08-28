@@ -440,3 +440,141 @@ def compute_intraday_daily_features(
     keep = ['time', 'instrument_id'] + [f for f in feature_names if f in out.columns]
     out = out[keep].sort_values(['instrument_id', 'time']).reset_index(drop=True)
     return out
+
+
+# ── Formula feature extraction ───────────────────────────────────
+
+def extract_intraday_features_from_formula(formula: str) -> List[str]:
+    """Parse a formula string and return intraday feature column names it needs.
+
+    Walks the AST to find operator names that match ``INTRADAY_FEATURE_OP_MAP``
+    (e.g. ``RV``, ``OIFlow``) and returns the corresponding feature column
+    names (e.g. ``rv``, ``oi_flow``).
+
+    Returns an empty list if the formula contains no intraday operators
+    or cannot be parsed.
+    """
+    import ast as _ast
+
+    try:
+        from factors.factor_ops import INTRADAY_FEATURE_OP_MAP
+    except ImportError:
+        return []
+
+    if not isinstance(formula, str) or not formula.strip():
+        return []
+
+    try:
+        tree = _ast.parse(formula.strip(), mode='eval').body
+    except Exception:
+        return []
+
+    features: set = set()
+
+    def _walk(node):
+        if isinstance(node, _ast.Call) and isinstance(node.func, _ast.Name):
+            op_name = node.func.id
+            # Try direct name and case-insensitive
+            if op_name in INTRADAY_FEATURE_OP_MAP:
+                features.add(INTRADAY_FEATURE_OP_MAP[op_name])
+            elif op_name.lower() in {k.lower(): v for k, v in INTRADAY_FEATURE_OP_MAP.items()}:
+                feat_map_lower = {k.lower(): v for k, v in INTRADAY_FEATURE_OP_MAP.items()}
+                features.add(feat_map_lower[op_name.lower()])
+        for child in _ast.iter_child_nodes(node):
+            _walk(child)
+
+    _walk(tree)
+    return list(features)
+
+
+def ensure_intraday_features_in_df(
+    df: pd.DataFrame,
+    formulas: Sequence[str],
+    instrument_id_list: Union[str, Sequence[str]],
+    source: Optional[str] = 'joinquant',
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+) -> pd.DataFrame:
+    """If any formula references intraday operators, compute the needed
+    feature columns from minute bars and merge them into *df*.
+
+    This is the **transparent bridge** that makes formulas containing
+    intraday operators (e.g. ``OpRollNorm(RV(close), 30, 20, 1e-8, 5)``)
+    work in standalone BackTester / Strategy paths — not just during GP
+    mining.
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        Daily-frequency df (must have ``time``, ``instrument_id``).
+    formulas : list of str
+        Formula strings to scan for intraday operators.
+    instrument_id_list : str or list
+        Instruments to load minute data for.
+    source : str
+        Minute data source (``'joinquant'``, ``'tqsdk_edb'``).
+    start_date, end_date : str
+        Date range (used to load minute data; auto-extended backward).
+
+    Returns
+    -------
+    pd.DataFrame
+        *df* with any missing intraday feature columns merged in.
+        If no intraday operators are found or no minute data is available,
+        returns *df* unchanged.
+    """
+    if df is None or df.empty or not formulas:
+        return df
+
+    # Collect all needed intraday features from all formulas
+    needed: set = set()
+    for formula in formulas:
+        if isinstance(formula, str):
+            needed.update(extract_intraday_features_from_formula(formula))
+    if not needed:
+        return df
+
+    # Check which are already present in df
+    missing = [f for f in needed if f not in df.columns]
+    if not missing:
+        return df
+
+    # Infer date range from df if not provided
+    if start_date is None and 'time' in df.columns:
+        start_date = str(pd.to_datetime(df['time']).min().date())
+    if end_date is None and 'time' in df.columns:
+        end_date = str(pd.to_datetime(df['time']).max().date())
+
+    # Load minute data
+    from data.futures import get_futures_continuous_contract_price_1min
+    minute_df = get_futures_continuous_contract_price_1min(
+        instrument_id=instrument_id_list,
+        start_date=start_date,
+        end_date=end_date,
+        source=source,
+    )
+    if minute_df is None or minute_df.empty:
+        import logging
+        logging.getLogger(__name__).warning(
+            f'[ensure_intraday_features] No minute data (source={source}, '
+            f'instruments={instrument_id_list}, range=[{start_date}, {end_date}]). '
+            f'Features {missing} will be NaN.'
+        )
+        return df
+
+    # Compute needed features
+    feat_df = compute_intraday_daily_features(
+        minute_df=minute_df,
+        feature_names=missing,
+        instrument_id_list=instrument_id_list,
+    )
+    if feat_df is None or feat_df.empty:
+        return df
+
+    # Merge
+    out = df.copy()
+    out['time'] = pd.to_datetime(out['time'], errors='coerce').dt.normalize()
+    feat_df['time'] = pd.to_datetime(feat_df['time'], errors='coerce').dt.normalize()
+    out = out.merge(feat_df, on=['time', 'instrument_id'], how='left')
+    return out
+

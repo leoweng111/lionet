@@ -37,11 +37,11 @@ from .factor_ops import (
     BINARY_TS_OPS,
     TERNARY_CHILD_OPS,
     UNARY_CHILD_OPS,
-    UNARY_OPS,
     UNARY_TS_OPS,
     ConstNode,
     DataNode,
     FactorNode,
+    get_unary_ops,
     OpNeg,
     OpRollNorm,
     infer_node_type,
@@ -164,9 +164,18 @@ def _generate_valid_random_tree(
     const_prob: float,
     leaf_prob: float,
     rng: random.Random,
+    unary_ops: Optional[Sequence[type]] = None,
     log_context: Optional[str] = None,
 ) -> FactorNode:
-    """Generate a random GP tree and ensure it passes semantic type validation."""
+    """Generate a random GP tree and ensure it passes semantic type validation.
+
+    *unary_ops* controls which unary operators can be picked (defaults to
+    the base UNARY_OPS).  This is how selected intraday features enter the
+    pool while unselected ones are excluded.
+    """
+    if unary_ops is None:
+        from .factor_ops import UNARY_OPS
+        unary_ops = UNARY_OPS
 
     def _build() -> FactorNode:
         if current_depth >= max_depth:
@@ -183,47 +192,47 @@ def _generate_valid_random_tree(
         if op_pick < 0.45:
             op_cls = rng.choice(BINARY_OPS)
             left = _generate_valid_random_tree(
-                data_fields, max_depth, current_depth + 1, window_choices, const_prob, leaf_prob, rng
+                data_fields, max_depth, current_depth + 1, window_choices, const_prob, leaf_prob, rng, unary_ops=unary_ops
             )
             right = _generate_valid_random_tree(
-                data_fields, max_depth, current_depth + 1, window_choices, const_prob, leaf_prob, rng
+                data_fields, max_depth, current_depth + 1, window_choices, const_prob, leaf_prob, rng, unary_ops=unary_ops
             )
             return op_cls(left, right)
 
         if op_pick < 0.70:
-            op_cls = rng.choice(UNARY_OPS)
+            op_cls = rng.choice(unary_ops)
             child = _generate_valid_random_tree(
-                data_fields, max_depth, current_depth + 1, window_choices, const_prob, leaf_prob, rng
+                data_fields, max_depth, current_depth + 1, window_choices, const_prob, leaf_prob, rng, unary_ops=unary_ops
             )
             return op_cls(child)
 
         if op_pick < 0.87:
             op_cls = rng.choice(UNARY_TS_OPS)
             child = _generate_valid_random_tree(
-                data_fields, max_depth, current_depth + 1, window_choices, const_prob, leaf_prob, rng
+                data_fields, max_depth, current_depth + 1, window_choices, const_prob, leaf_prob, rng, unary_ops=unary_ops
             )
             return op_cls(child, int(rng.choice(list(window_choices))))
 
         if op_pick < 0.95:
             op_cls = rng.choice(BINARY_TS_OPS)
             left = _generate_valid_random_tree(
-                data_fields, max_depth, current_depth + 1, window_choices, const_prob, leaf_prob, rng
+                data_fields, max_depth, current_depth + 1, window_choices, const_prob, leaf_prob, rng, unary_ops=unary_ops
             )
             right = _generate_valid_random_tree(
-                data_fields, max_depth, current_depth + 1, window_choices, const_prob, leaf_prob, rng
+                data_fields, max_depth, current_depth + 1, window_choices, const_prob, leaf_prob, rng, unary_ops=unary_ops
             )
             return op_cls(left, right, int(rng.choice(list(window_choices))))
 
         # Ternary child ops (e.g. IfElse)
         op_cls = rng.choice(TERNARY_CHILD_OPS)
         cond = _generate_valid_random_tree(
-            data_fields, max_depth, current_depth + 1, window_choices, const_prob, leaf_prob, rng
+            data_fields, max_depth, current_depth + 1, window_choices, const_prob, leaf_prob, rng, unary_ops=unary_ops
         )
         left = _generate_valid_random_tree(
-            data_fields, max_depth, current_depth + 1, window_choices, const_prob, leaf_prob, rng
+            data_fields, max_depth, current_depth + 1, window_choices, const_prob, leaf_prob, rng, unary_ops=unary_ops
         )
         right = _generate_valid_random_tree(
-            data_fields, max_depth, current_depth + 1, window_choices, const_prob, leaf_prob, rng
+            data_fields, max_depth, current_depth + 1, window_choices, const_prob, leaf_prob, rng, unary_ops=unary_ops
         )
         return op_cls(cond, left, right)
 
@@ -304,6 +313,7 @@ def mutate_tree(
     const_prob: float,
     leaf_prob: float,
     rng: random.Random,
+    unary_ops: Optional[Sequence[type]] = None,
     gen_idx: Optional[int] = None,
 ) -> FactorNode:
     """Mutate one random position in a tree while keeping semantic validity.
@@ -330,6 +340,7 @@ def mutate_tree(
             const_prob,
             leaf_prob,
             rng,
+            unary_ops=unary_ops,
             log_context=f'[GP][mutate_tree][gen={gen_idx}] root-mutation' if gen_idx is not None else '[GP][mutate_tree] root-mutation',
         )
 
@@ -342,6 +353,7 @@ def mutate_tree(
         const_prob,
         leaf_prob,
         rng,
+        unary_ops=unary_ops,
         log_context=f'[GP][mutate_tree][gen={gen_idx}] subtree-mutation' if gen_idx is not None else '[GP][mutate_tree] subtree-mutation',
     )
     old_child = None
@@ -376,6 +388,7 @@ def macro_subtree_mutation(
     const_prob: float,
     leaf_prob: float,
     rng: random.Random,
+    unary_ops: Optional[Sequence[type]] = None,
     gen_idx: Optional[int] = None,
 ) -> FactorNode:
     """Macro subtree mutation: cut one child under the root and regrow a new subtree."""
@@ -390,6 +403,7 @@ def macro_subtree_mutation(
             const_prob,
             leaf_prob,
             rng,
+            unary_ops=unary_ops,
             log_context=f'[GP][macro_mutation][gen={gen_idx}] root-leaf',
         )
 
@@ -410,6 +424,7 @@ def macro_subtree_mutation(
         const_prob,
         leaf_prob,
         rng,
+        unary_ops=unary_ops,
         log_context=f'[GP][macro_mutation][gen={gen_idx}] root-cut',
     )
 
@@ -1192,6 +1207,7 @@ def run_gp_evolution(
     gradient_window_neighbor_radius: int = 4,
     window_learning_rate: float = 0.15,
     n_jobs: int = 5,
+    intraday_features: Optional[Sequence[str]] = None,
 ) -> List[GPCandidate]:
     """运行遗传规划（GP）进行因子挖掘。
     参数说明（中文）：
@@ -1228,6 +1244,11 @@ def run_gp_evolution(
     - max_shock_generation: Shock 模式最多持续代数（无更新则退出）。
     """
     rng = random.Random(random_seed)
+
+    # Build the unary operator pool: base ops + only selected intraday feature ops.
+    # Unselected intraday operators are excluded so GP cannot generate trees that
+    # reference un-pre-computed feature columns.
+    unary_ops = get_unary_ops(intraday_features=intraday_features)
 
     if log_interval <= 0:
         log_interval = 1
@@ -1303,6 +1324,7 @@ def run_gp_evolution(
                 const_prob,
                 leaf_prob,
                 rng,
+                unary_ops=unary_ops,
                 log_context=f'[GP][init] seed tree {i + 1}/{population_size}',
             )
         )
@@ -1640,6 +1662,7 @@ def run_gp_evolution(
                             const_prob,
                             leaf_prob,
                             rng,
+                            unary_ops=unary_ops,
                             gen_idx=gen_idx + 1,
                         )
                     elif shock_pick < SHOCK_ROOT_CUT_PROB + SHOCK_HOIST_PROB:
@@ -1653,6 +1676,7 @@ def run_gp_evolution(
                             const_prob,
                             leaf_prob,
                             rng,
+                            unary_ops=unary_ops,
                             gen_idx=gen_idx + 1,
                         )
                 else:
@@ -1664,6 +1688,7 @@ def run_gp_evolution(
                         const_prob,
                         leaf_prob,
                         rng,
+                        unary_ops=unary_ops,
                         gen_idx=gen_idx + 1,
                     )
                 next_gen.append(m)
