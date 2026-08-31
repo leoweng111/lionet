@@ -47,6 +47,7 @@ from .factor_ops import (
     OpEma,
     OpGt,
     OpIfElse,
+    OpIntradayFeature,
     OpInv,
     OpLogReturn,
     OpLowerShadowRatio,
@@ -1204,6 +1205,14 @@ class _ParametricTorchEvaluator(_TorchModuleBase):  # type: ignore[misc]
             mn = torch.minimum(torch.minimum(ma1, ma2), ma3)
             center = _soft_abs((ma1 + ma2 + ma3) / 3.0, self.soft_temperature)
             return _safe_div(mx - mn, center)
+
+        # Intraday feature operators: read pre-computed column from fields.
+        # Same pattern as OpBodyRatio — the child is for type/gradient connectivity only.
+        if isinstance(node, OpIntradayFeature):
+            col = node.FEATURE_COLUMN
+            if col in self.fields:
+                return self.fields[col] + self._child(node, path, 'child') * 0.0
+            raise KeyError(f'Intraday feature `{col}` not in fields for differentiable evaluation.')
 
         raise NotImplementedError(f'Differentiable evaluator does not support {type(node).__name__}.')
 
