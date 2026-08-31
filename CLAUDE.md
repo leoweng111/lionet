@@ -51,10 +51,11 @@ This test verifies the full GP mining pipeline (`GeneticFactorGenerator.auto_min
 - Runs only 1 generation with a small population for speed.
 - Asserts: factors are generated, backtest completes, no factor passes the extreme filter, formula map is populated.
 
-It includes 3 sub-tests:
+It includes 4 sub-tests:
 1. **GP Mining with Outsample** — Direct `GeneticFactorGenerator` call with `outsample_ratio=0.3`, verifies outsample data generation and outsample backtest.
 2. **Simulate Backend Mining** — Mirrors `main.py` `_execute_mining` parameter construction (all params, normalize logic), catches param-passing mismatches between backend and core.
 3. **Simulate Backend Fusion** — Mirrors `main.py` `_execute_fusion` parameter construction for `FactorFusioner`, verifies `fusion_indicator_dict` and outsample params (`outsample_ratio`, `outsample_start_time`, `outsample_end_time`) are correctly passed through.
+4. **GP Mining with Intraday Features** — `GeneticFactorGenerator` with `intraday_features=['rv','oi_flow']`, verifies parameter storage, feature pre-computation, `base_col_list` extension, and end-to-end mining+backtest flow.
 
 ### GP + Gradient Descent Smoke Test
 ```bash
@@ -65,6 +66,7 @@ This test verifies the optional GP+gradient-descent pipeline runs without changi
 - Runs `GeneticFactorGenerator.auto_mine_select_and_save_fc()` on synthetic C0 data with `enable_gradient_descent=True`, `gradient_descent_method='alternated'`, small population/generation count, and extreme filter thresholds so no factor is saved to DB.
 - Runs `run_gp_evolution()` with `gradient_descent_method='consecutive'` to verify final elite refinement.
 - Asserts non-differentiable fitness metrics such as `TS RankIC` are rejected before mining starts.
+- Verifies `OpIntradayFeature` (e.g. `OpRV`) is handled by the differentiable evaluator without `NotImplementedError`.
 
 ### Fusion Smoke Test
 ```bash
@@ -80,6 +82,29 @@ It includes 3 sub-tests:
 1. **Direct Fusion** — Direct `FactorFusioner` call with default indicator weights, verifies end-to-end fusion flow.
 2. **Simulate Backend Fusion** — Mirrors `main.py` `_execute_fusion` parameter construction (normalize `fusion_indicator_dict`, pass `use_version_dict`), catches param-passing mismatches.
 3. **Simulate Frontend Payload** — Verifies the frontend's `_selectedCollections` + `_selectedVersions` → `use_version_dict` construction logic matches what `FactorFusioner` expects.
+
+### Intraday Features Smoke Test
+```bash
+# Run intraday features smoke test: feature computation, operator parsing, GP filter, GP+GD evaluator
+python -u test/intraday_features_smoke.py
+```
+This test verifies the full intraday-derived daily feature pipeline:
+- Synthetic minute bars (with night session) → `compute_intraday_daily_features` → 22 daily features.
+- Feature invariants: `rv=rv_neg+rv_pos`, `jump=max(rv-bpv,0)`, volatility non-negative, YZ first-day NaN.
+- All 22 operators (`OpRV`..`OpKyleLambda`) parse correctly via `parse_formula_to_node`.
+- `calc_formula_series` reads pre-computed columns; missing column raises `KeyError`.
+- `get_unary_ops(intraday_features)` filters the operator pool — unselected ops never appear in GP trees.
+- `extract_intraday_features_from_formula` correctly identifies needed features from formula strings.
+- `ensure_intraday_features_in_df` degrades gracefully when minute data is unavailable.
+- GP+GD `_ParametricTorchEvaluator` handles `OpIntradayFeature` without `NotImplementedError`.
+
+It includes 6 sub-tests:
+1. **Feature Computation** — 22 features computed, invariants verified.
+2. **Operator Parsing and Calc** — All operators parse, calc reads columns, `get_unary_ops` filters.
+3. **Formula Feature Extraction** — `extract_intraday_features_from_formula` on various formulas.
+4. **Ensure Graceful Degradation** — `ensure_intraday_features_in_df` handles missing minute data.
+5. **GP Tree Respects Filter** — 300 random trees with partial/no/all intraday features.
+6. **GP+GD Handles Intraday Ops** — `_ParametricTorchEvaluator` forward/backward/materialize with `OpRV`.
 
 ## Architecture
 

@@ -446,6 +446,48 @@ def test_rolling_std_matches_pandas_ddof_one() -> None:
     assert not np.allclose(actual, wrong_population, atol=1e-6), 'TsStd evaluator should use pandas ddof=1, not population std.'
 
 
+def test_intraday_op_in_differentiable_evaluator() -> None:
+    """验证 GP+GD 可微评估器能处理 OpIntradayFeature（不报 NotImplementedError）。
+
+    构造含 OpRV 的树，验证 forward/materialize 不抛异常。
+    """
+    from factors.factor_ops import DataNode, OpAdd, OpRV
+    from factors.gp_gradient_descent import GradientDescentConfig, _ParametricTorchEvaluator
+
+    n = 60
+    close = np.linspace(100, 110, n)
+    rv_vals = np.random.rand(n) * 0.1
+    data = pd.DataFrame({
+        'time': pd.date_range('2024-01-01', periods=n, freq='D'),
+        'instrument_id': 'C0',
+        'open': close, 'high': close + 0.5, 'low': close - 0.5,
+        'close': close, 'volume': np.arange(1000, 1000 + n),
+        'position': np.arange(10000, 10000 + n),
+        'rv': rv_vals,
+        'future_ret': np.random.randn(n) * 0.01,
+    })
+    cfg = GradientDescentConfig.from_kwargs(
+        enable_gradient_descent=True,
+        gradient_descent_steps=1,
+        min_window=3, max_window=10, window_choices=[3, 5, 10],
+    )
+    model = _ParametricTorchEvaluator(
+        root=OpAdd(OpRV(DataNode('close')), DataNode('open')),
+        df=data, cfg=cfg,
+        apply_rolling_norm=False,
+        rolling_norm_window=5, rolling_norm_min_periods=3,
+        rolling_norm_eps=1e-8, rolling_norm_clip=5.0,
+    )
+    factor = model.forward()
+    assert np.isfinite(float(factor.sum().detach().cpu().item()))
+    loss = -model.score(factor, {'TS IC': 1.0})
+    loss.backward()
+    grads = [p for p in model.parameters() if p.grad is not None]
+    assert grads, 'Should have gradients through OpIntradayFeature edge weights'
+    node = model.materialize()
+    assert 'RV(' in node.to_formula(), f'Materialize should preserve OpRV: {node.to_formula()}'
+
+
 def main() -> None:
     _require_torch()
     tests = [
@@ -459,6 +501,7 @@ def main() -> None:
         test_ts_ic_icir_with_rolling_norm_has_finite_gradients,
         test_score_surrogate_matches_gp_yearly_metric_score,
         test_non_differentiable_fitness_rejected,
+        test_intraday_op_in_differentiable_evaluator,
     ]
     ok = True
     for fn in tests:

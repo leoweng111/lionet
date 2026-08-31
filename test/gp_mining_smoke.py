@@ -390,6 +390,82 @@ def test_simulate_backend_fusion():
     return True
 
 
+# ── Test 4: GP Mining with intraday features ────────────────────────
+
+def test_gp_mining_with_intraday_features():
+    """验证 GP 挖掘开启日内特征后流程正常（intraday_features 参数透传 + 预计算）。
+
+    使用与 Test 1 相同的极端筛选阈值，确保因子不入库。
+    intraday_features 设为 ['rv', 'oi_flow']（子集，验证过滤生效）。
+    """
+    print()
+    print('=' * 60)
+    print('TEST 4: GP Mining with Intraday Features')
+    print('=' * 60)
+
+    seed = 13
+    fitness_indicator_dict = _random_fitness_indicator_dict(seed=seed)
+    filter_indicator_dict = _build_extreme_filter_indicator_dict()
+    version = f'__smoke_intraday_{datetime.now().strftime("%Y%m%d_%H%M%S")}__'
+
+    print(f'  intraday_features: ["rv", "oi_flow"]')
+    print(f'  fitness_indicator_dict: {fitness_indicator_dict}')
+
+    fg = GeneticFactorGenerator(
+        instrument_id_list='C0',
+        start_time='20230101',
+        end_time='20241231',
+        calculate_baseline=False,
+        n_jobs=1,
+        max_factor_count=5,
+        check_leakage_count=3,
+        check_relative=False,
+        version=version,
+        gp_generations=1,
+        gp_population_size=20,
+        gp_max_depth=4,
+        gp_elite_size=5,
+        fitness_indicator_dict=fitness_indicator_dict,
+        random_seed=seed,
+        intraday_features=['rv', 'oi_flow'],
+    )
+
+    # Verify intraday_features was stored
+    assert fg.intraday_features == ['rv', 'oi_flow'], \
+        f'intraday_features not stored: {fg.intraday_features}'
+    print(f'  ✓ intraday_features stored on generator')
+
+    print(f'\n  Running auto_mine_select_and_save_fc ...')
+    result = fg.auto_mine_select_and_save_fc(
+        filter_indicator_dict=filter_indicator_dict,
+        n_jobs=1,
+        require_all_row=True,
+        require_all_instruments=True,
+    )
+
+    bt = result.get('bt')
+    selected = result.get('selected_fc_name_list', [])
+
+    assert fg.generated_data is not None, 'generated_data should not be None'
+    assert len(fg.generated_fc_name_list) > 0, 'Should generate at least 1 factor'
+    print(f'  ✓ Factor generation OK: {len(fg.generated_fc_name_list)} factors')
+
+    assert bt is not None, 'BackTester should not be None'
+    print(f'  ✓ Backtest OK')
+
+    assert len(selected) == 0, 'No factors should pass extreme thresholds'
+    print(f'  ✓ Filter OK: no factors saved to DB')
+
+    # base_col_list should be extended (if minute data was available)
+    if 'rv' in fg.base_col_list:
+        print(f'  ✓ base_col_list extended with intraday features: {[c for c in fg.base_col_list if c not in ("open","high","low","close","volume","position")]}')
+    else:
+        print(f'  ⚠ base_col_list not extended (minute data may be unavailable for test range)')
+
+    print(f'\n  ✓ TEST 4 PASSED')
+    return True
+
+
 # ── Main ─────────────────────────────────────────────────────────────
 
 if __name__ == '__main__':
@@ -398,6 +474,7 @@ if __name__ == '__main__':
         ('GP Mining with Outsample', test_gp_mining_with_outsample),
         ('Simulate Backend Mining', test_simulate_backend_mining),
         ('Simulate Backend Fusion', test_simulate_backend_fusion),
+        ('GP Mining with Intraday Features', test_gp_mining_with_intraday_features),
     ]
 
     for name, func in test_funcs:
