@@ -140,7 +140,7 @@
             <div class="param-section"><el-divider content-position="center">日内分钟特征</el-divider>
               <el-form-item label="特征选择">
                 <el-select
-                  v-model="intradayFeatureSettings.selected"
+                  v-model="params.intraday_features"
                   multiple
                   collapse-tags
                   collapse-tags-tooltip
@@ -158,8 +158,8 @@
                 </el-select>
               </el-form-item>
               <div style="margin-bottom:8px;">
-                <el-button size="small" @click="intradayFeatureSettings.selected = [...intradayFeatureSettings.available]">全选</el-button>
-                <el-button size="small" @click="intradayFeatureSettings.selected = []">清空</el-button>
+                <el-button size="small" @click="params.intraday_features = [...intradayFeatureSettings.available]">全选</el-button>
+                <el-button size="small" @click="params.intraday_features = null">清空</el-button>
               </div>
               <div style="font-size:12px;color:#909399;line-height:1.5;">
                 从 continuous_contract_price_1min 分钟bar实时计算日频特征，作为GP叶子字段。夜盘(≥20点)归次日交易日。需DB有对应分钟数据。
@@ -390,7 +390,6 @@ const indicatorDirection = ref({ 'Net Return': 1, 'Net Sharpe': 1, 'TS IC': 1 })
 const intradayFeatureSettings = reactive({
   available: [],
   categories: {},
-  selected: [],
 })
 const differentiableFitnessIndicators = new Set(['TS IC', 'TS ICIR', 'Gross Return', 'Net Return', 'Gross Sharpe', 'Net Sharpe', 'Gross Volatility', 'Net Volatility', 'Turnover'])
 const serverDefaultFitnessWeight = ref({})
@@ -461,6 +460,7 @@ const defaultParams = () => ({
   version: new Date().toISOString().slice(0,10).replace(/-/g,'') + '_gp_test',
   portfolio_adjust_method: '1D', interest_method: 'simple', risk_free_rate: false,
   calculate_baseline: true, apply_weighted_price: true, source: 'joinquant', n_jobs: 5, max_factor_count: 50,
+  intraday_features: null,
   min_window_size: 30,
   fitness_metric: 'ic',
   fitness_indicator_dict: {
@@ -709,7 +709,10 @@ onMounted(async () => {
     // Load intraday feature options (default: all selected)
     intradayFeatureSettings.available = featData?.all_features || []
     intradayFeatureSettings.categories = featData?.categories || {}
-    intradayFeatureSettings.selected = [...intradayFeatureSettings.available]
+    // Default to all features if not previously saved
+    if (params.intraday_features === null || params.intraday_features === undefined) {
+      params.intraday_features = [...intradayFeatureSettings.available]
+    }
 
     _loadManualParams(manualConfig?.saved || {})
 
@@ -803,7 +806,6 @@ const _buildMiningPayload = () => {
     random_seed: params.random_seed || null,
     fitness_indicator_dict: fitnessIndicatorDict,
     filter_indicator_dict: filterIndicatorDict,
-    intraday_features: intradayFeatureSettings.selected?.length ? [...intradayFeatureSettings.selected] : null,
   }
 }
 

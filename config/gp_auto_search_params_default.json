@@ -92,5 +92,7 @@
   "window_learning_rate": 0.15,
   "edge_learning_rate": 0.05,
   "gradient_window_soft_temperature": 1.0,
-  "gradient_window_neighbor_radius": 4
+  "gradient_window_neighbor_radius": 4,
+  "intraday_features": null,
+  "source": "joinquant"
 }

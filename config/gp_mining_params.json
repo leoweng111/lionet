@@ -199,5 +199,6 @@
   "start_time": "20200101",
   "task_count": 1,
   "version": "20260817_gp_test",
-  "window_learning_rate": 0.15
+  "window_learning_rate": 0.15,
+  "intraday_features": null
 }
