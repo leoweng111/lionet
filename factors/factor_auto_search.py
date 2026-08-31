@@ -2448,6 +2448,31 @@ class FactorFusioner:
         factor_records = self._load_candidate_records()
         log.info(f'Fusion candidate pool size={len(factor_records)}')
 
+        # 1.5) Pre-compute intraday features if candidate formulas reference
+        # intraday operators (e.g. RV(close), OIFlow(close)).  This transparently
+        # loads minute bars, computes the needed daily features, and merges them
+        # into base_df so that subsequent calc_formula_series calls succeed.
+        candidate_formulas = factor_records['formula'].tolist() if 'formula' in factor_records.columns else []
+        if candidate_formulas:
+            from factors.factor_intraday_features import ensure_intraday_features_in_df
+            base_df = ensure_intraday_features_in_df(
+                df=base_df,
+                formulas=candidate_formulas,
+                instrument_id_list=self.instrument_id_list,
+                source=self.source,
+                start_date=self.start_time,
+                end_date=self._effective_end_time,
+            )
+            # Extend base_col_list with any new feature columns so that
+            # _calc_candidate_factor_df and formula consistency checks include them.
+            new_cols = [c for c in base_df.columns
+                        if c not in ('time', 'instrument_id', 'future_ret')
+                        and c not in self.base_col_list
+                        and c not in ['weighted_factor', 'cur_weighted_factor', 'is_rollover', 'symbol']]
+            if new_cols:
+                self.base_col_list = list(self.base_col_list) + new_cols
+                log.info(f'[fusion] Pre-computed intraday features: {new_cols}')
+
         # 2) 计算候选因子的数值列，并与基础评估表按(time, instrument_id)对齐。
         factor_df = self._calc_candidate_factor_df(base_df=base_df, factor_records=factor_records)
         eval_df = base_df[['time', 'instrument_id', 'future_ret']].merge(
