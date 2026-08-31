@@ -1408,6 +1408,11 @@ def run_gp_evolution(
         elite_remove_count = 0
         tree_log_interval = max(1, int(population_size / 10))
         for tree_idx, tree in enumerate(population, start=1):  # 每棵树代表了一个因子
+            # Check cancellation periodically so terminate takes effect promptly,
+            # instead of only at the next generation boundary.
+            if cancel_event is not None and cancel_event.is_set():
+                log.warning(f'[GP] Cancelled during generation {gen_idx + 1} scoring at tree {tree_idx}/{len(population)}.')
+                break
             penalized_fitness, original_fitness, sign = calc_fitness_and_sign(
                 tree,
                 df,

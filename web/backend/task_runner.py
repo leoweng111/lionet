@@ -173,20 +173,31 @@ def _heartbeat_gp(task_id: str, params: Dict[str, Any], task_type: str,
                   cancel_event: threading.Event) -> None:
     """Periodically flush in-memory task snapshot to MongoDB.
 
-    Also watches the DB for a 'terminated' status set by the backend's
-    terminate endpoint, and stops the task gracefully when detected.
+    **Read-then-write ordering matters**: the backend's terminate endpoint marks
+    the task 'terminated' in DB.  If we write the in-memory 'running' status
+    first, we'd overwrite that flag and never observe the termination.  So we
+    always read the DB status first, and if it is 'terminated' we set the
+    cancel_event and stop WITHOUT writing anything.
     """
     while not stop_flag.is_set():
         try:
-            current_status = main_mod.tasks.get(task_id, {}).get("status", "running")
-            main_mod._save_task_to_db(task_id, params, current_status, task_type=task_type)
-            # Backend may have marked us terminated (user clicked terminate).
+            # 1) Read DB status FIRST (authoritative for termination).
             row = main_mod._load_task_from_db(task_id)
-            if row and str(row.get("status")) == "terminated":
+            db_status = str(row.get("status")) if row else "running"
+            if db_status == "terminated":
                 cancel_event.set()
                 if task_id in main_mod.tasks:
                     main_mod.tasks[task_id]["status"] = "terminated"
                 stop_flag.set()
+                break
+
+            # 2) Write the snapshot using the DB's own status (never downgrade
+            #    a terminated status back to running).
+            current_status = main_mod.tasks.get(task_id, {}).get("status", "running")
+            if current_status == "terminated":
+                stop_flag.set()
+                break
+            main_mod._save_task_to_db(task_id, params, db_status, task_type=task_type)
         except Exception:
             pass
         stop_flag.wait(_HEARTBEAT_INTERVAL)
@@ -196,14 +207,19 @@ def _heartbeat_market(task_id: str, stop_flag: threading.Event,
                       cancel_event: threading.Event) -> None:
     while not stop_flag.is_set():
         try:
-            main_mod._save_market_data_task_to_db(task_id)
-            # Backend may have marked us terminated.
+            # Read-then-write: check for termination BEFORE writing snapshot.
             row = main_mod._load_market_data_task_from_db(task_id)
             if row and str(row.get("status")) == "terminated":
                 cancel_event.set()
                 if task_id in main_mod.market_data_tasks:
                     main_mod.market_data_tasks[task_id]["status"] = "terminated"
                 stop_flag.set()
+                break
+            current_status = main_mod.market_data_tasks.get(task_id, {}).get("status", "running")
+            if current_status == "terminated":
+                stop_flag.set()
+                break
+            main_mod._save_market_data_task_to_db(task_id)
         except Exception:
             pass
         stop_flag.wait(_HEARTBEAT_INTERVAL)
