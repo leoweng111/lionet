@@ -4,7 +4,10 @@ Lionet Factor Mining Web Backend - FastAPI
 
 import asyncio
 import logging
+import os
 import re
+import signal
+import subprocess
 import sys
 import threading
 import traceback
@@ -166,45 +169,69 @@ _auto_mining_status: Dict[str, Any] = {
 }
 
 
-# ── Startup: clean up stale "running" tasks in DB ─────────────────────
+# ── Startup: restore running tasks from DB for monitoring ─────────────
 @app.on_event("startup")
-async def _cleanup_stale_tasks():
-    """Mark any DB tasks stuck in 'running' as 'interrupted'.
+async def _restore_running_tasks():
+    """Restore running tasks from DB into memory for monitoring.
 
-    When the server process restarts, those tasks are definitely dead.
+    Tasks run in **independent OS subprocesses** (see web.backend.task_runner),
+    so a backend restart does NOT kill them.  We load their latest snapshots
+    from MongoDB so the frontend can keep monitoring progress / logs even
+    after the backend restarts.
     """
     try:
-        total_modified = 0
+        restored = 0
+        # GP + Fusion tasks.
         for collection in (GP_TASK_COLLECTION, FUSION_TASK_COLLECTION):
-            result = update_many_data(
-                database="task",
-                collection=collection,
-                mongo_operator={"status": "running"},
-                update_data={
-                    "status": "interrupted",
-                    "progress": "服务重启，任务已中断",
-                    "finished_at": datetime.now().isoformat(),
-                },
-            )
-            total_modified += int(result.get("modified_count", 0) or 0)
+            df = get_data(database="task", collection=collection,
+                          mongo_operator={"status": "running"})
+            if isinstance(df, pd.DataFrame) and not df.empty:
+                for _, row in df.iterrows():
+                    row_d = {k: _sanitize_nan(v) for k, v in row.to_dict().items()}
+                    tid = str(row_d.get("task_id", ""))
+                    if not tid or tid in tasks:
+                        continue
+                    tasks[tid] = {
+                        "task_type": row_d.get("task_type", TASK_TYPE_GP),
+                        "status": "running",
+                        "started_at": row_d.get("started_at", ""),
+                        "params": row_d.get("params", {}),
+                        "progress": row_d.get("progress", "进程独立运行中..."),
+                        "gp_progress": row_d.get("gp_progress"),
+                        "result": row_d.get("result"),
+                        "result_overview": row_d.get("result_overview"),
+                        "error": None,
+                        "cancel_event": None,
+                        "logs": row_d.get("logs", []),
+                        "pid": row_d.get("pid"),
+                    }
+                    restored += 1
 
         # Market-data tasks use a dedicated collection.
-        md_result = update_many_data(
-            database="task",
-            collection=MARKET_DATA_TASK_COLLECTION,
-            mongo_operator={"status": "running"},
-            update_data={
-                "status": "interrupted",
-                "error": "服务重启，任务已中断",
-                "finished_at": datetime.now().isoformat(),
-                "updated_at": datetime.now().isoformat(),
-            },
-        )
-        total_modified += int(md_result.get("modified_count", 0) or 0)
-        if total_modified > 0:
-            print(f"[STARTUP] Marked {total_modified} stale running task(s) as interrupted.")
+        df_md = get_data(database="task", collection=MARKET_DATA_TASK_COLLECTION,
+                         mongo_operator={"status": "running"})
+        if isinstance(df_md, pd.DataFrame) and not df_md.empty:
+            for _, row in df_md.iterrows():
+                row_d = {k: _sanitize_nan(v) for k, v in row.to_dict().items()}
+                tid = str(row_d.get("task_id", ""))
+                if not tid or tid in market_data_tasks:
+                    continue
+                market_data_tasks[tid] = {
+                    "type": row_d.get("task_type", "update-price"),
+                    "status": "running",
+                    "started_at": row_d.get("started_at", ""),
+                    "params": row_d.get("params", {}),
+                    "logs": row_d.get("logs", []),
+                    "error": row_d.get("error"),
+                    "cancel_event": None,
+                    "pid": row_d.get("pid"),
+                }
+                restored += 1
+
+        if restored:
+            print(f"[STARTUP] Restored {restored} running task(s) from DB for monitoring.")
     except Exception as e:
-        print(f"[STARTUP] Failed to clean up stale tasks: {e}")
+        print(f"[STARTUP] Failed to restore running tasks: {e}")
 
     try:
         _daily_schedule_config.update(_load_market_schedule_config_from_db())
@@ -1093,6 +1120,7 @@ def _save_task_to_db(task_id: str, params_dict: dict, status: str,
             "started_at": tasks.get(task_id, {}).get("started_at", ""),
             "finished_at": datetime.now().isoformat(),
             "logs": tasks.get(task_id, {}).get("logs", [])[-500:],
+            "pid": tasks.get(task_id, {}).get("pid"),
         }
         if result_summary:
             record["result_summary"] = result_summary
@@ -1150,6 +1178,7 @@ def _save_market_data_task_to_db(task_id: str):
                 "params": task.get("params") or {},
                 "logs": list(task.get("logs") or [])[-5000:],
                 "error": task.get("error"),
+                "pid": task.get("pid"),
                 "updated_at": datetime.now().isoformat(),
             },
             upsert=True,
@@ -1175,23 +1204,9 @@ def _load_market_data_task_from_db(task_id: str) -> Optional[Dict[str, Any]]:
     logs_val = _sanitize_nan(row.get("logs"), [])
     params_val = _sanitize_nan(row.get("params"), {})
     status_val = str(_sanitize_nan(row.get("status"), "unknown") or "unknown")
-    if status_val == 'running':
-        status_val = 'interrupted'
-        try:
-            update_one_data(
-                database="task",
-                collection=MARKET_DATA_TASK_COLLECTION,
-                mongo_operator={"task_id": task_id},
-                data={
-                    "status": "interrupted",
-                    "error": "服务重启，任务已中断",
-                    "finished_at": datetime.now().isoformat(),
-                    "updated_at": datetime.now().isoformat(),
-                },
-                upsert=False,
-            )
-        except Exception:
-            pass
+    # NOTE: with the subprocess task runner, a 'running' task in DB may be
+    # executing in an independent OS subprocess.  We keep status as-is so the
+    # frontend can monitor it; we no longer force it to 'interrupted'.
 
     return {
         "task_id": task_id,
@@ -1670,6 +1685,33 @@ def _normalize_auto_search_payload(raw_params: Dict[str, Any], version: str) -> 
     return GPMiningParams(**payload)
 
 
+def _launch_task_subprocess(task_type: str, task_id: str,
+                            params_dict: Dict[str, Any],
+                            is_market: bool = False) -> Optional[int]:
+    """Launch a task in a standalone OS subprocess via web.backend.task_runner.
+
+    The subprocess is fully independent of the FastAPI process: backend
+    restarts do NOT kill it.  The returned pid (or None on failure) lets the
+    backend kill the task on explicit user termination.
+    """
+    try:
+        params_json = json.dumps(params_dict, ensure_ascii=False, default=str)
+        project_root = str(Path(__file__).resolve().parents[2])
+        proc = subprocess.Popen(
+            [sys.executable, "-m", "web.backend.task_runner", task_type, task_id, params_json],
+            cwd=project_root,
+            env={**os.environ, "PYTHONPATH": project_root},
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,  # detach from the backend process group
+        )
+        return proc.pid
+    except Exception as e:
+        print(f"[WARNING] Failed to launch task subprocess {task_id} ({task_type}): {e}")
+        traceback.print_exc()
+        return None
+
+
 def _launch_mining_task(params: GPMiningParams, source: str = "manual") -> str:
     if params.enable_gradient_descent:
         from factors.gp_gradient_descent_config import validate_gradient_descent_fitness_indicators, NON_DIFFERENTIABLE_GP_FITNESS_HINT
@@ -1695,7 +1737,6 @@ def _launch_mining_task(params: GPMiningParams, source: str = "manual") -> str:
             )
 
     task_id = str(uuid.uuid4())[:8]
-    cancel_event = threading.Event()
     params_dict = params.dict()
     params_dict["submit_source"] = source
     tasks[task_id] = {
@@ -1708,54 +1749,27 @@ def _launch_mining_task(params: GPMiningParams, source: str = "manual") -> str:
         "result": None,
         "result_overview": None,
         "error": None,
-        "cancel_event": cancel_event,
+        "cancel_event": None,  # subprocess has its own cancel_event
         "logs": [],
+        "pid": None,
     }
     _save_task_to_db(task_id, params_dict, "running", {"message": "任务已提交"}, task_type=TASK_TYPE_GP)
 
-    def _run_sync():
-        try:
-            result = _execute_mining(params, task_id, cancel_event)
-            if tasks[task_id]["status"] == "terminated":
-                tasks[task_id]["result"] = result
-                tasks[task_id]["result_overview"] = _build_mining_result_overview(result)
-                _save_task_to_db(task_id, params_dict, "terminated", {
-                    "selected_fc_name_list": result.get("selected_fc_name_list", []),
-                    "version": result.get("version", ""),
-                    "message": result.get("message", "Task terminated by user."),
-                    "config_path": result.get("config_path"),
-                    "factor_formulas": result.get("factor_formulas", {}),
-                    "best_failed_indicator_metrics": result.get("best_failed_indicator_metrics"),
-                    "result_overview": tasks[task_id]["result_overview"],
-                }, task_type=TASK_TYPE_GP, result=result)
-                return
-
-            tasks[task_id]["result"] = result
-            tasks[task_id]["result_overview"] = _build_mining_result_overview(result)
-            tasks[task_id]["status"] = "completed"
-            tasks[task_id]["progress"] = "完成"
-            tasks[task_id]["finished_at"] = datetime.now().isoformat()
-            _save_task_to_db(task_id, params_dict, "completed", {
-                "selected_fc_name_list": result.get("selected_fc_name_list", []),
-                "version": result.get("version", ""),
-                "message": result.get("message", ""),
-                "config_path": result.get("config_path"),
-                "factor_formulas": result.get("factor_formulas", {}),
-                "best_failed_indicator_metrics": result.get("best_failed_indicator_metrics"),
-                "result_overview": tasks[task_id]["result_overview"],
-            }, task_type=TASK_TYPE_GP, result=result)
-        except Exception as e:
-            if tasks[task_id]["status"] == "terminated":
-                tasks[task_id]["progress"] = "已终止（用户手动终止）"
-                tasks[task_id]["finished_at"] = datetime.now().isoformat()
-                return
-            tasks[task_id]["status"] = "failed"
-            tasks[task_id]["error"] = traceback.format_exc()
-            tasks[task_id]["progress"] = f"失败: {str(e)}"
-            tasks[task_id]["finished_at"] = datetime.now().isoformat()
-            _save_task_to_db(task_id, params_dict, "failed", {"error": str(e)}, task_type=TASK_TYPE_GP)
-
-    threading.Thread(target=_run_sync, daemon=True).start()
+    # Run the task in an independent OS subprocess so it survives backend restarts.
+    pid = _launch_task_subprocess(TASK_TYPE_GP, task_id, params_dict)
+    tasks[task_id]["pid"] = pid
+    if pid is None:
+        tasks[task_id]["status"] = "failed"
+        tasks[task_id]["error"] = "Failed to launch task subprocess"
+        tasks[task_id]["progress"] = "子进程启动失败"
+        _save_task_to_db(task_id, params_dict, "failed",
+                         {"error": "Failed to launch task subprocess"},
+                         task_type=TASK_TYPE_GP)
+    else:
+        # Persist pid so a restarted backend can still kill this task.
+        _save_task_to_db(task_id, params_dict, "running",
+                         {"message": "任务已提交", "pid": pid},
+                         task_type=TASK_TYPE_GP)
     return task_id
 
 
@@ -2013,6 +2027,7 @@ def _execute_mining(params: GPMiningParams, task_id: str, cancel_event: threadin
 
 @app.get("/api/mining/status/{task_id}")
 async def mining_status(task_id: str):
+    _refresh_task_from_db(task_id)
     if task_id not in tasks:
         raise HTTPException(status_code=404, detail="Task not found")
     task = tasks[task_id]
@@ -2034,6 +2049,45 @@ async def mining_status(task_id: str):
     return resp
 
 
+def _refresh_task_from_db(task_id: str) -> None:
+    """Refresh the in-memory task snapshot from MongoDB.
+
+    Tasks run in independent OS subprocesses (web.backend.task_runner) that
+    write progress/logs/status to MongoDB.  The FastAPI process holds a
+    lightweight in-memory stub; this helper pulls the latest snapshot from DB
+    so status/detail endpoints reflect the subprocess's live state.
+    """
+    if task_id not in tasks:
+        return
+    row = _load_task_from_db(task_id)
+    if not row:
+        return
+    t = tasks[task_id]
+    for key in ('status', 'progress', 'gp_progress', 'finished_at',
+                'error', 'result', 'result_overview', 'logs', 'pid'):
+        val = row.get(key)
+        if val is not None:
+            t[key] = val
+
+
+def _kill_task_subprocess(task_id: str, pid: Optional[int]) -> None:
+    """Terminate the OS subprocess running a task.
+
+    Tasks now run in standalone subprocesses (web.backend.task_runner), so the
+    cooperative threading.Event cancel mechanism is not shared across the
+    process boundary.  We SIGTERM the subprocess; the task_runner heartbeat
+    detects the DB 'terminated' status and stops cleanly.
+    """
+    if pid:
+        try:
+            os.kill(int(pid), signal.SIGTERM)
+            print(f"[TERMINATE] Sent SIGTERM to task {task_id} pid={pid}")
+        except ProcessLookupError:
+            pass  # subprocess already exited
+        except Exception as e:
+            print(f"[WARNING] Failed to kill task {task_id} pid={pid}: {e}")
+
+
 @app.post("/api/mining/terminate/{task_id}")
 async def terminate_mining(task_id: str):
     # ── Case 1: task lives in memory (current process) ────────────────
@@ -2041,10 +2095,7 @@ async def terminate_mining(task_id: str):
         task = tasks[task_id]
         if task["status"] != "running":
             raise HTTPException(status_code=400, detail=f"Task is not running (status={task['status']})")
-        cancel_event = task.get("cancel_event")
-        if cancel_event is None:
-            raise HTTPException(status_code=400, detail="Task does not support cancellation")
-        cancel_event.set()
+        pid = task.get("pid")
         task["status"] = "terminated"
         task["progress"] = "已终止（用户手动终止）"
         task["finished_at"] = datetime.now().isoformat()
@@ -2056,14 +2107,18 @@ async def terminate_mining(task_id: str):
             task_type=task.get("task_type", TASK_TYPE_GP),
             result=task.get("result"),
         )
+        # Kill the subprocess (if any); DB status 'terminated' makes the
+        # task_runner heartbeat stop the task gracefully.
+        _kill_task_subprocess(task_id, pid)
         return {"task_id": task_id, "status": "terminated", "message": "任务已终止"}
 
-    # ── Case 2: task only exists in DB (e.g. stale after server restart)
+    # ── Case 2: task only exists in DB (e.g. after server restart)
     try:
         df = get_data(database="task", collection=GP_TASK_COLLECTION, mongo_operator={"task_id": task_id})
         if isinstance(df, pd.DataFrame) and not df.empty:
             current_status = str(df.iloc[0].get("status", "") or "")
             if current_status == "running":
+                db_pid = df.iloc[0].get("pid")
                 update_one_data(
                     database="task",
                     collection=GP_TASK_COLLECTION,
@@ -2075,7 +2130,8 @@ async def terminate_mining(task_id: str):
                     },
                     upsert=False,
                 )
-                return {"task_id": task_id, "status": "terminated", "message": "任务已终止（该任务实际已不在运行）"}
+                _kill_task_subprocess(task_id, db_pid)
+                return {"task_id": task_id, "status": "terminated", "message": "任务已终止"}
             else:
                 raise HTTPException(status_code=400, detail=f"Task is not running (status={current_status})")
     except HTTPException:
@@ -2105,6 +2161,7 @@ async def start_llm_mining(params: LLMMiningParams):
 
 @app.get("/api/llm-mining/status/{task_id}")
 async def llm_mining_status(task_id: str):
+    _refresh_task_from_db(task_id)
     if task_id not in tasks:
         raise HTTPException(status_code=404, detail="Task not found")
     task = tasks[task_id]
@@ -2125,12 +2182,15 @@ async def terminate_llm_mining(task_id: str):
         task = tasks[task_id]
         if task.get("status") != "running":
             raise HTTPException(status_code=400, detail="Task is not running")
-        cancel_event = task.get("cancel_event")
-        if cancel_event:
-            cancel_event.set()
+        pid = task.get("pid")
         task["status"] = "terminated"
         task["progress"] = "已终止（用户手动终止）"
         task["finished_at"] = datetime.now().isoformat()
+        _save_task_to_db(task_id, task.get("params", {}), "terminated",
+                         {"message": "用户手动终止"},
+                         task_type=task.get("task_type", TASK_TYPE_LLM),
+                         result=task.get("result"))
+        _kill_task_subprocess(task_id, pid)
         return {"task_id": task_id, "status": "terminated"}
     raise HTTPException(status_code=404, detail="Task not found")
 
@@ -2147,7 +2207,6 @@ def _launch_llm_mining_task(params: LLMMiningParams) -> str:
             raise HTTPException(status_code=400, detail=f"已有相同版本正在运行: version={req_version}")
 
     task_id = str(uuid.uuid4())[:8]
-    cancel_event = threading.Event()
     params_dict = params.dict()
     tasks[task_id] = {
         "task_type": TASK_TYPE_LLM,
@@ -2157,34 +2216,26 @@ def _launch_llm_mining_task(params: LLMMiningParams) -> str:
         "progress": "初始化中...",
         "result": None,
         "error": None,
-        "cancel_event": cancel_event,
+        "cancel_event": None,  # subprocess has its own cancel_event
         "logs": [],
+        "pid": None,
     }
+    _save_task_to_db(task_id, params_dict, "running", {"message": "任务已提交"}, task_type=TASK_TYPE_LLM)
 
-    def _run_sync():
-        from utils.logging import log as lionet_logger
-        handler = _GPProgressHandler(task_id=task_id, owner_thread_id=threading.get_ident())
-        lionet_logger.addHandler(handler)
-        try:
-            result = _execute_llm_mining(params, task_id, cancel_event)
-            if tasks[task_id]["status"] == "terminated":
-                tasks[task_id]["result"] = result
-                return
-            tasks[task_id]["result"] = result
-            tasks[task_id]["status"] = "completed"
-            tasks[task_id]["progress"] = "完成"
-            tasks[task_id]["finished_at"] = datetime.now().isoformat()
-        except Exception as e:
-            if tasks[task_id]["status"] == "terminated":
-                return
-            tasks[task_id]["status"] = "failed"
-            tasks[task_id]["error"] = traceback.format_exc()
-            tasks[task_id]["progress"] = f"失败: {str(e)}"
-            tasks[task_id]["finished_at"] = datetime.now().isoformat()
-        finally:
-            lionet_logger.removeHandler(handler)
-
-    threading.Thread(target=_run_sync, daemon=True).start()
+    # Run in an independent OS subprocess so it survives backend restarts.
+    pid = _launch_task_subprocess(TASK_TYPE_LLM, task_id, params_dict)
+    tasks[task_id]["pid"] = pid
+    if pid is None:
+        tasks[task_id]["status"] = "failed"
+        tasks[task_id]["error"] = "Failed to launch task subprocess"
+        tasks[task_id]["progress"] = "子进程启动失败"
+        _save_task_to_db(task_id, params_dict, "failed",
+                         {"error": "Failed to launch task subprocess"},
+                         task_type=TASK_TYPE_LLM)
+    else:
+        _save_task_to_db(task_id, params_dict, "running",
+                         {"message": "任务已提交", "pid": pid},
+                         task_type=TASK_TYPE_LLM)
     return task_id
 
 
@@ -2507,68 +2558,42 @@ async def update_fusion_indicator_options(body: Dict[str, Any]):
 @app.post('/api/fusion/start')
 async def start_fusion(params: FusionParams):
     task_id = str(uuid.uuid4())[:8]
+    params_dict = params.dict()
     tasks[task_id] = {
         "task_type": TASK_TYPE_FUSION,
         "status": "running",
         "started_at": datetime.now().isoformat(),
-        "params": params.dict(),
+        "params": params_dict,
         "progress": "初始化融合任务...",
         "gp_progress": None,
         "result": None,
         "result_overview": None,
         "error": None,
         "logs": [],
+        "pid": None,
     }
-    _save_task_to_db(task_id, params.dict(), "running", {"message": "融合任务已提交"}, task_type=TASK_TYPE_FUSION)
+    _save_task_to_db(task_id, params_dict, "running", {"message": "融合任务已提交"}, task_type=TASK_TYPE_FUSION)
 
-    async def _run():
-        try:
-            tasks[task_id]["progress"] = "正在执行融合计算..."
-            loop = asyncio.get_event_loop()
-            result = await loop.run_in_executor(None, _execute_fusion, params, task_id)
-            tasks[task_id]["result"] = result
-            tasks[task_id]["result_overview"] = _build_fusion_result_overview(result)
-            tasks[task_id]["status"] = "completed"
-            tasks[task_id]["progress"] = "完成"
-            tasks[task_id]["finished_at"] = datetime.now().isoformat()
-            _save_task_to_db(
-                task_id,
-                params.dict(),
-                "completed",
-                {
-                    "version": result.get("version", ""),
-                    "collection": result.get("collection"),
-                    "persisted": result.get("persisted"),
-                    "fusion_factor_name": result.get("fusion_factor_name"),
-                    "fusion_formula": result.get("fusion_formula"),
-                    "final_metrics": result.get("final_metrics"),
-                    "selected_factors_detail": result.get("selected_factors_detail", []),
-                    "result_overview": tasks[task_id]["result_overview"],
-                },
-                task_type=TASK_TYPE_FUSION,
-                result=result,
-            )
-        except Exception as e:
-            tasks[task_id]["status"] = "failed"
-            tasks[task_id]["error"] = traceback.format_exc()
-            tasks[task_id]["progress"] = f"失败: {str(e)}"
-            tasks[task_id]["finished_at"] = datetime.now().isoformat()
-            _save_task_to_db(
-                task_id,
-                params.dict(),
-                "failed",
-                {"error": str(e)},
-                task_type=TASK_TYPE_FUSION,
-            )
-        finally:
-            pass
-
-    asyncio.create_task(_run())
+    # Run in an independent OS subprocess so it survives backend restarts.
+    pid = _launch_task_subprocess(TASK_TYPE_FUSION, task_id, params_dict)
+    tasks[task_id]["pid"] = pid
+    if pid is None:
+        tasks[task_id]["status"] = "failed"
+        tasks[task_id]["error"] = "Failed to launch task subprocess"
+        tasks[task_id]["progress"] = "子进程启动失败"
+        _save_task_to_db(task_id, params_dict, "failed",
+                         {"error": "Failed to launch task subprocess"},
+                         task_type=TASK_TYPE_FUSION)
+    else:
+        _save_task_to_db(task_id, params_dict, "running",
+                         {"message": "融合任务已提交", "pid": pid},
+                         task_type=TASK_TYPE_FUSION)
     return {"task_id": task_id, "task_type": TASK_TYPE_FUSION, "status": "running"}
 
 
 @app.get('/api/fusion/status/{task_id}')
 async def fusion_status(task_id: str):
+    _refresh_task_from_db(task_id)
     if task_id not in tasks:
         raise HTTPException(status_code=404, detail="Task not found")
     task = tasks[task_id]
@@ -2938,23 +2963,9 @@ async def list_tasks(start_date: Optional[str] = None, end_date: Optional[str] =
                         continue
                     db_status = _sanitize_nan(row.get("status"), "unknown")
                     db_progress = _sanitize_nan(row.get("progress"), "")
-                    if db_status == "running":
-                        db_status = "interrupted"
-                        db_progress = "服务重启，任务已中断"
-                        try:
-                            update_one_data(
-                                database="task",
-                                collection=collection,
-                                mongo_operator={"task_id": tid},
-                                data={
-                                    "status": "interrupted",
-                                    "progress": db_progress,
-                                    "finished_at": datetime.now().isoformat(),
-                                },
-                                upsert=False,
-                            )
-                        except Exception:
-                            pass
+                    # NOTE: with the subprocess task runner, a 'running' task in
+                    # DB may still be executing in an independent OS subprocess.
+                    # Keep the status so the frontend can monitor it.
                     params_val = _sanitize_nan(row.get("params"))
                     _upsert_task_row({
                         "task_id": tid,
@@ -2981,23 +2992,7 @@ async def list_tasks(start_date: Optional[str] = None, end_date: Optional[str] =
                 if not tid or tid in task_map:
                     continue
                 status_val = str(_sanitize_nan(row.get("status"), "unknown") or "unknown")
-                if status_val == "running":
-                    status_val = "interrupted"
-                    try:
-                        update_one_data(
-                            database="task",
-                            collection=MARKET_DATA_TASK_COLLECTION,
-                            mongo_operator={"task_id": tid},
-                            data={
-                                "status": "interrupted",
-                                "error": "服务重启，任务已中断",
-                                "finished_at": datetime.now().isoformat(),
-                                "updated_at": datetime.now().isoformat(),
-                            },
-                            upsert=False,
-                        )
-                    except Exception:
-                        pass
+                # Keep running status for subprocess-executed tasks.
                 logs_val = _sanitize_nan(row.get("logs"), [])
                 error_val = _sanitize_nan(row.get("error"))
                 progress_val = str(logs_val[-1]) if isinstance(logs_val, list) and logs_val else str(error_val or status_val)
@@ -3049,6 +3044,7 @@ async def list_tasks(start_date: Optional[str] = None, end_date: Optional[str] =
 @app.get("/api/tasks/detail/{task_id}")
 async def get_task_detail(task_id: str):
     """Get full task detail including params, from memory or DB."""
+    _refresh_task_from_db(task_id)
     if task_id in tasks:
         task = tasks[task_id]
         return {
@@ -3090,28 +3086,12 @@ async def get_task_detail(task_id: str):
     try:
         row = _load_task_from_db(task_id)
         if row:
-            # Sanitize NaN values from pandas to prevent JSON serialization errors
-            # Self-heal: if DB says "running" but task is not in memory, it's dead.
+            # Sanitize NaN values from pandas to prevent JSON serialization errors.
+            # NOTE: with the subprocess task runner, a 'running' DB task may
+            # still be executing in an independent OS subprocess — keep status.
             db_status = row.get("status") or "unknown"
             db_task_type = row.get("task_type") or TASK_TYPE_GP
             db_collection = _task_collection(db_task_type)
-            if db_status == "running":
-                db_status = "interrupted"
-                row["progress"] = "服务重启，任务已中断"
-                try:
-                    update_one_data(
-                        database="task",
-                        collection=db_collection,
-                        mongo_operator={"task_id": task_id},
-                        data={
-                            "status": "interrupted",
-                            "progress": row["progress"],
-                            "finished_at": datetime.now().isoformat(),
-                        },
-                        upsert=False,
-                    )
-                except Exception:
-                    pass
             result_summary = row.get("result_summary")
             logs_val = row.get("logs")
             return {
@@ -3501,32 +3481,24 @@ async def get_market_data_config():
 async def api_update_info(params: UpdateInfoParams):
     """Update continuous contract info."""
     task_id = f"info_{uuid.uuid4().hex[:8]}"
+    params_dict = params.dict()
+    params_dict["type"] = "update-info"
     market_data_tasks[task_id] = {
         "type": "update-info", "status": "running",
         "started_at": datetime.now().isoformat(), "logs": [],
-        "params": params.dict(),
+        "params": params_dict,
+        "cancel_event": threading.Event(),
+        "pid": None,
     }
     _save_market_data_task_to_db(task_id)
 
-    def _run():
-        from utils.logging import log as lionet_logger
-        handler = _MarketDataLogHandler(task_id)
-        lionet_logger.addHandler(handler)
-        try:
-            lionet_logger.info(f'合约信息更新任务启动: method={params.method}')
-            update_futures_continuous_contract_info(method=params.method)
-            lionet_logger.info('合约信息更新任务完成')
-            market_data_tasks[task_id]["status"] = "completed"
-        except Exception as e:
-            market_data_tasks[task_id]["status"] = "failed"
-            market_data_tasks[task_id]["error"] = str(e)
-            lionet_logger.error(f'合约信息更新失败: {e}')
-        finally:
-            market_data_tasks[task_id]["finished_at"] = datetime.now().isoformat()
-            _save_market_data_task_to_db(task_id)
-            lionet_logger.removeHandler(handler)
-
-    threading.Thread(target=_run, daemon=True).start()
+    # Run in an independent OS subprocess so it survives backend restarts.
+    pid = _launch_task_subprocess(TASK_TYPE_MARKET_DATA, task_id, params_dict, is_market=True)
+    market_data_tasks[task_id]["pid"] = pid
+    if pid is None:
+        market_data_tasks[task_id]["status"] = "failed"
+        market_data_tasks[task_id]["error"] = "Failed to launch task subprocess"
+    _save_market_data_task_to_db(task_id)
     return {"task_id": task_id, "message": "合约信息更新任务已启动"}
 
 
@@ -3534,70 +3506,24 @@ async def api_update_info(params: UpdateInfoParams):
 async def api_update_price(params: UpdatePriceParams):
     """Update continuous contract price data (async task)."""
     task_id = f"price_{uuid.uuid4().hex[:8]}"
+    params_dict = params.dict()
+    params_dict["type"] = "update-price"
     market_data_tasks[task_id] = {
         "type": "update-price", "status": "running",
         "started_at": datetime.now().isoformat(), "logs": [],
-        "params": params.dict(),
+        "params": params_dict,
         "cancel_event": threading.Event(),
+        "pid": None,
     }
     _save_market_data_task_to_db(task_id)
 
-    def _run():
-        from utils.logging import log as lionet_logger
-        handler = _MarketDataLogHandler(task_id)
-        lionet_logger.addHandler(handler)
-        try:
-            effective_start_date = params.start_date or RESEARCH_START_DATE
-            cancel_event = market_data_tasks[task_id].get("cancel_event")
-            lionet_logger.info(
-                f'价格数据更新任务启动: source={params.source}, instrument_id={params.instrument_id}, '
-                f'start_date={effective_start_date}, end_date={params.end_date}, '
-                f'load_prev_weighted_factor={params.load_prev_weighted_factor}, '
-                f'wait_time={params.wait_time}, method={params.method}, '
-                f'only_update_new={params.only_update_new}'
-            )
-            if params.source in ("joinquant", "tqsdk_edb"):
-                # 从分钟频库(joinquant 或天勤 tqsdk_edb)聚合为日频写入日频库, 不覆盖 akshare
-                update_futures_continuous_contract_price_from_minute(
-                    instrument_id=params.instrument_id,
-                    start_date=params.start_date,
-                    end_date=params.end_date,
-                    method=params.method,
-                    cancel_event=cancel_event,
-                    source=params.source,
-                )
-            else:
-                # 原 akshare 日频更新
-                update_futures_continuous_contract_price(
-                    instrument_id=params.instrument_id,
-                    start_date=effective_start_date,
-                    end_date=params.end_date,
-                    load_prev_weighted_factor=params.load_prev_weighted_factor,
-                    wait_time=params.wait_time,
-                    method=params.method,
-                    only_update_new=params.only_update_new,
-                    cancel_event=cancel_event,
-                )
-            if market_data_tasks[task_id].get("status") == "terminated":
-                lionet_logger.warning('价格数据更新任务已被终止')
-                return
-            lionet_logger.info('价格数据更新任务完成')
-            market_data_tasks[task_id]["status"] = "completed"
-        except UpdateCancelledError as e:
-            market_data_tasks[task_id]["status"] = "terminated"
-            market_data_tasks[task_id]["error"] = str(e)
-            lionet_logger.warning(f'价格数据更新任务已终止: {e}')
-        except Exception as e:
-            market_data_tasks[task_id]["status"] = "failed"
-            market_data_tasks[task_id]["error"] = str(e)
-            lionet_logger.error(f'价格数据更新任务失败: {e}')
-            traceback.print_exc()
-        finally:
-            market_data_tasks[task_id]["finished_at"] = datetime.now().isoformat()
-            _save_market_data_task_to_db(task_id)
-            lionet_logger.removeHandler(handler)
-
-    threading.Thread(target=_run, daemon=True).start()
+    # Run in an independent OS subprocess so it survives backend restarts.
+    pid = _launch_task_subprocess(TASK_TYPE_MARKET_DATA, task_id, params_dict, is_market=True)
+    market_data_tasks[task_id]["pid"] = pid
+    if pid is None:
+        market_data_tasks[task_id]["status"] = "failed"
+        market_data_tasks[task_id]["error"] = "Failed to launch task subprocess"
+    _save_market_data_task_to_db(task_id)
     return {"task_id": task_id, "message": "价格数据更新任务已启动"}
 
 
@@ -3605,55 +3531,24 @@ async def api_update_price(params: UpdatePriceParams):
 async def api_update_price_1min(params: UpdatePrice1minParams):
     """更新分钟连续合约价格(天勤EDB免费接口近1年分钟线, 异步任务)。"""
     task_id = f"price1min_{uuid.uuid4().hex[:8]}"
+    params_dict = params.dict()
+    params_dict["type"] = "update-price-1min"
     market_data_tasks[task_id] = {
         "type": "update-price-1min", "status": "running",
         "started_at": datetime.now().isoformat(), "logs": [],
-        "params": params.dict(),
+        "params": params_dict,
         "cancel_event": threading.Event(),
+        "pid": None,
     }
     _save_market_data_task_to_db(task_id)
 
-    def _run():
-        from utils.logging import log as lionet_logger
-        handler = _MarketDataLogHandler(task_id)
-        lionet_logger.addHandler(handler)
-        try:
-            cancel_event = market_data_tasks[task_id].get("cancel_event")
-            lionet_logger.info(
-                f'分钟价格数据更新任务启动: instrument_id={params.instrument_id}, '
-                f'start_date={params.start_date}, end_date={params.end_date}, '
-                f'wait_time={params.wait_time}, method={params.method}'
-            )
-            update_futures_continuous_contract_price_1min(
-                instrument_id=params.instrument_id,
-                start_date=params.start_date,
-                end_date=params.end_date,
-                wait_time=params.wait_time,
-                method=params.method,
-                cancel_event=cancel_event,
-                source=params.source,
-                load_prev_weighted_factor=params.load_prev_weighted_factor,
-            )
-            if market_data_tasks[task_id].get("status") == "terminated":
-                lionet_logger.warning('分钟价格数据更新任务已被终止')
-                return
-            lionet_logger.info('分钟价格数据更新任务完成')
-            market_data_tasks[task_id]["status"] = "completed"
-        except UpdateCancelledError as e:
-            market_data_tasks[task_id]["status"] = "terminated"
-            market_data_tasks[task_id]["error"] = str(e)
-            lionet_logger.warning(f'分钟价格数据更新任务已终止: {e}')
-        except Exception as e:
-            market_data_tasks[task_id]["status"] = "failed"
-            market_data_tasks[task_id]["error"] = str(e)
-            lionet_logger.error(f'分钟价格数据更新任务失败: {e}')
-            traceback.print_exc()
-        finally:
-            market_data_tasks[task_id]["finished_at"] = datetime.now().isoformat()
-            _save_market_data_task_to_db(task_id)
-            lionet_logger.removeHandler(handler)
-
-    threading.Thread(target=_run, daemon=True).start()
+    # Run in an independent OS subprocess so it survives backend restarts.
+    pid = _launch_task_subprocess(TASK_TYPE_MARKET_DATA, task_id, params_dict, is_market=True)
+    market_data_tasks[task_id]["pid"] = pid
+    if pid is None:
+        market_data_tasks[task_id]["status"] = "failed"
+        market_data_tasks[task_id]["error"] = "Failed to launch task subprocess"
+    _save_market_data_task_to_db(task_id)
     return {"task_id": task_id, "message": "分钟价格数据更新任务已启动"}
 
 
@@ -3675,56 +3570,24 @@ async def api_update_price_1min_csv(params: UpdatePrice1minCsvParams):
         raise HTTPException(status_code=400, detail=f"补 CSV 不存在: {fix_csv}")
 
     task_id = f"price1mincsv_{uuid.uuid4().hex[:8]}"
+    params_dict = params.dict()
+    params_dict["type"] = "update-price-1min-csv"
     market_data_tasks[task_id] = {
         "type": "update-price-1min-csv", "status": "running",
         "started_at": datetime.now().isoformat(), "logs": [],
-        "params": params.dict(),
+        "params": params_dict,
         "cancel_event": threading.Event(),
+        "pid": None,
     }
     _save_market_data_task_to_db(task_id)
 
-    def _run():
-        from utils.logging import log as lionet_logger
-        handler = _MarketDataLogHandler(task_id)
-        lionet_logger.addHandler(handler)
-        try:
-            cancel_event = market_data_tasks[task_id].get("cancel_event")
-            lionet_logger.info(
-                f'分钟 CSV 导入任务启动: instrument_id={params.instrument_id}, '
-                f'source={params.source}, main_csv={params.main_csv}, '
-                f'fix_csv={params.fix_csv}, '
-                f'load_prev_weighted_factor={params.load_prev_weighted_factor}'
-            )
-            result = import_1min_csv_to_db(
-                main_csv=params.main_csv,
-                fix_csv=params.fix_csv,
-                instrument_id=params.instrument_id,
-                source=params.source,
-                method=params.method,
-                load_prev_weighted_factor=params.load_prev_weighted_factor,
-                cancel_event=cancel_event,
-            )
-            if market_data_tasks[task_id].get("status") == "terminated":
-                lionet_logger.warning('分钟 CSV 导入任务已被终止')
-                return
-            market_data_tasks[task_id]["status"] = "completed"
-            market_data_tasks[task_id]["result"] = result
-            lionet_logger.info(f'分钟 CSV 导入完成: {result.get("message", "")}')
-        except UpdateCancelledError as e:
-            market_data_tasks[task_id]["status"] = "terminated"
-            market_data_tasks[task_id]["error"] = str(e)
-            lionet_logger.warning(f'分钟 CSV 导入任务已终止: {e}')
-        except Exception as e:
-            market_data_tasks[task_id]["status"] = "failed"
-            market_data_tasks[task_id]["error"] = str(e)
-            lionet_logger.error(f'分钟 CSV 导入任务失败: {e}')
-            traceback.print_exc()
-        finally:
-            market_data_tasks[task_id]["finished_at"] = datetime.now().isoformat()
-            _save_market_data_task_to_db(task_id)
-            lionet_logger.removeHandler(handler)
-
-    threading.Thread(target=_run, daemon=True).start()
+    # Run in an independent OS subprocess so it survives backend restarts.
+    pid = _launch_task_subprocess(TASK_TYPE_MARKET_DATA, task_id, params_dict, is_market=True)
+    market_data_tasks[task_id]["pid"] = pid
+    if pid is None:
+        market_data_tasks[task_id]["status"] = "failed"
+        market_data_tasks[task_id]["error"] = "Failed to launch task subprocess"
+    _save_market_data_task_to_db(task_id)
     return {"task_id": task_id, "message": "分钟 CSV 导入任务已启动"}
 
 
@@ -3849,41 +3712,42 @@ async def api_check_prev_data(params: CheckPrevDataParams):
 
 @app.post("/api/market-data/terminate/{task_id}")
 async def api_terminate_market_data_task(task_id: str):
-    """Terminate one running market-data task (currently used by update-price)."""
+    """Terminate one running market-data task."""
     if task_id in market_data_tasks:
         task = market_data_tasks[task_id]
         if task.get("status") != "running":
             raise HTTPException(status_code=400, detail=f"Task is not running (status={task.get('status')})")
-        cancel_event = task.get("cancel_event")
-        if cancel_event is not None:
-            cancel_event.set()
+        pid = task.get("pid")
         task["status"] = "terminated"
         task["error"] = "用户手动终止"
         logs = task.setdefault("logs", [])
         logs.append(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} - WARNING - 用户手动终止任务")
         task["finished_at"] = datetime.now().isoformat()
         _save_market_data_task_to_db(task_id)
+        _kill_task_subprocess(task_id, pid)
         return {"task_id": task_id, "status": "terminated", "message": "任务已终止"}
 
-    # DB fallback: stale running task after restart -> interrupted
+    # DB fallback: task running in a subprocess after server restart.
     try:
         df = get_data(database="task", collection=MARKET_DATA_TASK_COLLECTION, mongo_operator={"task_id": task_id})
         if isinstance(df, pd.DataFrame) and not df.empty:
             status_val = str(df.iloc[0].get("status", "") or "")
             if status_val == "running":
+                db_pid = df.iloc[0].get("pid")
                 update_one_data(
                     database="task",
                     collection=MARKET_DATA_TASK_COLLECTION,
                     mongo_operator={"task_id": task_id},
                     data={
-                        "status": "interrupted",
-                        "error": "服务重启，任务已中断",
+                        "status": "terminated",
+                        "error": "用户手动终止",
                         "finished_at": datetime.now().isoformat(),
                         "updated_at": datetime.now().isoformat(),
                     },
                     upsert=False,
                 )
-                return {"task_id": task_id, "status": "interrupted", "message": "服务重启，任务已中断"}
+                _kill_task_subprocess(task_id, db_pid)
+                return {"task_id": task_id, "status": "terminated", "message": "任务已终止"}
             raise HTTPException(status_code=400, detail=f"Task is not running (status={status_val})")
     except HTTPException:
         raise
@@ -3957,23 +3821,7 @@ async def api_market_data_logs(
                     continue
                 logs_val = _sanitize_nan(row.get("logs"), [])
                 status_val = str(_sanitize_nan(row.get("status"), "unknown") or "unknown")
-                if status_val == 'running':
-                    status_val = 'interrupted'
-                    try:
-                        update_one_data(
-                            database="task",
-                            collection=MARKET_DATA_TASK_COLLECTION,
-                            mongo_operator={"task_id": task_id_val},
-                            data={
-                                "status": "interrupted",
-                                "error": "服务重启，任务已中断",
-                                "finished_at": datetime.now().isoformat(),
-                                "updated_at": datetime.now().isoformat(),
-                            },
-                            upsert=False,
-                        )
-                    except Exception:
-                        pass
+                # Keep running status for subprocess-executed tasks.
                 merged[task_id_val] = {
                     "task_id": task_id_val,
                     "task_type": str(_sanitize_nan(row.get("task_type"), "") or ""),
