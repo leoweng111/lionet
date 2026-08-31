@@ -2901,6 +2901,13 @@ async def list_tasks(start_date: Optional[str] = None, end_date: Optional[str] =
 
     task_map: Dict[str, Dict[str, Any]] = {}
 
+    # Tasks run in independent OS subprocesses (web.backend.task_runner) that
+    # write progress/logs to MongoDB.  Refresh running tasks from DB so the
+    # task list shows live progress instead of the stale in-memory stub.
+    for tid in list(tasks.keys()):
+        if tasks[tid].get("status") == "running":
+            _refresh_task_from_db(tid)
+
     def _market_progress(item: Dict[str, Any]) -> str:
         logs = list(item.get("logs") or [])
         if logs:
