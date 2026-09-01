@@ -15,13 +15,14 @@ const api = axios.create({
 // loop is temporarily blocked by sync DB calls.
 const healthApi = axios.create({
   baseURL: apiBaseURL,
-  timeout: 5000,
+  timeout: 8000,
 })
 
 // ngrok free public endpoint may return browser warning page (ERR_NGROK_6024)
 // for browser-like requests. This header bypasses that page for API calls.
 if (isNgrokPublicDomain) {
   api.defaults.headers.common['ngrok-skip-browser-warning'] = 'true'
+  healthApi.defaults.headers.common['ngrok-skip-browser-warning'] = 'true'
 }
 
 // ── Versions & Factors ────────────────────────────────

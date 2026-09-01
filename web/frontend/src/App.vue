@@ -69,20 +69,44 @@ const menuRoutes = [
 
 const backendOk = ref(false)
 let healthTimer = null
+let healthCheckInFlight = false
+let consecutiveHealthFailures = 0
+
+const HEALTH_CHECK_INTERVAL_MS = 10000
+const HEALTH_RETRY_DELAY_MS = 800
+const HEALTH_FAIL_THRESHOLD = 3
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 
 
 const checkHealth = async () => {
+  if (healthCheckInFlight) return
+  healthCheckInFlight = true
   try {
     await getHealth()
+    consecutiveHealthFailures = 0
     backendOk.value = true
   } catch {
-    backendOk.value = false
+    // Retry once to absorb short transient blips.
+    try {
+      await sleep(HEALTH_RETRY_DELAY_MS)
+      await getHealth()
+      consecutiveHealthFailures = 0
+      backendOk.value = true
+    } catch {
+      consecutiveHealthFailures += 1
+      if (consecutiveHealthFailures >= HEALTH_FAIL_THRESHOLD) {
+        backendOk.value = false
+      }
+    }
+  } finally {
+    healthCheckInFlight = false
   }
 }
 
 onMounted(() => {
   checkHealth()
-  healthTimer = setInterval(checkHealth, 10000)
+  healthTimer = setInterval(checkHealth, HEALTH_CHECK_INTERVAL_MS)
 })
 onUnmounted(() => {
   if (healthTimer) clearInterval(healthTimer)
