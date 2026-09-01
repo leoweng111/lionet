@@ -10,6 +10,14 @@ const api = axios.create({
   timeout: 600000, // 10 min for long-running tasks
 })
 
+// Health check uses a short timeout so the "后端已连接/未连接" indicator
+// reacts quickly instead of hanging for 10 minutes when the backend event
+// loop is temporarily blocked by sync DB calls.
+const healthApi = axios.create({
+  baseURL: apiBaseURL,
+  timeout: 5000,
+})
+
 // ngrok free public endpoint may return browser warning page (ERR_NGROK_6024)
 // for browser-like requests. This header bypasses that page for API calls.
 if (isNgrokPublicDomain) {
@@ -64,7 +72,7 @@ export const getTasks = (params) => api.get('/api/tasks', { params })
 export const getTaskDetail = (taskId) => api.get(`/api/tasks/detail/${taskId}`)
 
 // ── Health ────────────────────────────────────────────
-export const getHealth = () => api.get('/api/health')
+export const getHealth = () => healthApi.get('/api/health')
 
 // ── Market Data Management ────────────────────────────
 export const getInstrumentIds = () => api.get('/api/market-data/instrument-ids')

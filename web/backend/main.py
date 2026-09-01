@@ -2028,7 +2028,11 @@ def _execute_mining(params: GPMiningParams, task_id: str, cancel_event: threadin
 
 @app.get("/api/mining/status/{task_id}")
 async def mining_status(task_id: str):
-    _refresh_task_from_db(task_id)
+    loop = asyncio.get_event_loop()
+    try:
+        await loop.run_in_executor(None, _refresh_task_from_db, task_id)
+    except Exception:
+        pass
     if task_id not in tasks:
         raise HTTPException(status_code=404, detail="Task not found")
     task = tasks[task_id]
@@ -2162,7 +2166,11 @@ async def start_llm_mining(params: LLMMiningParams):
 
 @app.get("/api/llm-mining/status/{task_id}")
 async def llm_mining_status(task_id: str):
-    _refresh_task_from_db(task_id)
+    loop = asyncio.get_event_loop()
+    try:
+        await loop.run_in_executor(None, _refresh_task_from_db, task_id)
+    except Exception:
+        pass
     if task_id not in tasks:
         raise HTTPException(status_code=404, detail="Task not found")
     task = tasks[task_id]
@@ -2594,7 +2602,11 @@ async def start_fusion(params: FusionParams):
 
 @app.get('/api/fusion/status/{task_id}')
 async def fusion_status(task_id: str):
-    _refresh_task_from_db(task_id)
+    loop = asyncio.get_event_loop()
+    try:
+        await loop.run_in_executor(None, _refresh_task_from_db, task_id)
+    except Exception:
+        pass
     if task_id not in tasks:
         raise HTTPException(status_code=404, detail="Task not found")
     task = tasks[task_id]
@@ -2905,9 +2917,15 @@ async def list_tasks(start_date: Optional[str] = None, end_date: Optional[str] =
     # Tasks run in independent OS subprocesses (web.backend.task_runner) that
     # write progress/logs to MongoDB.  Refresh running tasks from DB so the
     # task list shows live progress instead of the stale in-memory stub.
+    # The DB reads are sync pymongo calls, so run them in a thread pool to
+    # avoid blocking the event loop (which would stall /api/health too).
+    loop = asyncio.get_event_loop()
     for tid in list(tasks.keys()):
         if tasks[tid].get("status") == "running":
-            _refresh_task_from_db(tid)
+            try:
+                await loop.run_in_executor(None, _refresh_task_from_db, tid)
+            except Exception:
+                pass
 
     def _market_progress(item: Dict[str, Any]) -> str:
         logs = list(item.get("logs") or [])
@@ -3052,7 +3070,11 @@ async def list_tasks(start_date: Optional[str] = None, end_date: Optional[str] =
 @app.get("/api/tasks/detail/{task_id}")
 async def get_task_detail(task_id: str):
     """Get full task detail including params, from memory or DB."""
-    _refresh_task_from_db(task_id)
+    loop = asyncio.get_event_loop()
+    try:
+        await loop.run_in_executor(None, _refresh_task_from_db, task_id)
+    except Exception:
+        pass
     if task_id in tasks:
         task = tasks[task_id]
         return {
