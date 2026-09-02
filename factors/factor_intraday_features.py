@@ -446,7 +446,9 @@ def compute_intraday_daily_features(
     df = df.dropna(subset=['time'])
 
     if instrument_id_list is not None:
-        df = df[df['instrument_id'].isin(list(instrument_id_list))]
+        if isinstance(instrument_id_list, str):
+            instrument_id_list = [instrument_id_list]
+        df = df[df['instrument_id'].isin(instrument_id_list)]
 
     # Assign trading day (night session → next trading day)
     df['td'] = assign_trading_day_1min(df['time'], trading_days=trading_days)

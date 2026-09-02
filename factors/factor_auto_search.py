@@ -1467,9 +1467,11 @@ class LLMPromptFactorGenerator(FactorGenerator):
         factor_df = self.generate_factor_df(self.insample_data, selected_fc_names=selected_fc_name_list)
         self._finalize_generated_data(self.insample_data, factor_df)
 
-        # 生成样本外因子数据
+        # 生成样本外因子数据（复用样本内已挖掘的因子，避免重新挖掘导致 formula map 被覆盖）
+        # 这里样本外的作用仅仅是计算用于fliter_fc_by_threshould中因子入库前的最后筛选
         if self.outsample_data is not None:
-            oos_factor_df = self.generate_factor_df(self.outsample_data, selected_fc_names=selected_fc_name_list)
+            oos_fc_names = selected_fc_name_list or list(self.generated_fc_name_list)
+            oos_factor_df = self.generate_factor_df(self.outsample_data, selected_fc_names=oos_fc_names)
             self._finalize_generated_data(self.outsample_data, oos_factor_df, is_outsample=True)
 
 
@@ -1933,9 +1935,10 @@ class GeneticFactorGenerator(FactorGenerator):
         factor_df = self.generate_factor_df(self.insample_data, selected_fc_names=selected_fc_name_list)
         self._finalize_generated_data(self.insample_data, factor_df)
 
-        # 生成样本外因子数据
+        # 生成样本外因子数据（复用样本内已挖掘的因子，避免重新挖掘导致 formula map 被覆盖）
         if self.outsample_data is not None:
-            oos_factor_df = self.generate_factor_df(self.outsample_data, selected_fc_names=selected_fc_name_list)
+            oos_fc_names = selected_fc_name_list or list(self.generated_fc_name_list)
+            oos_factor_df = self.generate_factor_df(self.outsample_data, selected_fc_names=oos_fc_names)
             self._finalize_generated_data(self.outsample_data, oos_factor_df, is_outsample=True)
 
 
