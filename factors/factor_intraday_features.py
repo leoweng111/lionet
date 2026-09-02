@@ -533,7 +533,7 @@ def extract_intraday_features_from_formula(formula: str) -> List[str]:
     import ast as _ast
 
     try:
-        from factors.factor_ops import INTRADAY_FEATURE_OP_MAP
+        from factors.factor_ops import INTRADAY_FEATURE_OP_MAP, INTRADAY_FEATURE_COLUMNS
     except ImportError:
         return []
 
@@ -546,8 +546,11 @@ def extract_intraday_features_from_formula(formula: str) -> List[str]:
         return []
 
     features: set = set()
+    feature_name_set = set(INTRADAY_FEATURE_COLUMNS)
 
     def walk(node):
+        if isinstance(node, _ast.Name) and node.id in feature_name_set:
+            features.add(node.id)
         if isinstance(node, _ast.Call) and isinstance(node.func, _ast.Name):
             op_name = node.func.id
             if op_name in INTRADAY_FEATURE_OP_MAP:

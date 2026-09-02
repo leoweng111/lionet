@@ -222,6 +222,6 @@
   "source": "joinquant",
   "start_time": "20210101",
   "task_count": 1,
-  "version": "20260831_gp_test_intra",
+  "version": "20260901_gp_test_intra",
   "window_learning_rate": 0.15
 }

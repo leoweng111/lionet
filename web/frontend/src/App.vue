@@ -29,8 +29,8 @@
           <span style="font-size:16px; font-weight:600; color:#303133;">Lionet 因子挖掘平台</span>
         </div>
         <div style="display:flex; align-items:center; gap:12px;">
-          <el-tag :type="backendOk ? 'success' : 'danger'" size="small" effect="dark">
-            {{ backendOk ? '后端已连接' : '后端未连接' }}
+          <el-tag :type="backendTagType" size="small" effect="dark">
+            {{ backendStatusText }}
           </el-tag>
         </div>
       </el-header>
@@ -67,7 +67,13 @@ const menuRoutes = [
   { path: '/tasks', meta: { title: '任务管理', icon: 'List' } },
 ]
 
-const backendOk = ref(false)
+const BACKEND_STATUS = {
+  ONLINE: 'online',
+  OFFLINE: 'offline',
+  CHECKING: 'checking',
+}
+
+const backendStatus = ref(BACKEND_STATUS.CHECKING)
 let healthTimer = null
 let healthCheckInFlight = false
 let consecutiveHealthFailures = 0
@@ -78,6 +84,18 @@ const HEALTH_FAIL_THRESHOLD = 3
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 
+const backendTagType = computed(() => {
+  if (backendStatus.value === BACKEND_STATUS.ONLINE) return 'success'
+  if (backendStatus.value === BACKEND_STATUS.OFFLINE) return 'danger'
+  return 'warning'
+})
+
+const backendStatusText = computed(() => {
+  if (backendStatus.value === BACKEND_STATUS.ONLINE) return '后端已连接'
+  if (backendStatus.value === BACKEND_STATUS.OFFLINE) return '后端未连接'
+  return '检测中/抖动中'
+})
+
 
 const checkHealth = async () => {
   if (healthCheckInFlight) return
@@ -85,18 +103,20 @@ const checkHealth = async () => {
   try {
     await getHealth()
     consecutiveHealthFailures = 0
-    backendOk.value = true
+    backendStatus.value = BACKEND_STATUS.ONLINE
   } catch {
     // Retry once to absorb short transient blips.
     try {
       await sleep(HEALTH_RETRY_DELAY_MS)
       await getHealth()
       consecutiveHealthFailures = 0
-      backendOk.value = true
+      backendStatus.value = BACKEND_STATUS.ONLINE
     } catch {
       consecutiveHealthFailures += 1
       if (consecutiveHealthFailures >= HEALTH_FAIL_THRESHOLD) {
-        backendOk.value = false
+        backendStatus.value = BACKEND_STATUS.OFFLINE
+      } else {
+        backendStatus.value = BACKEND_STATUS.CHECKING
       }
     }
   } finally {

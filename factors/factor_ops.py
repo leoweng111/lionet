@@ -1126,7 +1126,12 @@ class OpRollNorm(FactorNode):
         hist = s.shift(1)
         rolling_mean = hist.rolling(self.window, min_periods=self.min_periods).mean()
         rolling_std = hist.rolling(self.window, min_periods=self.min_periods).std()
-        z = (s - rolling_mean) / (rolling_std + self.eps)
+        # Use an adaptive epsilon floor so tiny-magnitude series (common in
+        # intraday-derived factors) are not numerically squashed toward zero.
+        rolling_scale = hist.abs().rolling(self.window, min_periods=self.min_periods).mean()
+        eps_floor = (rolling_scale * self.eps).fillna(self.eps)
+        denom = rolling_std + eps_floor
+        z = (s - rolling_mean) / denom
         return z.clip(-self.clip, self.clip)
 
     def calc(self, df: pd.DataFrame) -> pd.Series:
@@ -1136,7 +1141,7 @@ class OpRollNorm(FactorNode):
         return self._norm_one(s)
 
     def to_formula(self) -> str:
-        return f"OpRollNorm({self.child}, {self.window}, {self.min_periods}, {self.eps:.10g}, {self.clip:.10g})"
+        return f"OpRollNorm({self.child}, {self.window}, {self.min_periods}, {self.eps:.6g}, {self.clip:.6g})"
 
 
 class OpTsCorr(FactorNode):
@@ -1732,7 +1737,7 @@ def get_unary_ops(intraday_features: Optional[Sequence[str]] = None) -> List[Typ
 
 OP_CLASS_BY_NAME: Dict[str, Type[Any]] = {
     cls.__name__.removeprefix('Op'): cls
-    for cls in (BINARY_OPS + UNARY_OPS + UNARY_TS_OPS + BINARY_TS_OPS + TERNARY_WINDOW_TS_OPS + TERNARY_CHILD_OPS + [OpNeg])
+    for cls in (BINARY_OPS + UNARY_OPS + INTRADAY_FEATURE_OPS + UNARY_TS_OPS + BINARY_TS_OPS + TERNARY_WINDOW_TS_OPS + TERNARY_CHILD_OPS + [OpNeg])
 }
 OP_CLASS_BY_NAME['OpRollNorm'] = OpRollNorm
 OP_CLASS_BY_NAME['RollNorm'] = OpRollNorm
@@ -1862,7 +1867,7 @@ def parse_formula_to_node(formula: str,
                 if len(node.args) != 2:
                     raise ValueError(f'{op_name} expects 2 args.')
                 return op_cls(_build(node.args[0]), _build(node.args[1]))
-            if op_cls in UNARY_OPS or op_cls is OpNeg:
+            if op_cls in UNARY_OPS or op_cls in INTRADAY_FEATURE_OPS or op_cls is OpNeg:
                 if len(node.args) != 1:
                     raise ValueError(f'{op_name} expects 1 arg.')
                 return op_cls(_build(node.args[0]))

@@ -208,7 +208,12 @@ def get_factor_records_by_names(fc_name_list: Sequence[str],
     """Read factor metadata from factors DB across multiple collections."""
     if not fc_name_list:
         return pd.DataFrame()
-    target_collections = list(collections) if collections else ['genetic_programming', 'llm_prompt']
+    if collections is None:
+        target_collections = ['genetic_programming', 'llm_prompt']
+    elif isinstance(collections, str):
+        target_collections = [collections]
+    else:
+        target_collections = list(collections)
     all_df: List[pd.DataFrame] = []
     operator = {'factor_name': {'$in': list(fc_name_list)}}
     if versions is not None:

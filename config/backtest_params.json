@@ -2,10 +2,12 @@
   "apply_weighted_price": true,
   "calculate_baseline": true,
   "collection": "genetic_programming",
-  "enable_real_oos": false,
+  "enable_real_oos": true,
   "end_time": "20241231",
   "fc_freq": "1d",
-  "fc_name_list": [],
+  "fc_name_list": [
+    "fac_gp_0003"
+  ],
   "formulaInput": "",
   "inputMode": "db",
   "instrument_id_list": "C0",
@@ -19,6 +21,6 @@
   "real_oos_start": "20260101",
   "risk_free_rate": false,
   "source": "joinquant",
-  "start_time": "20200101",
-  "version": ""
+  "start_time": "20210101",
+  "version": "20260901_gp_test_intra"
 }
