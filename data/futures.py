@@ -1634,7 +1634,9 @@ def read_and_merge_1min_csvs(main_csv: str,
     - 至少一个文件必须存在。
     """
     frames: List[pd.DataFrame] = []
-    for path in [main_csv, fix_csv]:
+    # 主 CSV 在后 concat, 重叠行保留主 CSV(其换月字段 wf 链是权威标度);
+    # 补夜盘 CSV 只用于补充主 CSV 缺失的 bar(无重叠则整行保留)。
+    for path in [fix_csv, main_csv]:
         if path and os.path.exists(path):
             df = pd.read_csv(path)
             if CSV_DATETIME_COL not in df.columns:
@@ -1657,6 +1659,33 @@ def read_and_merge_1min_csvs(main_csv: str,
     log.info(f'[1min-csv] 合并后: {len(merged)} 行, '
              f'范围 {merged[CSV_DATETIME_COL].min()} ~ {merged[CSV_DATETIME_COL].max()}')
     return merged
+
+
+def validate_rollover_fields_consistency(out: pd.DataFrame) -> List[str]:
+    """校验分钟 DataFrame 的换月字段自洽性: wf 变化只允许出现在 symbol 变化日。
+
+    旧版聚宽导出脚本会在个别交易日残留「幽灵换月」(symbol 未变但 weighted_factor
+    跳变到孤岛值), 本函数按交易日检测这类不一致。返回违规交易日(ISO 字符串)列表,
+    为空表示通过。
+    """
+    if out is None or out.empty:
+        return []
+    if 'symbol' not in out.columns or 'weighted_factor' not in out.columns:
+        return []
+    if out['symbol'].astype(str).str.strip().eq('').all():
+        return []  # 无 symbol 信息时无法判断一致性, 跳过
+    _df = out.copy()
+    _df['td'] = assign_trading_day_1min(pd.to_datetime(_df['time']))
+    daily = _df.groupby('td').agg(
+        symbol=('symbol', 'last'),
+        wf=('weighted_factor', 'last'),
+    ).sort_index()
+    if len(daily) < 2:
+        return []
+    wf_chg = daily['wf'].pct_change().abs()
+    sym_chg = daily['symbol'] != daily['symbol'].shift(1)
+    viol = (wf_chg > 1e-6) & (~sym_chg.fillna(False))
+    return [pd.Timestamp(t).date().isoformat() for t in daily.index[viol]]
 
 
 def _to_root_instrument_or_infer(instrument_id: str) -> str:
@@ -1732,6 +1761,17 @@ def build_minute_continuous_df_from_csv(main_csv: str,
         out['is_rollover'] = out['is_rollover'].fillna(False).astype(bool)
         out['weighted_factor'] = pd.to_numeric(out['weighted_factor'], errors='coerce').fillna(1.0)
         out['cur_weighted_factor'] = pd.to_numeric(out['cur_weighted_factor'], errors='coerce').fillna(1.0)
+
+        # ── 换月字段一致性校验: 拒绝带幽灵 wf 的 CSV(symbol 未变但 wf 突变) ──
+        violations = validate_rollover_fields_consistency(out)
+        if violations:
+            shown = ', '.join(violations[:10]) + ('...' if len(violations) > 10 else '')
+            raise ValueError(
+                f'[1min-csv] CSV 换月字段不自洽, 拒绝入库: {len(violations)} 个交易日 '
+                f'symbol 未变但 weighted_factor 突变 [{shown}]。'
+                f'多为旧版导出脚本残留的幽灵换月(wf 孤岛), 请用修复后的聚宽导出脚本重新导出后再导入。'
+            )
+
         cols = ['time', 'instrument_id', 'symbol', 'open', 'high', 'low', 'close', 'settle',
                 'volume', 'position', 'money', 'weighted_factor', 'cur_weighted_factor', 'is_rollover']
         for c in cols:
@@ -2018,22 +2058,53 @@ def build_dominant_schedule(root, trade_days):
     dom = get_dominant_series_compat(root, trade_days)
     if dom is None or len(dom) == 0:
         return pd.DataFrame()
-    items = dom.items() if isinstance(dom, pd.Series) else dom.iteritems()
+    if isinstance(dom, pd.DataFrame):
+        # 兼容返回 DataFrame 的版本: 取主力合约代码列
+        col = None
+        for c in dom.columns:
+            if any(k in str(c).lower() for k in ("symbol", "dominant", "code")):
+                col = c
+                break
+        dom = dom[col if col is not None else dom.columns[0]]
+    dom = pd.Series(dom).astype(str)
+    dom.index = pd.to_datetime(dom.index).normalize()
+    # 交易日唯一化 + 排序: 防 get_dominant_future 返回重复/乱序日期导致 wf 链错乱
+    dom = dom[~dom.index.duplicated(keep="last")].sort_index()
+    dom = dom[dom.str.len() > 0]
     rows, wf, cur_cwf, prev_symbol = [], 1.0, 1.0, None
-    for d, symbol in items:
+    for d, symbol in dom.items():
         symbol = str(symbol)
         is_roll = (prev_symbol is not None and symbol != prev_symbol)
-        if is_roll and prev_symbol is not None:
+        if is_roll:
             old_open = _get_day_open(prev_symbol, d)
             new_open = _get_day_open(symbol, d)
             if old_open and new_open and abs(new_open) > 1e-12:
-                cur_cwf = old_open / new_open
-                wf *= cur_cwf
+                ratio = old_open / new_open
+                if 0.7 < ratio < 1.3:
+                    cur_cwf = ratio
+                    wf *= cur_cwf
+                else:
+                    # 开盘比异常(取价失败/合约错配)时忽略本次换月, 保持 wf 链连续
+                    print(f"    [警告] {d.date()} 换月 {prev_symbol}->{symbol} 开盘比 {ratio:.4f} 异常, 忽略本次换月")
+                    symbol = prev_symbol
+                    is_roll = False
+            else:
+                print(f"    [警告] {d.date()} 换月 {prev_symbol}->{symbol} 开盘价取价失败, 忽略本次换月")
+                symbol = prev_symbol
+                is_roll = False
         rows.append({"td": pd.Timestamp(d).normalize(), "symbol": symbol, "is_rollover": is_roll,
                      "weighted_factor": wf, "cur_weighted_factor": cur_cwf})
         prev_symbol = symbol
-    df = pd.DataFrame(rows).drop_duplicates(subset="td", keep="last").sort_values("td")
-    return df
+    sched = pd.DataFrame(rows).drop_duplicates(subset="td", keep="last").sort_values("td")
+    if sched.empty:
+        return sched
+    # 自检: 非换月日的 wf 突变 = schedule 不一致, 打印告警便于发现
+    chg = sched["weighted_factor"].pct_change().abs()
+    bad = (chg > 1e-6) & (~sched["is_rollover"].astype(bool))
+    if bad.any():
+        for _, r in sched[bad].iterrows():
+            print(f"    [警告] {r['td'].date()} 非换月日 wf 异常变化: {r['weighted_factor']:.6f}")
+    return sched
 
 
 def assign_trading_day_local(datetime_series, trading_days):
@@ -2138,11 +2209,20 @@ def main():
                 print(f"    [警告] {code} get_dominant_future 返回空, 换月字段缺失")
             else:
                 merged["datetime"] = pd.to_datetime(merged["datetime"])
+                # 剥离旧 CSV 自带的换月字段: 每轮以最新 schedule 全区间重建, 避免新旧列冲突/幽灵残留
+                _drop = [c for c in merged.columns
+                         if c in ("symbol", "is_rollover", "weighted_factor", "cur_weighted_factor", "td")
+                         or c.endswith(("_x", "_y"))]
+                if _drop:
+                    merged = merged.drop(columns=_drop)
                 merged["td"] = assign_trading_day_local(merged["datetime"], sched["td"])
-                merged = merged.merge(sched.rename(columns={"td": "td"}), on="td", how="left")
+                merged = merged.merge(sched, on="td", how="left")
+                # schedule 缺交易日(数据洞)时沿用前一交易日值并告警
+                if merged["weighted_factor"].isna().any():
+                    n = int(merged["weighted_factor"].isna().sum())
+                    print(f"    [警告] {n} 行交易日无换月 schedule(数据洞), 已沿用前后交易日值")
                 for c in ["symbol", "weighted_factor", "cur_weighted_factor"]:
-                    if c in merged.columns:
-                        merged[c] = merged[c].ffill()
+                    merged[c] = merged[c].ffill().bfill()
                 merged["is_rollover"] = merged["is_rollover"].fillna(False).astype(bool)
                 merged = merged.drop(columns=["td"], errors="ignore")
             merged.to_csv(os.path.join(OUT_DIR, f"{code}.csv"), index=False)
@@ -2233,22 +2313,53 @@ def build_dominant_schedule(root, trade_days):
     dom = get_dominant_series_compat(root, trade_days)
     if dom is None or len(dom) == 0:
         return pd.DataFrame()
-    items = dom.items() if isinstance(dom, pd.Series) else dom.iteritems()
+    if isinstance(dom, pd.DataFrame):
+        # 兼容返回 DataFrame 的版本: 取主力合约代码列
+        col = None
+        for c in dom.columns:
+            if any(k in str(c).lower() for k in ("symbol", "dominant", "code")):
+                col = c
+                break
+        dom = dom[col if col is not None else dom.columns[0]]
+    dom = pd.Series(dom).astype(str)
+    dom.index = pd.to_datetime(dom.index).normalize()
+    # 交易日唯一化 + 排序: 防 get_dominant_future 返回重复/乱序日期导致 wf 链错乱
+    dom = dom[~dom.index.duplicated(keep="last")].sort_index()
+    dom = dom[dom.str.len() > 0]
     rows, wf, cur_cwf, prev_symbol = [], 1.0, 1.0, None
-    for d, symbol in items:
+    for d, symbol in dom.items():
         symbol = str(symbol)
         is_roll = (prev_symbol is not None and symbol != prev_symbol)
-        if is_roll and prev_symbol is not None:
+        if is_roll:
             old_open = _get_day_open(prev_symbol, d)
             new_open = _get_day_open(symbol, d)
             if old_open and new_open and abs(new_open) > 1e-12:
-                cur_cwf = old_open / new_open
-                wf *= cur_cwf
+                ratio = old_open / new_open
+                if 0.7 < ratio < 1.3:
+                    cur_cwf = ratio
+                    wf *= cur_cwf
+                else:
+                    # 开盘比异常(取价失败/合约错配)时忽略本次换月, 保持 wf 链连续
+                    print(f"    [警告] {d.date()} 换月 {prev_symbol}->{symbol} 开盘比 {ratio:.4f} 异常, 忽略本次换月")
+                    symbol = prev_symbol
+                    is_roll = False
+            else:
+                print(f"    [警告] {d.date()} 换月 {prev_symbol}->{symbol} 开盘价取价失败, 忽略本次换月")
+                symbol = prev_symbol
+                is_roll = False
         rows.append({"td": pd.Timestamp(d).normalize(), "symbol": symbol, "is_rollover": is_roll,
                      "weighted_factor": wf, "cur_weighted_factor": cur_cwf})
         prev_symbol = symbol
-    df = pd.DataFrame(rows).drop_duplicates(subset="td", keep="last").sort_values("td")
-    return df
+    sched = pd.DataFrame(rows).drop_duplicates(subset="td", keep="last").sort_values("td")
+    if sched.empty:
+        return sched
+    # 自检: 非换月日的 wf 突变 = schedule 不一致, 打印告警便于发现
+    chg = sched["weighted_factor"].pct_change().abs()
+    bad = (chg > 1e-6) & (~sched["is_rollover"].astype(bool))
+    if bad.any():
+        for _, r in sched[bad].iterrows():
+            print(f"    [警告] {r['td'].date()} 非换月日 wf 异常变化: {r['weighted_factor']:.6f}")
+    return sched
 
 
 def assign_trading_day_local(datetime_series, trading_days):
@@ -2309,11 +2420,19 @@ def main():
     sched = build_dominant_schedule(root, trade_days)
     if not sched.empty:
         out["datetime"] = pd.to_datetime(out["datetime"])
+        # 剥离已存在的换月字段: 每轮以最新 schedule 重建, 避免旧列残留
+        _drop = [c for c in out.columns
+                 if c in ("symbol", "is_rollover", "weighted_factor", "cur_weighted_factor", "td")
+                 or c.endswith(("_x", "_y"))]
+        if _drop:
+            out = out.drop(columns=_drop)
         out["td"] = assign_trading_day_local(out["datetime"], sched["td"])
         out = out.merge(sched, on="td", how="left")
+        if out["weighted_factor"].isna().any():
+            n = int(out["weighted_factor"].isna().sum())
+            print(f"    [警告] {n} 行交易日无换月 schedule(数据洞), 已沿用前后交易日值")
         for c in ["symbol", "weighted_factor", "cur_weighted_factor"]:
-            if c in out.columns:
-                out[c] = out[c].ffill()
+            out[c] = out[c].ffill().bfill()
         out["is_rollover"] = out["is_rollover"].fillna(False).astype(bool)
         out = out.drop(columns=["td"], errors="ignore")
     path = f"{OUT_DIR}/{FUTURE_CODE}_fix_night.csv"

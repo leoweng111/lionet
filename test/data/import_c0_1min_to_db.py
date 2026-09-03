@@ -39,6 +39,7 @@ from data.futures import (  # noqa: E402
     assign_trading_day_1min,
     detect_rollover_from_minute_df,
     build_minute_continuous_df_from_edb,
+    validate_rollover_fields_consistency,
 )
 
 # ================== 配置区 ==================
@@ -60,9 +61,13 @@ METHOD = "bulk_write_update"
 
 
 def read_and_merge_csvs(main_csv: str, fix_csv: str) -> pd.DataFrame:
-    """读取主 CSV 与补夜盘 CSV, 按时间戳 datetime 合并去重。"""
+    """读取主 CSV 与补夜盘 CSV, 按时间戳 datetime 合并去重。
+
+    主 CSV 在后 concat: 重叠行保留主 CSV(其换月字段 wf 链是权威标度),
+    补夜盘 CSV 只用于补充主 CSV 缺失的 bar。
+    """
     frames = []
-    for path in [main_csv, fix_csv]:
+    for path in [fix_csv, main_csv]:
         if path and os.path.exists(path):
             df = pd.read_csv(path, parse_dates=["datetime"])
             df = df.dropna(subset=["datetime"])
@@ -158,6 +163,15 @@ def main():
         out["is_rollover"] = out["is_rollover"].fillna(False).astype(bool)
         out["weighted_factor"] = pd.to_numeric(out["weighted_factor"], errors="coerce").fillna(1.0)
         out["cur_weighted_factor"] = pd.to_numeric(out["cur_weighted_factor"], errors="coerce").fillna(1.0)
+
+        # 换月字段一致性校验: 拒绝带幽灵 wf 的 CSV(symbol 未变但 wf 突变)
+        violations = validate_rollover_fields_consistency(out)
+        if violations:
+            shown = ', '.join(violations[:10]) + ('...' if len(violations) > 10 else '')
+            print(f"[错误] CSV 换月字段不自洽, 拒绝入库: {len(violations)} 个交易日 "
+                  f"symbol 未变但 weighted_factor 突变 [{shown}]。")
+            print("  多为旧版导出脚本残留的幽灵换月(wf 孤岛), 请用修复后的聚宽导出脚本重新导出后再导入。")
+            sys.exit(2)
         cols = ["time", "instrument_id", "symbol", "open", "high", "low", "close", "settle",
                 "volume", "position", "money", "weighted_factor", "cur_weighted_factor", "is_rollover"]
         for c in cols:

@@ -6,7 +6,7 @@
   "end_time": "20241231",
   "fc_freq": "1d",
   "fc_name_list": [
-    "fac_gp_0002"
+    "fac_gp_0016"
   ],
   "formulaInput": "",
   "inputMode": "db",
@@ -17,10 +17,10 @@
   "oos_end": "20251231",
   "oos_start": "20250101",
   "portfolio_adjust_method": "1D",
-  "real_oos_end": "20260330",
+  "real_oos_end": "20260830",
   "real_oos_start": "20260101",
   "risk_free_rate": false,
   "source": "joinquant",
   "start_time": "20210101",
-  "version": "20260831_gp_test"
+  "version": "20260902_gp_test_intra"
 }
