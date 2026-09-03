@@ -1785,10 +1785,19 @@ class GeneticFactorGenerator(FactorGenerator):
                     and c not in self.base_col_list]
         self.base_col_list = list(self.base_col_list) + new_cols
 
-        log.info(
-            f'[intraday_features] Computed {len(new_cols)} features from minute bars, '
-            f'extended base_col_list to {len(self.base_col_list)} fields: {new_cols}'
-        )
+        if new_cols:
+            log.info(
+                f'[intraday_features] Computed {len(new_cols)} features from minute bars, '
+                f'extended base_col_list to {len(self.base_col_list)} fields: {new_cols}'
+            )
+        else:
+            # load_base_data 对 insample/outsample 各调一次本方法; 第二次调用时特征列
+            # 已注册进 base_col_list, new_cols 为空属正常, 不代表特征未计算/未合并。
+            log.info(
+                f'[intraday_features] All {len(feature_df.columns) - 2} feature columns already '
+                f'registered in base_col_list (total {len(self.base_col_list)}), '
+                f'merged into {len(merged)} rows without adding new columns.'
+            )
         return merged
 
     def _prepare_df_for_gp(self, df: pd.DataFrame) -> pd.DataFrame:
