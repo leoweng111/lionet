@@ -3621,6 +3621,34 @@ async def api_update_price_1min_csv(params: UpdatePrice1minCsvParams):
     return {"task_id": task_id, "message": "分钟 CSV 导入任务已启动"}
 
 
+class MissingNightRangesParams(BaseModel):
+    """识别主 CSV 中缺夜盘的交易日(生成 MISSING_RANGES 列表)。"""
+    main_csv: str
+    instrument_id: str = "C0"
+
+
+@app.post("/api/market-data/missing-night-ranges")
+async def api_missing_night_ranges(params: MissingNightRangesParams):
+    """基于本机主 CSV 一键识别缺夜盘交易日, 返回 MISSING_RANGES 记录列表。
+
+    供前端步骤③使用: 导入主 CSV 后无需依赖导入任务结果, 可随时重新识别;
+    结果格式与导入任务的 missing_night_days 一致(td/bar_count/prev_td/fetch_start/fetch_end)。
+    """
+    import os as _os
+    from data.futures import find_missing_night_days_in_csv
+
+    main_csv = str(params.main_csv or '').strip()
+    if not main_csv:
+        raise HTTPException(status_code=400, detail="请先填写主 CSV 路径")
+    if not _os.path.exists(main_csv):
+        raise HTTPException(status_code=400, detail=f"主 CSV 不存在: {main_csv}")
+    try:
+        df = find_missing_night_days_in_csv(main_csv)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"识别缺夜盘失败: {e}")
+    return {"missing_night_days": df.to_dict(orient='records')}
+
+
 @app.post("/api/market-data/joinquant-scripts")
 async def api_joinquant_scripts(params: JoinquantScriptsParams):
     """生成可粘贴到聚宽 Jupyter 运行的脚本(导出主 CSV / 补夜盘 CSV), 供前端展示与一键复制。"""
@@ -3790,9 +3818,11 @@ async def api_terminate_market_data_task(task_id: str):
 @app.get("/api/market-data/task-status/{task_id}")
 async def api_market_data_task_status(task_id: str):
     """Poll market-data task status and logs."""
-    t = market_data_tasks.get(task_id)
+    # DB 优先: 任务在独立子进程中运行, 子进程通过 heartbeat 把真实状态写入 DB;
+    # 若先读内存, 会拿到启动时写入的 'running' 快照, 永远看不到 failed/completed。
+    t = _load_market_data_task_from_db(task_id)
     if t is None:
-        t = _load_market_data_task_from_db(task_id)
+        t = market_data_tasks.get(task_id)
     if t is None:
         raise HTTPException(status_code=404, detail="Task not found")
     return {

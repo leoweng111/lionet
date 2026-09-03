@@ -10,7 +10,7 @@
 用法
 ----
 1. 先在本地运行:  python -u test/data/find_missing_night_days.py
-2. 把输出的 MISSING_RANGES 列表整段复制, 粘贴到本文件下方配置区的 MISSING_RANGES;
+    2. 把输出的 MISSING_RANGES 列表整段复制, 粘贴到本文件下方配置区的 MISSING_RANGES;
 3. 在聚宽研究环境新建 notebook, 把本文件内容粘贴进单元格运行;
 4. 运行结束后, 到研究环境左侧文件树 data/fix_night/ 下载 CSV;
 5. 本地导入(upsert 覆盖):
@@ -100,25 +100,60 @@ def get_dominant_series_compat(root: str, trade_days):
 
 
 def build_dominant_schedule(root: str, trade_days) -> pd.DataFrame:
-    """用 get_dominant_future 计算每日主力/换月日/后复权因子链。"""
+    """用 get_dominant_future 计算每日主力/换月日/后复权因子链。
+
+    修复版(与主导出脚本一致):
+    - dom 规范化: 重复交易日去重(keep=last)、排序、DataFrame 兼容;
+    - 换月取价失败/比值异常时回退旧主力, wf 链保持连续并告警(旧版静默断链
+      = symbol 已变但 wf 未乘, 生成的 fix CSV 会带错标度);
+    - 非换月日 wf 突变自检告警。
+    """
     dom = get_dominant_series_compat(root, trade_days)
     if dom is None or len(dom) == 0:
         return pd.DataFrame()
-    items = dom.items() if isinstance(dom, pd.Series) else dom.iteritems()
+    if isinstance(dom, pd.DataFrame):
+        # 兼容返回 DataFrame 的版本: 取主力合约代码列
+        col = None
+        for c in dom.columns:
+            if any(k in str(c).lower() for k in ("symbol", "dominant", "code")):
+                col = c
+                break
+        dom = dom[col if col is not None else dom.columns[0]]
+    dom = pd.Series(dom).astype(str)
+    dom.index = pd.to_datetime(dom.index).normalize()
+    # 交易日唯一化 + 排序: 防 get_dominant_future 返回重复/乱序日期导致 wf 链错乱
+    dom = dom[~dom.index.duplicated(keep="last")].sort_index()
+    dom = dom[dom.str.len() > 0]
 
     rows = []
     wf = 1.0
     cur_cwf = 1.0
     prev_symbol = None
-    for d, symbol in items:
+    for d, symbol in dom.items():
         symbol = str(symbol)
         is_roll = (prev_symbol is not None and symbol != prev_symbol)
-        if is_roll and prev_symbol is not None:
+        if is_roll:
             old_open = _get_day_open(prev_symbol, d)
             new_open = _get_day_open(symbol, d)
-            if old_open and new_open and abs(new_open) > 1e-12:
-                cur_cwf = old_open / new_open
-                wf *= cur_cwf
+            # 注意: 退市合约取价可能返回 nan, `if old_open` 挡不住(nan 为 truthy), 必须显式判 isfinite
+            if (old_open is not None and new_open is not None
+                    and np.isfinite(old_open) and np.isfinite(new_open)
+                    and abs(new_open) > 1e-12):
+                ratio = old_open / new_open
+                if 0.7 < ratio < 1.3:
+                    cur_cwf = ratio
+                    wf *= cur_cwf
+                else:
+                    # 开盘比异常: 缺夜盘日距换月日较远, 旧主力往往已退市取不到有效开盘价(属常态)。
+                    # 不回退旧主力(否则链会卡死, 如 2024-07-23 后一直卡在 C2407), wf 以 1.0 近似继续;
+                    # 该 fix CSV 与主 CSV 合并导入时, symbol/wf 会按 td 覆盖为主 CSV 权威值。
+                    print(f"    [警告] {d.date()} 换月 {prev_symbol}->{symbol} 开盘比 {ratio:.4f} 异常, "
+                          f"wf 以 1.0 近似(合并导入时按主 CSV 覆盖)")
+                    is_roll = False
+            else:
+                print(f"    [警告] {d.date()} 换月 {prev_symbol}->{symbol} 开盘价取价失败, "
+                      f"wf 以 1.0 近似(合并导入时按主 CSV 覆盖)")
+                is_roll = False
         rows.append({
             "td": pd.Timestamp(d).normalize(),
             "symbol": symbol,
@@ -127,8 +162,17 @@ def build_dominant_schedule(root: str, trade_days) -> pd.DataFrame:
             "cur_weighted_factor": cur_cwf,
         })
         prev_symbol = symbol
-    df = pd.DataFrame(rows).drop_duplicates(subset="td", keep="last").sort_values("td")
-    return df
+
+    sched = pd.DataFrame(rows).drop_duplicates(subset="td", keep="last").sort_values("td")
+    if sched.empty:
+        return sched
+    # 自检: 非换月日的 wf 突变 = schedule 不一致, 打印告警便于发现
+    chg = sched["weighted_factor"].pct_change().abs()
+    bad = (chg > 1e-6) & (~sched["is_rollover"].astype(bool))
+    if bad.any():
+        for _, r in sched[bad].iterrows():
+            print(f"    [警告] {r['td'].date()} 非换月日 wf 异常变化: {r['weighted_factor']:.6f}")
+    return sched
 
 
 def assign_trading_day_local(datetime_series, trading_days):
@@ -306,6 +350,7 @@ MISSING_RANGES = [
     ('2026-06-15', '2026-06-12 20:59:00', '2026-06-15 15:00:00'),
     ('2026-07-28', '2026-07-27 20:59:00', '2026-07-28 15:00:00'),
     ('2026-08-12', '2026-08-11 20:59:00', '2026-08-12 15:00:00'),
+    ('2026-08-27', '2026-08-26 20:59:00', '2026-08-27 15:00:00'),
 ]
 
 
@@ -360,9 +405,17 @@ def main():
         out["datetime"] = pd.to_datetime(out["datetime"])
         out["td"] = assign_trading_day_local(out["datetime"], sched["td"])
         out = out.merge(sched, on="td", how="left")
+        # schedule 未覆盖的交易日(主力获取失败被跳过)会留空, 沿用相邻值并告警
+        missing_td = sorted(pd.unique(out.loc[out["symbol"].isna(), "td"]))
+        if len(missing_td) > 0:
+            shown = [pd.Timestamp(t).date().isoformat() for t in missing_td[:5]]
+            print(f"    [警告] {len(missing_td)} 个交易日主力获取失败, 换月字段沿用相邻值: {shown}...")
         for c in ["symbol", "weighted_factor", "cur_weighted_factor"]:
             if c in out.columns:
-                out[c] = out[c].ffill()
+                out[c] = out[c].ffill().bfill()
+        out["symbol"] = out["symbol"].fillna("")
+        out["weighted_factor"] = out["weighted_factor"].fillna(1.0)
+        out["cur_weighted_factor"] = out["cur_weighted_factor"].fillna(1.0)
         out["is_rollover"] = out["is_rollover"].fillna(False).astype(bool)
         out = out.drop(columns=["td"], errors="ignore")
     else:

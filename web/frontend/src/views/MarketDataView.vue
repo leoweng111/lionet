@@ -269,22 +269,43 @@
                 </el-form>
               </el-card>
 
-              <!-- 步骤③④: 识别缺夜盘 → 聚宽补拉 -->
+              <!-- 步骤③: 识别缺夜盘 → 生成 MISSING_RANGES -->
               <el-card shadow="never" class="jq-script-card" style="margin-top:12px;">
-                <template #header><span style="font-weight:600;">步骤 ③④：识别缺夜盘 → 聚宽补拉夜盘</span></template>
+                <template #header><span style="font-weight:600;">步骤 ③：识别缺夜盘 → 生成 MISSING_RANGES</span></template>
                 <el-form label-width="140px" size="small">
-                  <el-form-item label="MISSING_RANGES">
-                    <el-input v-model="missingRangesText" type="textarea" :rows="6"
-                      placeholder="步骤②导入完成后若检测到缺夜盘，会自动填入；也可手动粘贴缺夜盘列表" />
+                  <el-form-item label="主 CSV 路径">
+                    <el-input v-model="price1minParams.main_csv" placeholder="/Users/xxx/Downloads/C9999.XDCE.csv" clearable />
                   </el-form-item>
                   <el-form-item>
+                    <el-button type="primary" :loading="jqMissingLoading" :disabled="!price1minParams.main_csv?.trim()"
+                      @click="handleAnalyzeMissingNight">
+                      <el-icon v-if="!jqMissingLoading"><Search /></el-icon> 一键识别缺夜盘（生成 MISSING_RANGES）
+                    </el-button>
                     <el-button :disabled="!missingRangesText" @click="copyText(missingRangesText)">复制 MISSING_RANGES</el-button>
-                    <el-button type="primary" :loading="jqScriptLoading" @click="handleGenerateJoinquantScripts('fix')">生成补夜盘脚本</el-button>
+                  </el-form-item>
+                  <el-alert v-if="!price1minParams.main_csv?.trim()" type="warning" :closable="false" show-icon
+                    title="请先在上方填写步骤②导入用的主 CSV 路径（本机路径），本步骤将直接分析该 CSV 中缺夜盘的交易日。" />
+                  <el-form-item label="MISSING_RANGES">
+                    <el-input v-model="missingRangesText" type="textarea" :rows="6"
+                      placeholder="点击上方按钮一键生成；步骤②导入完成后若检测到缺夜盘也会自动填入，可修改后用于步骤④" />
+                  </el-form-item>
+                </el-form>
+              </el-card>
+
+              <!-- 步骤④: 聚宽补拉夜盘 -->
+              <el-card shadow="never" class="jq-script-card" style="margin-top:12px;">
+                <template #header><span style="font-weight:600;">步骤 ④：聚宽补拉夜盘（基于步骤③的 MISSING_RANGES）</span></template>
+                <el-form label-width="140px" size="small">
+                  <el-form-item>
+                    <el-button type="primary" :loading="jqScriptLoading" :disabled="!missingRangesText"
+                      @click="handleGenerateJoinquantScripts('fix')">生成补夜盘脚本</el-button>
                     <el-button :disabled="!jqFixScript" @click="copyText(jqFixScript)">一键复制补夜盘脚本</el-button>
+                    <el-button :disabled="!missingRangesText" @click="copyText(missingRangesText)">复制 MISSING_RANGES</el-button>
+                    <span style="margin-left:8px;color:#909399;font-size:12px;">MISSING_RANGES 为空时请先在步骤③生成。</span>
                   </el-form-item>
                   <el-input v-if="jqFixScript" v-model="jqFixScript" type="textarea" :rows="10" readonly />
                   <el-alert v-if="jqFixScript" type="info" :closable="false" show-icon style="margin-top:4px;"
-                    title="把补夜盘脚本粘贴到聚宽运行，到 data/fix_night/ 下载 CSV（文件名为 {合约代码}_fix_night.csv）。" />
+                    title="把补夜盘脚本粘贴到聚宽运行，到 data/fix_night/ 下载 CSV（文件名为 {合约代码}_fix_night.csv），然后到下方步骤⑤导入。" />
                 </el-form>
               </el-card>
 
@@ -637,6 +658,7 @@ import {
   updateContractPrice1min,
   updateContractPrice1minCsv,
   generateJoinquantScripts,
+  analyzeMissingNightRanges,
   checkMarketDataPrevData,
   getMarketDataTaskStatus,
   terminateMarketDataTask,
@@ -939,11 +961,14 @@ const jqExportScript = ref('')
 const jqFixScript = ref('')
 const missingRangesText = ref('')
 const jqScriptLoading = ref(false)
+const jqMissingLoading = ref(false)
+// 高亮「下一步要执行的步骤」(0-indexed, 与 el-steps 5 步对应)
 const jqActiveStep = computed(() => {
-  if (price1minParams.fix_csv?.trim()) return 4
-  if (missingRangesText.value) return 2
-  if (price1minParams.main_csv?.trim()) return 1
-  if (jqExportScript.value) return 0
+  if (price1minParams.fix_csv?.trim()) return 4        // ⑤ 导入补CSV 进行中
+  if (jqFixScript.value) return 4                        // ④ 脚本已生成 → 聚宽运行 → ⑤
+  if (missingRangesText.value) return 3                  // ③ 已有 MISSING_RANGES → 做④
+  if (price1minParams.main_csv?.trim()) return 2         // ② 已填主CSV → 做③
+  if (jqExportScript.value) return 1                     // ① 脚本已生成 → 做②
   return 0
 })
 const onPrice1minStartDateChange = async (val) => {
@@ -1067,6 +1092,29 @@ const buildMissingRangesFromResult = (result) => {
   return true
 }
 
+const handleAnalyzeMissingNight = async () => {
+  const mainCsv = price1minParams.main_csv?.trim() || ''
+  if (!mainCsv) {
+    ElMessage.error('请先填写主 CSV 路径')
+    return
+  }
+  jqMissingLoading.value = true
+  try {
+    const { data } = await analyzeMissingNightRanges({ main_csv: mainCsv })
+    if (buildMissingRangesFromResult(data)) {
+      const n = (data.missing_night_days || []).length
+      ElMessage.success(`识别完成：共 ${n} 个交易日缺夜盘，已生成 MISSING_RANGES，可到步骤④生成补夜盘脚本`)
+    } else {
+      missingRangesText.value = ''
+      ElMessage.success('识别完成：主 CSV 无缺夜盘交易日，无需补拉')
+    }
+  } catch (err) {
+    ElMessage.error('识别失败: ' + (err.response?.data?.detail || err.message))
+  } finally {
+    jqMissingLoading.value = false
+  }
+}
+
 const handleGenerateJoinquantScripts = async (mode) => {
   if (!price1minParams.csv_instrument_id) {
     ElMessage.error('请先选择合约')
@@ -1123,7 +1171,8 @@ const handleUpdatePrice1minCsv = async () => {
       currentPrice1minTaskId.value = ''
       const hasMissing = statusData && statusData.result && buildMissingRangesFromResult(statusData.result)
       if (hasMissing) {
-        ElMessage.warning('导入完成，检测到缺夜盘交易日，请按下方第 4 步生成补夜盘脚本')
+        const n = (statusData.result.missing_night_days || []).length
+        ElMessage.warning(`导入完成，检测到 ${n} 个缺夜盘交易日，已自动填入 MISSING_RANGES，请到下方步骤④生成补夜盘脚本（也可在步骤③一键重新识别）`)
       } else if (statusData && statusData.result && statusData.result.message) {
         ElMessage.success(statusData.result.message)
       }

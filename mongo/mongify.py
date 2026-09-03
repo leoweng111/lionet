@@ -10,6 +10,35 @@ from .mongoconfig import client
 from utils.logging import log
 from utils.params import PREP_PATH
 
+# 已确保过索引的 (database, collection, filter_columns) 集合, 避免重复往返 mongod
+_upsert_index_cache = set()
+
+
+def _ensure_upsert_index(database: str,
+                         collection: str,
+                         filter_column: List[str]) -> None:
+    """Ensure an index exists on the upsert filter columns before bulk_write.
+
+    曾因 continuous_contract_price_1min 缺少 (time, instrument_id, source) 索引,
+    每批 5000 条 upsert 都全表扫描, 单批耗时 25-30 分钟, 超过 socketTimeoutMS
+    触发异常; 异常被吞后导入"假成功", 且僵尸 bulk_write 命令积压卡死 mongod。
+    此处在写入前按 filter_column 建索引, 即使集合被重建/迁移也不会复发。
+    """
+    key = (database, collection, tuple(filter_column))
+    if key in _upsert_index_cache:
+        return
+    col = client[database][collection]
+    target_keys = [(c, 1) for c in filter_column]
+    # 按「key 组合」判断(而非名字): 若已存在同 key 索引(名字可能不同, 如 time_ins_src),
+    # 直接复用, 否则 MongoDB 会抛 IndexOptionsConflict(重复建同 key 不同名的索引)。
+    # 用 list_indexes 而非 index_information: 后者对带选项的索引返回 list 结构, 取 key 不稳定。
+    existing_keys = [list(ix['key'].items()) for ix in col.list_indexes() if ix.get('key')]
+    if target_keys not in existing_keys:
+        index_name = 'upsert_key_' + '_'.join(filter_column)
+        col.create_index(target_keys, name=index_name)
+        log.info(f'Created index {index_name} on {database}.{collection}.')
+    _upsert_index_cache.add(key)
+
 
 def update_data(database: str,
                 collection: str,
@@ -95,6 +124,9 @@ def bulk_write_update_data(database: str,
     # Ensure each upsert key is unique within this batch to avoid repeated writes for same record.
     assert not any(df.duplicated(subset=filter_column))
 
+    # 写入前确保 upsert 过滤列有索引, 避免每批 upsert 全表扫描导致超时/假成功(见 _ensure_upsert_index)。
+    _ensure_upsert_index(database=database, collection=collection, filter_column=filter_column)
+
     try:
         update_operations = []
         for _, row in df.iterrows():
@@ -118,8 +150,12 @@ def bulk_write_update_data(database: str,
         log.info(f'Upserted {result.upserted_count} documents into {database}.{collection}.')
 
     except Exception as e:
+        # 必须上抛: 否则调用方无法感知写入失败, 会把失败批次计为成功(假完成)。
+        # 曾因集合无 (time, instrument_id, source) 索引导致每批 upsert 全表扫描超时,
+        # 异常被吞后 53 万条导入"假成功", 实际大半数据未写入且 mongod 被积压命令卡死。
         print(f'Error occurs: {e}')
         log.info(f'Error occurs: {e}')
+        raise
 
 
 def insert_data(database: str,

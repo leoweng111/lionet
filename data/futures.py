@@ -59,7 +59,11 @@ def get_trading_days(start_date: str, end_date: str) -> List[pd.Timestamp]:
     start = pd.Timestamp(start_date)
     end = pd.Timestamp(end_date)
     all_days = pd.date_range(start, end, freq='D')
-    trading_days = [d for d in all_days if cc.is_workday(d.date())]
+    # 注意: is_workday 会把调休补班的周六/周日也算工作日, 但期货市场周末一律不开盘
+    # (即使调休上班)。周末混入日历会让周五夜盘 bar 被归属到周末日(见 assign_trading_day_1min),
+    # 导致日频聚合产出假的周末交易日、周一缺夜盘。必须显式剔除周六日。
+    trading_days = [d for d in all_days
+                    if cc.is_workday(d.date()) and d.weekday() < 5]
     return trading_days
 
 
@@ -1521,6 +1525,12 @@ def aggregate_minute_to_daily_df(df_min: pd.DataFrame, trading_days=None) -> pd.
         if c in df.columns:
             df[c] = pd.to_numeric(df[c], errors='coerce')
 
+    # 必须先按 (td, time) 排序再分组: first/last 聚合依赖组内时间序。
+    # get_data 返回的 MongoDB 自然序≈插入序, 被多次 upsert 覆盖过的交易日
+    # 行序会与时间序不一致, 导致 open/close/position 取到错误 bar(如 close
+    # 取成前夜盘价); volume/money 为 sum 不受影响, 症状是仅部分字段错。
+    df = df.sort_values(['td', 'time']).reset_index(drop=True)
+
     g = df.groupby('td')
     out = pd.DataFrame({
         'open': g['open'].first(),
@@ -1631,12 +1641,13 @@ def read_and_merge_1min_csvs(main_csv: str,
     """读取主 CSV 与补夜盘 CSV, 按分钟时间戳合并去重, 返回含 datetime 列的 DataFrame。
 
     - 主 CSV 与补 CSV 可能重叠(补 CSV 含主 CSV 缺失的部分夜盘), 按 datetime 去重(保留后者)。
+    - 每行带 _fix_src 标记(1=仅来自补 CSV, 0=来自主 CSV), 供调用方区分换月标度的权威来源。
     - 至少一个文件必须存在。
     """
     frames: List[pd.DataFrame] = []
     # 主 CSV 在后 concat, 重叠行保留主 CSV(其换月字段 wf 链是权威标度);
     # 补夜盘 CSV 只用于补充主 CSV 缺失的 bar(无重叠则整行保留)。
-    for path in [fix_csv, main_csv]:
+    for path, is_fix in [(fix_csv, 1), (main_csv, 0)]:
         if path and os.path.exists(path):
             df = pd.read_csv(path)
             if CSV_DATETIME_COL not in df.columns:
@@ -1646,6 +1657,7 @@ def read_and_merge_1min_csvs(main_csv: str,
                 raise ValueError(f'CSV 缺少时间戳列, 需要包含 "{CSV_DATETIME_COL}" 或 "time": {path}')
             df[CSV_DATETIME_COL] = pd.to_datetime(df[CSV_DATETIME_COL], errors='coerce')
             df = df.dropna(subset=[CSV_DATETIME_COL])
+            df['_fix_src'] = is_fix
             frames.append(df)
             log.info(f'[1min-csv] 读取 {path}: {len(df)} 行')
         else:
@@ -1741,7 +1753,10 @@ def build_minute_continuous_df_from_csv(main_csv: str,
         out['settle'] = out['close']
         out['time'] = pd.to_datetime(out['time'], errors='coerce')
         out['td'] = assign_trading_day_1min(out['time'])
-        _valid = out.dropna(subset=['weighted_factor'])
+        # td 级权威换月字段只由主 CSV 行构建: 补 CSV 自带的 wf/symbol 链可能因换月时旧主力
+        # 已退市、取不到开盘价而断链/卡死(如 2024-07-23 后卡在 C2407), 若让其参与会污染同 td 标度。
+        _main = out.loc[out['_fix_src'] == 0]
+        _valid = _main.dropna(subset=['weighted_factor'])
         if _valid.empty:
             _map = pd.DataFrame(columns=['td', 'symbol', 'is_rollover', 'weighted_factor', 'cur_weighted_factor'])
         else:
@@ -1752,11 +1767,19 @@ def build_minute_continuous_df_from_csv(main_csv: str,
                 'cur_weighted_factor': 'last',
             }).reset_index()
         out = out.merge(_map, on='td', how='left', suffixes=('', '_m'))
-        for c in ['symbol', 'is_rollover', 'weighted_factor', 'cur_weighted_factor']:
+        # symbol / wf / cur_wf 每行统一为 td 级主 CSV 权威值: 主 CSV 行本身同值无变化;
+        # 补 CSV 独有的 bar(整行来自 fix)其自带值(可能断链)被纠正为同 td 主 CSV 标度。
+        for c in ['symbol', 'weighted_factor', 'cur_weighted_factor']:
             mc = f'{c}_m'
             if mc in out.columns:
-                out[c] = out[c].fillna(out[mc])
+                out[c] = out[mc]
                 out = out.drop(columns=[mc])
+        # is_rollover: 主 CSV 行保留精确标记(换月日首根 bar=True); 补 CSV 的夜盘 bar 不可能是
+        # 当日换月首根 bar(换月发生在日盘 09:00), 统一置 False 后按 td 补齐。
+        out.loc[out['_fix_src'] == 1, 'is_rollover'] = False
+        if 'is_rollover_m' in out.columns:
+            out['is_rollover'] = out['is_rollover'].fillna(out['is_rollover_m'])
+            out = out.drop(columns=['is_rollover_m'])
         out = out.drop(columns=['td'])
         out['is_rollover'] = out['is_rollover'].fillna(False).astype(bool)
         out['weighted_factor'] = pd.to_numeric(out['weighted_factor'], errors='coerce').fillna(1.0)
@@ -2078,7 +2101,10 @@ def build_dominant_schedule(root, trade_days):
         if is_roll:
             old_open = _get_day_open(prev_symbol, d)
             new_open = _get_day_open(symbol, d)
-            if old_open and new_open and abs(new_open) > 1e-12:
+            # 注意: 退市合约取价可能返回 nan, `if old_open` 挡不住(nan 为 truthy), 必须显式判 isfinite
+            if (old_open is not None and new_open is not None
+                    and np.isfinite(old_open) and np.isfinite(new_open)
+                    and abs(new_open) > 1e-12):
                 ratio = old_open / new_open
                 if 0.7 < ratio < 1.3:
                     cur_cwf = ratio
@@ -2333,19 +2359,24 @@ def build_dominant_schedule(root, trade_days):
         if is_roll:
             old_open = _get_day_open(prev_symbol, d)
             new_open = _get_day_open(symbol, d)
-            if old_open and new_open and abs(new_open) > 1e-12:
+            # 注意: 退市合约取价可能返回 nan, `if old_open` 挡不住(nan 为 truthy), 必须显式判 isfinite
+            if (old_open is not None and new_open is not None
+                    and np.isfinite(old_open) and np.isfinite(new_open)
+                    and abs(new_open) > 1e-12):
                 ratio = old_open / new_open
                 if 0.7 < ratio < 1.3:
                     cur_cwf = ratio
                     wf *= cur_cwf
                 else:
-                    # 开盘比异常(取价失败/合约错配)时忽略本次换月, 保持 wf 链连续
-                    print(f"    [警告] {d.date()} 换月 {prev_symbol}->{symbol} 开盘比 {ratio:.4f} 异常, 忽略本次换月")
-                    symbol = prev_symbol
+                    # 开盘比异常: 缺夜盘日距换月日较远, 旧主力往往已退市取不到有效开盘价(属常态)。
+                    # 不回退旧主力(否则链会卡死, 如 2024-07-23 后一直卡在 C2407), wf 以 1.0 近似继续;
+                    # 该 fix CSV 与主 CSV 合并导入时, symbol/wf 会按 td 覆盖为主 CSV 权威值。
+                    print(f"    [警告] {d.date()} 换月 {prev_symbol}->{symbol} 开盘比 {ratio:.4f} 异常, "
+                          f"wf 以 1.0 近似(合并导入时按主 CSV 覆盖)")
                     is_roll = False
             else:
-                print(f"    [警告] {d.date()} 换月 {prev_symbol}->{symbol} 开盘价取价失败, 忽略本次换月")
-                symbol = prev_symbol
+                print(f"    [警告] {d.date()} 换月 {prev_symbol}->{symbol} 开盘价取价失败, "
+                      f"wf 以 1.0 近似(合并导入时按主 CSV 覆盖)")
                 is_roll = False
         rows.append({"td": pd.Timestamp(d).normalize(), "symbol": symbol, "is_rollover": is_roll,
                      "weighted_factor": wf, "cur_weighted_factor": cur_cwf})

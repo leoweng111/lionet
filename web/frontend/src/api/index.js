@@ -83,6 +83,7 @@ export const updateContractPrice = (data) => api.post('/api/market-data/update-p
 export const updateContractPrice1min = (data) => api.post('/api/market-data/update-price-1min', data)
 export const updateContractPrice1minCsv = (data) => api.post('/api/market-data/update-price-1min-csv', data)
 export const generateJoinquantScripts = (data) => api.post('/api/market-data/joinquant-scripts', data)
+export const analyzeMissingNightRanges = (data) => api.post('/api/market-data/missing-night-ranges', data)
 export const checkMarketDataPrevData = (data) => api.post('/api/market-data/check-prev-data', data)
 export const getMarketDataTaskStatus = (taskId) => api.get(`/api/market-data/task-status/${taskId}`)
 export const terminateMarketDataTask = (taskId) => api.post(`/api/market-data/terminate/${taskId}`)

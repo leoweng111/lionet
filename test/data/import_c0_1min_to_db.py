@@ -67,10 +67,11 @@ def read_and_merge_csvs(main_csv: str, fix_csv: str) -> pd.DataFrame:
     补夜盘 CSV 只用于补充主 CSV 缺失的 bar。
     """
     frames = []
-    for path in [fix_csv, main_csv]:
+    for path, is_fix in [(fix_csv, 1), (main_csv, 0)]:
         if path and os.path.exists(path):
             df = pd.read_csv(path, parse_dates=["datetime"])
             df = df.dropna(subset=["datetime"])
+            df["_fix_src"] = is_fix
             frames.append(df)
             print(f"  读取 {path}: {len(df)} 行")
         else:
@@ -141,9 +142,10 @@ def main():
         out["instrument_id"] = INSTRUMENT_ID
         out["settle"] = out["close"]
         out["time"] = pd.to_datetime(out["time"], errors="coerce")
-        # 按交易日填充换月字段: 主 CSV 提供每个交易日的值; fix 补充的 NaN bar 也按交易日取值
+        # td 级权威换月字段只由主 CSV 行构建: fix CSV 自带的 wf/symbol 链可能因换月时旧主力
+        # 已退市、取不到开盘价而断链/卡死(如 2024-07-23 后卡在 C2407), 让其参与会污染同 td 标度。
         out["td"] = assign_trading_day_1min(out["time"])
-        _valid = out.dropna(subset=["weighted_factor"])
+        _valid = out.loc[out["_fix_src"] == 0].dropna(subset=["weighted_factor"])
         if _valid.empty:
             _map = pd.DataFrame(columns=["td", "symbol", "is_rollover", "weighted_factor", "cur_weighted_factor"])
         else:
@@ -154,12 +156,20 @@ def main():
                 "cur_weighted_factor": "last",
             }).reset_index()
         out = out.merge(_map, on="td", how="left", suffixes=("", "_m"))
-        for _c in ["symbol", "is_rollover", "weighted_factor", "cur_weighted_factor"]:
+        # symbol / wf / cur_wf 每行统一为 td 级主 CSV 权威值(覆盖而非 fillna)
+        for _c in ["symbol", "weighted_factor", "cur_weighted_factor"]:
             _mc = f"{_c}_m"
             if _mc in out.columns:
-                out[_c] = out[_c].fillna(out[_mc])
+                out[_c] = out[_mc]
                 out = out.drop(columns=[_mc])
-        out = out.drop(columns=["td"])
+        # is_rollover: 主 CSV 行保留精确标记(换月日首根 bar=True); 补 CSV 的夜盘 bar
+        # 不可能是当日换月首根 bar(换月发生在日盘 09:00), 统一置 False 后按 td 补齐。
+        out.loc[out["_fix_src"] == 1, "is_rollover"] = False
+        _mc = "is_rollover_m"
+        if _mc in out.columns:
+            out["is_rollover"] = out["is_rollover"].fillna(out[_mc])
+            out = out.drop(columns=[_mc])
+        out = out.drop(columns=["td", "_fix_src"])
         out["is_rollover"] = out["is_rollover"].fillna(False).astype(bool)
         out["weighted_factor"] = pd.to_numeric(out["weighted_factor"], errors="coerce").fillna(1.0)
         out["cur_weighted_factor"] = pd.to_numeric(out["cur_weighted_factor"], errors="coerce").fillna(1.0)
